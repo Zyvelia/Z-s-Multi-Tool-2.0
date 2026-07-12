@@ -22,6 +22,8 @@ from .file_handlers import (
     pil_available, open_image, image_to_photoimage,
     rotate_image, flip_image, resize_image, convert_image, image_metadata,
     mutagen_available, pygame_available, audio_metadata, audio_artwork,
+    save_audio_metadata, EDITABLE_TAG_FIELDS,
+    save_audio_artwork, ARTWORK_SUPPORTED_SUFFIXES,
     list_archive, extract_archive, add_to_zip, create_zip,
     hex_rows, patch_bytes, CHUNK_SIZE,
 )
@@ -52,7 +54,7 @@ def _tbtn(parent, text, cmd=None, w=80, active=False) -> ctk.CTkButton:
         hover_color=BG_RAISED,
         text_color=ACCENT if active else TEXT_MID,
         border_width=1 if active else 0,
-        border_color=ACCENT if active else "transparent",
+        border_color=ACCENT if active else BORDER,
         corner_radius=5, font=(FONT, 10),
     )
 
@@ -886,7 +888,7 @@ class AudioPlayer(ctk.CTkFrame):
                 hover_color="#1a3a5c" if accent else BORDER,
                 text_color=ACCENT if accent else TEXT_MID,
                 border_width=1 if accent else 0,
-                border_color=ACCENT if accent else "transparent",
+                border_color=ACCENT if accent else BORDER,
                 corner_radius=8, font=(FONT, 12)
             )
 
@@ -909,13 +911,24 @@ class AudioPlayer(ctk.CTkFrame):
             command=self._on_volume,
         ).pack(fill="x", expand=True)
 
+        btn_row = ctk.CTkFrame(card, fg_color="transparent")
+        btn_row.pack(pady=(0, 4))
+
         ctk.CTkButton(
-            card, text="✏  Rename file",
+            btn_row, text="✏  Rename file",
             width=120, height=28,
             fg_color="transparent", hover_color=BG_RAISED,
             text_color=TEXT_LOW, border_width=0,
             font=(FONT, 10), command=self._rename
-        ).pack(pady=(0, 4))
+        ).pack(side="left", padx=(0, 4))
+
+        ctk.CTkButton(
+            btn_row, text="🏷  Edit tags",
+            width=120, height=28,
+            fg_color="transparent", hover_color=BG_RAISED,
+            text_color=TEXT_LOW, border_width=0,
+            font=(FONT, 10), command=self._edit_tags
+        ).pack(side="left")
 
         self._status = _status_label(self)
 
@@ -1017,6 +1030,148 @@ class AudioPlayer(ctk.CTkFrame):
             self._status.configure(text=f"Renamed to {dest.name}")
         except OSError as e:
             messagebox.showerror("Rename failed", str(e))
+
+    def _edit_tags(self):
+        if not mutagen_available():
+            messagebox.showerror(
+                "Not Available",
+                "mutagen isn't installed — run:  pip install mutagen"
+            )
+            return
+
+        current = audio_metadata(self.path)  # capitalized display keys
+        artwork_supported = self.path.suffix.lower() in ARTWORK_SUPPORTED_SUFFIXES
+
+        # holds a pending new-artwork choice until Save is pressed, since
+        # writing it immediately on file-pick would apply it even if the
+        # user then hits Cancel
+        pending = {"bytes": None, "mime": None}
+
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Edit Tags")
+        dialog.geometry("380x560" if artwork_supported else "360x420")
+        dialog.configure(fg_color=BG_PANEL)
+        dialog.transient(self.winfo_toplevel())
+        dialog.grab_set()  # modal — blocks interaction with the main window
+
+        ctk.CTkLabel(
+            dialog, text=self.path.name,
+            text_color=TEXT_LOW, font=(FONT, 10),
+            wraplength=340, anchor="w", justify="left"
+        ).pack(fill="x", padx=20, pady=(16, 8))
+
+        # ── artwork ──────────────────────────────────────
+        art_photo_ref = {"img": None}  # keep a reference so Tk doesn't GC it
+
+        if artwork_supported:
+            art_row = ctk.CTkFrame(dialog, fg_color="transparent")
+            art_row.pack(fill="x", padx=20, pady=(0, 10))
+
+            art_preview = ctk.CTkLabel(
+                art_row, text="🎵", font=(FONT, 30), text_color="#1e2d3d",
+                fg_color=BG_RAISED, corner_radius=8, width=72, height=72
+            )
+            art_preview.pack(side="left")
+
+            existing_art = audio_artwork(self.path)
+            if existing_art and pil_available():
+                try:
+                    from PIL import Image, ImageTk
+                    import io
+                    img = Image.open(io.BytesIO(existing_art)).resize((72, 72))
+                    art_photo_ref["img"] = ImageTk.PhotoImage(img)
+                    art_preview.configure(text="", image=art_photo_ref["img"])
+                except Exception:
+                    pass
+
+            def _choose_image():
+                if not pil_available():
+                    messagebox.showerror(
+                        "Not Available",
+                        "Pillow isn't installed — run:  pip install pillow"
+                    )
+                    return
+                path = filedialog.askopenfilename(
+                    title="Choose cover art",
+                    filetypes=[("Image files", "*.jpg *.jpeg *.png")]
+                )
+                if not path:
+                    return
+                try:
+                    data = Path(path).read_bytes()
+                    mime = "image/png" if path.lower().endswith(".png") else "image/jpeg"
+                    from PIL import Image, ImageTk
+                    import io
+                    img = Image.open(io.BytesIO(data)).resize((72, 72))
+                    art_photo_ref["img"] = ImageTk.PhotoImage(img)
+                    art_preview.configure(text="", image=art_photo_ref["img"])
+                    pending["bytes"] = data
+                    pending["mime"] = mime
+                except Exception as e:
+                    messagebox.showerror("Couldn't Load Image", str(e))
+
+            art_btns = ctk.CTkFrame(art_row, fg_color="transparent")
+            art_btns.pack(side="left", padx=(12, 0), fill="y")
+
+            ctk.CTkButton(
+                art_btns, text="Choose Image...", height=28,
+                fg_color=BG_RAISED, hover_color=BORDER, text_color=TEXT_MID,
+                font=(FONT, 10), command=_choose_image
+            ).pack(anchor="w")
+
+        # ── text fields ──────────────────────────────────
+        entries: dict[str, ctk.CTkEntry] = {}
+        field_labels = {
+            "title": "Title", "artist": "Artist", "album": "Album",
+            "date": "Year", "tracknumber": "Track #", "genre": "Genre",
+        }
+
+        for field in EDITABLE_TAG_FIELDS:
+            ctk.CTkLabel(
+                dialog, text=field_labels.get(field, field.capitalize()),
+                text_color=TEXT_MID, font=(FONT, 10, "bold"), anchor="w"
+            ).pack(fill="x", padx=20, pady=(6, 2))
+
+            entry = ctk.CTkEntry(
+                dialog, height=32, fg_color=BG_RAISED,
+                border_width=1, border_color=BORDER, text_color=TEXT_HI,
+                font=(FONT, 11)
+            )
+            entry.insert(0, current.get(field_labels.get(field, field.capitalize()), ""))
+            entry.pack(fill="x", padx=20)
+            entries[field] = entry
+
+        status_lbl = ctk.CTkLabel(dialog, text="", text_color=RED, font=(FONT, 10))
+        status_lbl.pack(fill="x", padx=20, pady=(8, 0))
+
+        def _do_save():
+            new_tags = {field: entry.get() for field, entry in entries.items()}
+            try:
+                save_audio_metadata(self.path, new_tags)
+                if pending["bytes"] is not None:
+                    save_audio_artwork(self.path, pending["bytes"], pending["mime"])
+            except Exception as e:
+                status_lbl.configure(text=f"Save failed: {e}")
+                return
+            dialog.destroy()
+            self._load_meta()
+            self._status.configure(text="Tags updated")
+
+        btn_row = ctk.CTkFrame(dialog, fg_color="transparent")
+        btn_row.pack(fill="x", padx=20, pady=16)
+
+        ctk.CTkButton(
+            btn_row, text="Cancel", width=100, height=32,
+            fg_color=BG_RAISED, hover_color=BORDER, text_color=TEXT_MID,
+            command=dialog.destroy
+        ).pack(side="left")
+
+        ctk.CTkButton(
+            btn_row, text="Save", width=100, height=32,
+            fg_color=ACCENT_GLOW, hover_color="#1a3a5c", text_color=ACCENT,
+            border_width=1, border_color=ACCENT,
+            command=_do_save
+        ).pack(side="right")
 
     def save(self, path=None): pass
     def save_as(self): pass

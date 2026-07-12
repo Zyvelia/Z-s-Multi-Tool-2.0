@@ -124,6 +124,48 @@ def audio_metadata(path: str | Path) -> dict:
         return {}
 
 
+# Tag keys accepted by save_audio_metadata, in the order the editor UI
+# should present them.
+EDITABLE_TAG_FIELDS = ["title", "artist", "album", "date", "tracknumber", "genre"]
+
+
+def save_audio_metadata(path: str | Path, tags: dict) -> None:
+    """
+    Write tag values back to the audio file using mutagen's "easy" tag
+    interface, which normalizes the same key names (title/artist/album/
+    date/tracknumber/genre) across MP3 (ID3), FLAC, OGG Vorbis, and
+    M4A/MP4 — so the caller doesn't need format-specific logic.
+
+    `tags` keys are matched case-insensitively against EDITABLE_TAG_FIELDS.
+    A blank/whitespace-only value removes that tag instead of writing an
+    empty string. Raises on failure (unsupported format, read-only file,
+    etc.) — callers should catch and show the user what went wrong, since
+    tag writing can fail for reasons outside their control (locked file,
+    missing write permission, corrupt existing tag block).
+    """
+    from mutagen import File as MutagenFile
+
+    f = MutagenFile(str(path), easy=True)
+    if f is None:
+        raise ValueError("Unrecognized or unsupported audio format")
+
+    if f.tags is None:
+        f.add_tags()
+
+    for key, value in tags.items():
+        key = key.strip().lower()
+        if key not in EDITABLE_TAG_FIELDS:
+            continue
+        value = (value or "").strip()
+        if not value:
+            if key in f.tags:
+                del f.tags[key]
+            continue
+        f.tags[key] = value
+
+    f.save()
+
+
 def audio_artwork(path: str | Path) -> Optional[bytes]:
     """Try to extract embedded album artwork bytes."""
     try:
@@ -142,7 +184,64 @@ def audio_artwork(path: str | Path) -> Optional[bytes]:
             return bytes(covers[0])
     except Exception:
         pass
+    try:
+        from mutagen.flac import FLAC
+        tags = FLAC(str(path))
+        if tags.pictures:
+            return tags.pictures[0].data
+    except Exception:
+        pass
     return None
+
+
+ARTWORK_SUPPORTED_SUFFIXES = (".mp3", ".m4a", ".mp4", ".m4b", ".flac")
+
+
+def save_audio_artwork(path: str | Path, image_bytes: bytes, mime: str = "image/jpeg") -> None:
+    """
+    Embeds cover art into the audio file, replacing any existing artwork.
+    Supports the same formats audio_artwork() can read back:
+        - MP3   -> ID3 APIC frame
+        - M4A/MP4/M4B -> MP4 'covr' atom
+        - FLAC  -> Picture block
+
+    Raises ValueError for any other format, so the caller can tell the
+    user artwork editing isn't supported here rather than silently no-op.
+    """
+    suffix = Path(path).suffix.lower()
+
+    if suffix == ".mp3":
+        from mutagen.id3 import ID3, APIC, ID3NoHeaderError
+        try:
+            tags = ID3(str(path))
+        except ID3NoHeaderError:
+            tags = ID3()
+        tags.delall("APIC")  # drop existing art so we don't accumulate duplicates
+        tags.add(APIC(encoding=3, mime=mime, type=3, desc="Cover", data=image_bytes))
+        tags.save(str(path))
+        return
+
+    if suffix in (".m4a", ".mp4", ".m4b"):
+        from mutagen.mp4 import MP4, MP4Cover
+        tags = MP4(str(path))
+        fmt = MP4Cover.FORMAT_PNG if mime == "image/png" else MP4Cover.FORMAT_JPEG
+        tags["covr"] = [MP4Cover(image_bytes, imageformat=fmt)]
+        tags.save()
+        return
+
+    if suffix == ".flac":
+        from mutagen.flac import FLAC, Picture
+        tags = FLAC(str(path))
+        pic = Picture()
+        pic.data = image_bytes
+        pic.type = 3  # "front cover" per ID3/FLAC picture-type convention
+        pic.mime = mime
+        tags.clear_pictures()
+        tags.add_picture(pic)
+        tags.save()
+        return
+
+    raise ValueError(f"Artwork editing isn't supported for {suffix} files")
 
 
 # ── Archive ────────────────────────────────────────────────
