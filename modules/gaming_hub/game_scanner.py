@@ -3,6 +3,14 @@ import re
 import json
 import string
 
+try:
+    import winreg
+except ImportError:
+    # Registry access is Windows-only. On any other platform the
+    # registry-based scanners below just return an empty list instead
+    # of failing at import time.
+    winreg = None
+
 from .models import Game
 from core import paths
 
@@ -21,6 +29,15 @@ class GameScanner:
         r"Program Files\Steam\steamapps",
         r"SteamLibrary\steamapps",
         r"Steam\steamapps",
+    ]
+
+    # Default GOG Galaxy install root on a given drive. Galaxy only lets
+    # you set one library root at a time, but people commonly end up with
+    # a "GOG Games" folder on more than one drive over time (reinstalls,
+    # moving to a bigger drive, etc.) — so, like Steam, every drive gets
+    # checked rather than assuming everything is on C:.
+    GOG_SUBPATHS = [
+        r"GOG Games",
     ]
 
     def __init__(self):
@@ -51,6 +68,17 @@ class GameScanner:
         candidates = []
         for drive in drives:
             for sub in self.STEAM_SUBPATHS:
+                candidates.append(os.path.join(f"{drive}\\", sub))
+        return candidates
+
+    def gog_candidates_for_drives(self, drives):
+        """
+        Builds the list of "GOG Games" folder paths to check across the
+        given drives, same idea as steam_candidates_for_drives.
+        """
+        candidates = []
+        for drive in drives:
+            for sub in self.GOG_SUBPATHS:
                 candidates.append(os.path.join(f"{drive}\\", sub))
         return candidates
 
@@ -243,15 +271,274 @@ class GameScanner:
 
         return games
 
+    @staticmethod
+    def _reg_value(key, name):
+        """Reads a single registry value, returning None if it's missing
+        instead of raising — every registry-based scanner below leans on
+        this since not every game's entry has every field populated."""
+        try:
+            value, _ = winreg.QueryValueEx(key, name)
+            return value
+        except FileNotFoundError:
+            return None
+
+    def _iter_subkeys(self, hive, key_path):
+        """Yields (name, opened key) for every subkey under key_path, or
+        nothing at all if the key doesn't exist (launcher not installed)
+        or winreg isn't available (non-Windows)."""
+        if winreg is None:
+            return
+
+        try:
+            root_key = winreg.OpenKey(hive, key_path)
+        except FileNotFoundError:
+            return
+        except Exception as e:
+            print(f"Registry open error ({key_path}): {e}")
+            return
+
+        with root_key:
+            index = 0
+            while True:
+                try:
+                    subkey_name = winreg.EnumKey(root_key, index)
+                except OSError:
+                    break
+                index += 1
+
+                try:
+                    with winreg.OpenKey(root_key, subkey_name) as subkey:
+                        yield subkey_name, subkey
+                except Exception as e:
+                    print(f"Registry subkey error ({key_path}\\{subkey_name}): {e}")
+
+    def _scan_gog_registry(self):
+        """
+        Scans GOG Galaxy's registry entries for installed games. GOG
+        writes one subkey per installed game under Games, holding the
+        display name, install path, and launch exe — checks both the
+        64-bit (WOW6432Node) and 32-bit registry locations since which
+        one GOG uses depends on the installed Python/OS bitness.
+
+        Covers every drive automatically (each entry's "path" is already
+        the full install location), but only catches games GOG actually
+        wrote a registry entry for — see scan_gog_folder() for the
+        drive-scan fallback that catches everything else.
+        """
+        games = []
+        seen_ids = set()
+
+        key_paths = [
+            r"SOFTWARE\WOW6432Node\GOG.com\Games",
+            r"SOFTWARE\GOG.com\Games",
+        ]
+
+        for key_path in key_paths:
+            for game_id, game_key in self._iter_subkeys(winreg.HKEY_LOCAL_MACHINE if winreg else None, key_path):
+                if game_id in seen_ids:
+                    continue
+                seen_ids.add(game_id)
+
+                game_name = self._reg_value(game_key, "gameName")
+                install_path = self._reg_value(game_key, "path")
+                exe_name = self._reg_value(game_key, "exe")
+
+                if not game_name or not install_path:
+                    continue
+
+                if game_name.lower() in self.blocked_games:
+                    continue
+
+                exe = ""
+                if exe_name:
+                    candidate = exe_name if os.path.isabs(exe_name) else os.path.join(install_path, exe_name)
+                    if os.path.exists(candidate):
+                        exe = candidate
+                if not exe:
+                    exe = self.find_exe(install_path)
+
+                if exe:
+                    games.append(
+                        Game(
+                            name=game_name,
+                            path=install_path,
+                            launcher="GOG",
+                            exe_path=exe
+                        )
+                    )
+
+        return games
+
+    def scan_gog_folder(self, root_path):
+        """
+        Scans a "GOG Games" style folder for installed games, reading the
+        goggame-<id>.info manifest Galaxy drops inside each game's own
+        folder (same idea as Steam's appmanifest_*.acf files). Falls back
+        to the folder name itself if a game's .info file is missing or
+        unreadable, so a game still shows up even without a clean name.
+
+        This exists as a companion to _scan_gog_registry() — it catches
+        games on a drive that never got (or lost) a registry entry, e.g.
+        an offline/standalone installer, a moved install, or a restored
+        backup.
+        """
+        games = []
+
+        if not os.path.exists(root_path):
+            return games
+
+        for entry in os.listdir(root_path):
+            game_dir = os.path.join(root_path, entry)
+
+            if not os.path.isdir(game_dir):
+                continue
+
+            game_name = None
+            try:
+                for fname in os.listdir(game_dir):
+                    if fname.lower().startswith("goggame-") and fname.lower().endswith(".info"):
+                        try:
+                            with open(
+                                os.path.join(game_dir, fname),
+                                "r", encoding="utf-8", errors="ignore"
+                            ) as f:
+                                info = json.load(f)
+                            game_name = info.get("name")
+                        except Exception as e:
+                            print(f"GOG info file error ({fname}): {e}")
+                        break
+            except Exception as e:
+                print(f"GOG folder read error ({game_dir}): {e}")
+
+            if not game_name:
+                game_name = entry  # no/unreadable manifest — folder name is the best we've got
+
+            if game_name.lower() in self.blocked_games:
+                continue
+
+            exe = self.find_exe(game_dir)
+
+            if exe:
+                games.append(
+                    Game(
+                        name=game_name,
+                        path=game_dir,
+                        launcher="GOG",
+                        exe_path=exe
+                    )
+                )
+
+        return games
+
+    def scan_gog_library(self, drives=None):
+        """
+        Combines both GOG detection methods and de-duplicates the result
+        by resolved exe path:
+          1. Registry entries — covers every Galaxy-installed game
+             regardless of drive, as long as GOG actually wrote one.
+          2. A "GOG Games" folder scan across the given drives (or every
+             detected drive if none given) — catches installs that don't
+             have a registry entry for whatever reason.
+        """
+        games = {}
+
+        for g in self._scan_gog_registry():
+            games[os.path.normcase(g.exe_path)] = g
+
+        scan_drives = drives if drives is not None else self.detect_drives()
+        for folder in self.gog_candidates_for_drives(scan_drives):
+            for g in self.scan_gog_folder(folder):
+                key = os.path.normcase(g.exe_path)
+                if key not in games:
+                    games[key] = g
+
+        return list(games.values())
+
+    def scan_ubisoft_library(self):
+        """
+        Scans Ubisoft Connect's registry entries for installed games.
+        Unlike GOG/Epic, Ubisoft's registry only stores an install
+        directory per game ID — no display name — so the folder name is
+        used as the game's name instead, the same fallback pattern
+        already used above for a Steam manifest missing its own name.
+        """
+        games = []
+        key_path = r"SOFTWARE\WOW6432Node\Ubisoft\Launcher\Installs"
+
+        for game_id, game_key in self._iter_subkeys(winreg.HKEY_LOCAL_MACHINE if winreg else None, key_path):
+            install_dir = self._reg_value(game_key, "InstallDir")
+
+            if not install_dir or not os.path.exists(install_dir):
+                continue
+
+            game_name = os.path.basename(os.path.normpath(install_dir))
+
+            if game_name.lower() in self.blocked_games:
+                continue
+
+            exe = self.find_exe(install_dir)
+
+            if exe:
+                games.append(
+                    Game(
+                        name=game_name,
+                        path=install_dir,
+                        launcher="Ubisoft Connect",
+                        exe_path=exe
+                    )
+                )
+
+        return games
+
+    def scan_ea_library(self):
+        """
+        Scans EA/Origin's registry entries for installed games. Both the
+        legacy Origin client and the current EA App still register
+        installed titles the same way, under 'Origin Games' — each
+        subkey has a DisplayName and Install Dir.
+        """
+        games = []
+        key_path = r"SOFTWARE\WOW6432Node\Origin Games"
+
+        for game_id, game_key in self._iter_subkeys(winreg.HKEY_LOCAL_MACHINE if winreg else None, key_path):
+            install_dir = self._reg_value(game_key, "Install Dir")
+
+            if not install_dir or not os.path.exists(install_dir):
+                continue
+
+            game_name = self._reg_value(game_key, "DisplayName") or \
+                os.path.basename(os.path.normpath(install_dir))
+
+            if game_name.lower() in self.blocked_games:
+                continue
+
+            exe = self.find_exe(install_dir)
+
+            if exe:
+                games.append(
+                    Game(
+                        name=game_name,
+                        path=install_dir,
+                        launcher="EA / Origin",
+                        exe_path=exe
+                    )
+                )
+
+        return games
+
     def scan(self, drives=None):
         """
         Scans Steam library paths across the given drives (or every
-        detected drive, if none given) plus the Epic Games Launcher's
-        manifest folder for installed games.
+        detected drive, if none given), plus the Epic Games Launcher's
+        manifest folder, and GOG Galaxy / Ubisoft Connect / EA App
+        (Origin)'s registry entries for installed games.
 
         drives: optional list like ["C:", "D:"] — pass this to limit
         scanning to specific drives (from the Settings tab). Leave as
-        None to auto-detect and scan every drive on the machine.
+        None to auto-detect and scan every drive on the machine. Only
+        Steam is drive-scanned this way; the other launchers track
+        install locations centrally (a manifest folder or the registry)
+        regardless of which drive games actually live on.
         """
         # 2. At the very top of scan(): Add this line
         self.blocked_games = self.load_blocked()
@@ -271,6 +558,10 @@ class GameScanner:
         games.extend(
             self.scan_epic_library()
         )
+
+        games.extend(self.scan_gog_library(drives=scan_drives))
+        games.extend(self.scan_ubisoft_library())
+        games.extend(self.scan_ea_library())
 
         return games
 

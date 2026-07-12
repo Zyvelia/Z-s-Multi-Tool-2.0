@@ -441,8 +441,10 @@ class GamingHubUI(ctk.CTkFrame):
         self._section(panel, "Drives to Scan")
         self._label(
             panel,
-            "Steam and Epic can be installed on any drive. Uncheck a "
-            "drive to skip it — useful for slow external/network drives.",
+            "Steam and GOG can be installed on any drive, so this filters "
+            "scanning for both of them. Epic, Ubisoft Connect, and "
+            "EA/Origin track installs centrally and are always scanned "
+            "regardless of which drives are checked here.",
             size=11, color=TEXT_LOW
         ).pack(anchor="w", padx=20, pady=(0, 6))
 
@@ -717,7 +719,7 @@ class GamingHubUI(ctk.CTkFrame):
             wrap.pack(fill="x", padx=4, pady=60)
             self._label(wrap, "No games found",
                         size=15, weight="bold", color=TEXT_MID).pack(pady=(28, 4))
-            self._label(wrap, "Press  ⟳ Scan  to search your Steam and Epic libraries.",
+            self._label(wrap, "Press  ⟳ Scan  to search your game libraries.",
                         size=11, color=TEXT_LOW).pack(pady=(0, 28))
             return
 
