@@ -1,0 +1,36 @@
+# Z's Multi Tool - dependencies
+# Generated with pipreqs (scans actual imports) + corrected against
+# `pip show` output for the packages pipreqs guessed instead of detecting locally.
+
+cryptography==48.0.0
+customtkinter==6.0.0
+mutagen==1.47.0
+numpy==2.5.1
+packaging==26.0
+pillow==12.3.0
+psutil==7.2.2
+pygame==2.6.1
+pyperclip==1.11.0
+pypresence==4.6.1
+pystray==0.19.5
+python-nmap==0.7.1
+python-vlc==3.0.21203
+requests==2.34.2
+scapy==2.7.0
+sounddevice==0.5.5
+soundfile==0.14.0
+yt-dlp==2026.6.9
+
+# ---
+# youtube_dl removed: it's imported in code but isn't actually installed on
+# the dev machine (`pip show youtube_dl` -> not found), and yt-dlp above is
+# what the yt_downloader module actually uses. If some code path truly needs
+# the old youtube_dl package too, add it back manually.
+#
+# NOT on PyPI, required separately:
+#   - VLC (media player itself — python-vlc just talks to a real VLC install
+#     or libvlc.dll + plugins folder sitting next to the app)
+#   - Npcap + Nmap (system tools required by scapy / python-nmap for the
+#     network_auditor module's packet capture / port scanning)
+#
+# Installed via: pip install -r requirements.txt

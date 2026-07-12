@@ -1,0 +1,625 @@
+{
+  "2XKO": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "2XKO/Live/Lion/Binaries/Win64/Lion-Win64-Shipping.exe"
+  },
+  "Age of Empires IV": {
+    "category": "Game",
+    "developer": "Relic Entertainment",
+    "publisher": "Xbox Game Studios",
+    "platform": "PC",
+    "exe": "Age of Empires IV/RelicCardinal.exe"
+  },
+  "Among Us": {
+    "category": "Game",
+    "developer": "Innersloth",
+    "publisher": "Innersloth",
+    "platform": "PC",
+    "exe": "Among Us/Among Us.exe"
+  },
+  "Apex Legends": {
+    "category": "Game",
+    "developer": "Respawn Entertainment",
+    "publisher": "Electronic Arts",
+    "platform": "PC",
+    "exe": "Apex Legends/r5apex.exe"
+  },
+  "Arc Raiders": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "Arc Raiders/PioneerGame.exe"
+  },
+  "Arena Breakout Infinite": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "Arena Breakout Infinite/ABInfinite/Binaries/Win64/UAGame.exe"
+  },
+  "ARK: Survival Ascended": {
+    "category": "Game",
+    "developer": "Studio Wildcard",
+    "publisher": "Studio Wildcard",
+    "platform": "PC",
+    "exe": "ARK Survival Ascended/ShooterGame/Binaries/Win64/ArkAscended.exe"
+  },
+  "Arknights Endfield": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "Arknights Endfield/EndField Game/Endfield.exe"
+  },
+  "Baldur's Gate 3": {
+    "category": "Game",
+    "developer": "Larian Studios",
+    "publisher": "Larian Studios",
+    "platform": "PC",
+    "exe": "Baldurs Gate 3/bin/bg3_dx11.exe"
+  },
+  "BattleBit Remastered": {
+    "category": "Game",
+    "developer": "SgtOkiDoki",
+    "publisher": "Green Man Gaming Publishing",
+    "platform": "PC",
+    "exe": "BattleBit Remastered/BattleBit.exe"
+  },
+  "Black Desert Online": {
+    "category": "Game",
+    "developer": "Pearl Abyss",
+    "publisher": "Pearl Abyss",
+    "platform": "PC",
+    "exe": "Black Desert Online/BlackDesert64.exe"
+  },
+  "Blue Protocol Star Resonance": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "Blue Protocol Star Resonance/bpsr/BPSR_STEAM.exe"
+  },
+  "Borderlands 2": {
+    "category": "Game",
+    "developer": "Gearbox Software",
+    "publisher": "2K",
+    "platform": "PC",
+    "exe": "Borderlands 2/Binaries/Win64/Borderlands2.exe",
+    "icon": "icons/borderlands2.png"
+  },
+  "Borderlands 3": {
+    "category": "Game",
+    "developer": "Gearbox Software",
+    "publisher": "2K",
+    "platform": "PC",
+    "exe": "Borderlands 3/OakGame/Binaries/Win64/Borderlands3.exe",
+    "icon": "icons/borderlands3.png"
+  },
+  "Brawlhalla": {
+    "category": "Game",
+    "developer": "Blue Mammoth Games",
+    "publisher": "Ubisoft",
+    "platform": "PC",
+    "exe": "Brawlhalla/Brawlhalla.exe"
+  },
+  "Civilization VI": {
+    "category": "Game",
+    "developer": "Firaxis Games",
+    "publisher": "2K",
+    "platform": "PC",
+    "exe": "Sid Meier's Civilization VI/Base/Binaries/Win64Steam/CivilizationVI.exe"
+  },
+  "Comet Browser": {
+    "category": "Application",
+    "developer": "Perplexity AI",
+    "publisher": "Perplexity AI",
+    "platform": "PC",
+    "exe": "Comet/Perplexity/Comet/Application/comet.exe"
+  },
+  "Counter-Strike 2": {
+    "category": "Game",
+    "developer": "Valve",
+    "publisher": "Valve",
+    "platform": "PC",
+    "exe": "Counter-Strike Global Offensive/game/bin/win64/cs2.exe"
+  },
+  "Cyberpunk 2077": {
+    "category": "Game",
+    "developer": "CD Projekt Red",
+    "publisher": "CD Projekt",
+    "platform": "PC",
+    "exe": "Cyberpunk 2077/bin/x64/Cyberpunk2077.exe"
+  },
+  "DayZ": {
+    "category": "Game",
+    "developer": "Bohemia Interactive",
+    "publisher": "Bohemia Interactive",
+    "platform": "PC",
+    "exe": "DayZ/DayZ_x64.exe"
+  },
+  "Dead by Daylight": {
+    "category": "Game",
+    "developer": "Behaviour Interactive",
+    "publisher": "Behaviour Interactive",
+    "platform": "PC",
+    "exe": "DeadByDaylight/Binaries/Win64/DeadByDaylight-Win64-Shipping.exe"
+  },
+  "Deep Rock Galactic": {
+    "category": "Game",
+    "developer": "Ghost Ship Games",
+    "publisher": "Coffee Stain Publishing",
+    "platform": "PC",
+    "exe": "Deep Rock Galactic/FSD/Binaries/Win64/FSD-Win64-Shipping.exe"
+  },
+  "Delta Force": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "Delta Force/Game/DeltaForce/Binaries/Win64/DeltaForceClient-Win64-Shipping.exe"
+  },
+  "Destiny 2": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "Destiny 2/destiny2.exe"
+  },
+  "Diablo IV": {
+    "category": "Game",
+    "developer": "Blizzard Entertainment",
+    "publisher": "Blizzard Entertainment",
+    "platform": "PC",
+    "exe": "Diablo IV/Diablo IV.exe"
+  },
+  "Dota 2": {
+    "category": "Game",
+    "developer": "Valve",
+    "publisher": "Valve",
+    "platform": "PC",
+    "exe": "dota 2 beta/game/bin/win64/dota2.exe"
+  },
+  "Duet Night Abyss": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "Duet Night Abyss/EM-Win64-Shipping.exe"
+  },
+  "EA Sports FC 26": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "EA SPORTS FC 26/FC26.exe"
+  },
+  "Elden Ring": {
+    "category": "Game",
+    "developer": "FromSoftware",
+    "publisher": "Bandai Namco",
+    "platform": "PC",
+    "exe": "ELDEN RING/Game/eldenring.exe"
+  },
+  "EMPULSE": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "EMPULSE Demo/Orion/Binaries/Win64/OrionClient-Win64-Shipping.exe"
+  },
+  "Enginefall": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "Enginefall Demo/Coltrane/Binaries/Win64/ColtraneClient-Win64-Shipping.exe"
+  },
+  "Escape from Tarkov": {
+    "category": "Game",
+    "developer": "Battlestate Games",
+    "publisher": "Battlestate Games",
+    "platform": "PC",
+    "exe": "Escape from Tarkov/EscapeFromTarkov.exe"
+  },
+  "EscapeTheBackrooms": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "EscapeTheBackrooms/Win64/Backrooms-Win64-Shipping.exe"
+  },
+  "Fall Guys": {
+    "category": "Game",
+    "developer": "Mediatonic",
+    "publisher": "Epic Games",
+    "platform": "PC",
+    "exe": "Fall Guys/FallGuys_client_game.exe"
+  },
+  "Fallout 4": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "Fallout 4/Fallout4.exe"
+  },
+  "Fallout 76": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "Fallout76/Fallout76.exe"
+  },
+  "Final Fantasy XIV": {
+    "category": "Game",
+    "developer": "Square Enix",
+    "publisher": "Square Enix",
+    "platform": "PC",
+    "exe": "FINAL FANTASY XIV - A Realm Reborn/game/ffxiv_dx11.exe"
+  },
+  "Fortnite": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "Fortnite/FortniteGame/Binaries/Win64/FortniteClient-Win64-Shipping.exe"
+  },
+  "GearUP": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "GearUP/Gearup_ball.exe"
+  },
+  "Genshin Impact": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "Genshin Impact/Genshin Impact game/GenshinImpact.exe"
+  },
+  "GODDESS OF VICTORY: NIKKE": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "NIKKE/NIKKE/Game/nikke.exe"
+  },
+  "Grand Theft Auto V": {
+    "category": "Game",
+    "developer": "Rockstar North",
+    "publisher": "Rockstar Games",
+    "platform": "PC",
+    "exe": "Grand Theft Auto V/GTA5.exe"
+  },
+  "Grounded 2": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "Grounded 2/WinGRTS/Grounded2-WinGRTS-Shipping.exe"
+  },
+  "Hearthstone": {
+    "category": "Game",
+    "developer": "Blizzard Entertainment",
+    "publisher": "Blizzard Entertainment",
+    "platform": "PC",
+    "exe": "Hearthstone/Hearthstone.exe"
+  },
+  "Helldivers 2": {
+    "category": "Game",
+    "developer": "Arrowhead Game Studios",
+    "publisher": "PlayStation PC LLC",
+    "platform": "PC",
+    "exe": "Helldivers 2/bin/helldivers2.exe"
+  },
+  "Highguard": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "Highguard/Win64/HighguardClient-Win64-Shipping.exe"
+  },
+  "Honkai: Star Rail": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "Star Rail/Games/StarRail.exe"
+  },
+  "Hunt: Showdown 1896": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "Hunt Showdown/bin/win_x64/HuntGame.exe"
+  },
+  "League of Legends": {
+    "category": "Game",
+    "developer": "Riot Games",
+    "publisher": "Riot Games",
+    "platform": "PC",
+    "exe": "Riot Games/League of Legends/LeagueClient.exe"
+  },
+  "Left 4 Dead 2": {
+    "category": "Game",
+    "developer": "Valve",
+    "publisher": "Valve",
+    "platform": "PC",
+    "exe": "Left 4 Dead 2/left4dead2.exe"
+  },
+  "Lethal Company": {
+    "category": "Game",
+    "developer": "Zeekerss",
+    "publisher": "Zeekerss",
+    "platform": "PC",
+    "exe": "Lethal Company/Lethal Company.exe"
+  },
+  "Lost Ark": {
+    "category": "Game",
+    "developer": "Smilegate RPG",
+    "publisher": "Amazon Games",
+    "platform": "PC",
+    "exe": "Lost Ark/Binaries/Win64/LostArk.exe"
+  },
+  "Madden NFL 26": {
+    "category": "Game",
+    "developer": "EA Tiburon",
+    "publisher": "Electronic Arts",
+    "platform": "PC",
+    "exe": "Madden NFL 26/Madden26.exe"
+  },
+  "Marvel Rivals": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "MarvelRivals/MarvelRivals_Launcher.exe"
+  },
+  "Minecraft": {
+    "category": "Game",
+    "developer": "Mojang Studios",
+    "publisher": "Mojang Studios",
+    "platform": "PC",
+    "exe": "Minecraft/bin/minecraft.exe"
+  },
+  "Monster Hunter Wilds": {
+    "category": "Game",
+    "developer": "Capcom",
+    "publisher": "Capcom",
+    "platform": "PC",
+    "exe": "Monster Hunter Wilds/MonsterHunterWilds.exe"
+  },
+  "Mortal Kombat 1": {
+    "category": "Game",
+    "developer": "NetherRealm Studios",
+    "publisher": "Warner Bros. Games",
+    "platform": "PC",
+    "exe": "MK1/MortalKombat1.exe"
+  },
+  "NBA 2K26": {
+    "category": "Game",
+    "developer": "Visual Concepts",
+    "publisher": "2K",
+    "platform": "PC",
+    "exe": "NBA 2K26/NBA2K26.exe"
+  },
+  "No Man's Sky": {
+    "category": "Game",
+    "developer": "Hello Games",
+    "publisher": "Hello Games",
+    "platform": "PC",
+    "exe": "No Man's Sky/Binaries/NMS.exe"
+  },
+  "NTE: Neverness to Everness": {
+    "category": "Game",
+    "developer": "Hotta Studio",
+    "publisher": "Perfect World Games",
+    "platform": "PC",
+    "exe": "Neverness To Everness/Client/WindowsNoEditor/HT/Binaries/Win64/HTGame.exe",
+    "icon": "icons/nte.png"
+  },
+  "OldSchool RuneScape": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "OldSchool RuneScape/win64/osclient.exe"
+  },
+  "Once Human": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "Once Human/Once_Human.exe"
+  },
+  "Opera": {
+    "category": "Application",
+    "platform": "PC",
+    "exe": "Opera GX/opera.exe"
+  },
+  "Overwatch 2": {
+    "category": "Game",
+    "developer": "Blizzard Entertainment",
+    "publisher": "Blizzard Entertainment",
+    "platform": "PC",
+    "exe": "Overwatch/Overwatch.exe"
+  },
+  "Palworld": {
+    "category": "Game",
+    "developer": "Pocketpair",
+    "publisher": "Pocketpair",
+    "platform": "PC",
+    "exe": "Palworld/Pal/Binaries/Win64/Palworld-Win64-Shipping.exe"
+  },
+  "Path of Exile 2": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "Grinding Gear Games/Path of Exile 2/pathofexile.exe"
+  },
+  "Phasmophobia": {
+    "category": "Game",
+    "developer": "Kinetic Games",
+    "publisher": "Kinetic Games",
+    "platform": "PC",
+    "exe": "Phasmophobia/Phasmophobia.exe"
+  },
+  "Pragmata": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "PRAGMATA SKETCHBOOK/PRAGMATA_SKETCHBOOK.exe"
+  },
+  "PUBG: Battlegrounds": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "PUBG/TslGame/Binaries/Win64/TslGame-Win64-Shipping.exe"
+  },
+  "RAID: Shadow Legends": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "RAID Shadow Legends/Raid.exe"
+  },
+  "Rainbow Six Siege": {
+    "category": "Game",
+    "developer": "Ubisoft Montreal",
+    "publisher": "Ubisoft",
+    "platform": "PC",
+    "exe": "Rainbow Six Siege/RainbowSix.exe"
+  },
+  "Red Dead Redemption 2": {
+    "category": "Game",
+    "developer": "Rockstar Games",
+    "publisher": "Rockstar Games",
+    "platform": "PC",
+    "exe": "Red Dead Redemption 2/RDR2.exe"
+  },
+  "Risk of Rain 2": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "Risk of Rain 2/Risk of Rain 2.exe"
+  },
+  "Roblox": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "Roblox/Versions/version-xxxxxxxx/RobloxPlayerBeta.exe"
+  },
+  "Rocket League": {
+    "category": "Game",
+    "developer": "Psyonix",
+    "publisher": "Psyonix",
+    "platform": "PC",
+    "exe": "rocketleague/Binaries/Win64/RocketLeague.exe"
+  },
+  "Rune Dice": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "Rune Dice/Rune Dice.exe"
+  },
+  "Rust": {
+    "category": "Game",
+    "developer": "Facepunch Studios",
+    "publisher": "Facepunch Studios",
+    "platform": "PC",
+    "exe": "Rust/RustClient.exe"
+  },
+  "Sea of Thieves": {
+    "category": "Game",
+    "developer": "Rare",
+    "publisher": "Xbox Game Studios",
+    "platform": "PC",
+    "exe": "Sea of Thieves/Athena/Binaries/Win64/SoTGame.exe"
+  },
+  "skate.": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "skate/skate.exe"
+  },
+  "Smite 2": {
+    "category": "Game",
+    "developer": "Titan Forge Games",
+    "publisher": "Hi-Rez Studios",
+    "platform": "PC",
+    "exe": "SMITE 2/Smite2-Win64-Shipping.exe"
+  },
+  "Stardew Valley": {
+    "category": "Game",
+    "developer": "ConcernedApe",
+    "publisher": "ConcernedApe",
+    "platform": "PC",
+    "exe": "Stardew Valley/Stardew Valley.exe"
+  },
+  "Storm Lancers": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "Storm Lancers Demo/StormLancersDemo.exe"
+  },
+  "Street Fighter 6": {
+    "category": "Game",
+    "developer": "Capcom",
+    "publisher": "Capcom",
+    "platform": "PC",
+    "exe": "StreetFighter6/StreetFighter6.exe"
+  },
+  "Summoners War": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "Summoners War/SummonersWar.exe"
+  },
+  "Team Fortress 2": {
+    "category": "Game",
+    "developer": "Valve",
+    "publisher": "Valve",
+    "platform": "PC",
+    "exe": "Team Fortress 2/hl2.exe"
+  },
+  "Tekken 8": {
+    "category": "Game",
+    "developer": "Bandai Namco Studios",
+    "publisher": "Bandai Namco",
+    "platform": "PC",
+    "exe": "TEKKEN 8/Tekken8.exe"
+  },
+  "Terminull Brigade": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "TerminullBrigade/Project Rogueteers/Rogueteers/Binaries/Win64/Rouge-Win64-Shipping.exe"
+  },
+  "Terraria": {
+    "category": "Game",
+    "developer": "Re-Logic",
+    "publisher": "Re-Logic",
+    "platform": "PC",
+    "exe": "Terraria/Terraria.exe"
+  },
+  "The Mound: Omen of Cthulhu": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "The Mound Omen of Cthulhu/Binaries/Win64/TheMound-Win64-Shipping.exe"
+  },
+  "The Witcher 3: Wild Hunt": {
+    "category": "Game",
+    "developer": "CD Projekt Red",
+    "publisher": "CD Projekt",
+    "platform": "PC",
+    "exe": "The Witcher 3/bin/x64/witcher3.exe"
+  },
+  "Torchlight Infinite": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "Torchlight_Infinite/UE_game/Binaries/Win64/Torchlight_Infinite.exe"
+  },
+  "Total War: WARHAMMER III": {
+    "category": "Game",
+    "developer": "Creative Assembly",
+    "publisher": "SEGA",
+    "platform": "PC",
+    "exe": "Total War WARHAMMER III/Warhammer3.exe"
+  },
+  "Valorant": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "Riot Games/VALORANT/live/ShooterGame/Binaries/Win64/VALORANT-Win64-Shipping.exe"
+  },
+  "Vindictus": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "Vindictus/Vindictus_x64/Vindictus.exe"
+  },
+  "Warframe": {
+    "category": "Game",
+    "developer": "Digital Extremes",
+    "publisher": "Digital Extremes",
+    "platform": "PC",
+    "exe": "Warframe/Downloaded/Public/Warframe.x64.exe"
+  },
+  "Where Winds Meet": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "wwm_standard/Engine/Binaries/Win64/wwm.exe"
+  },
+  "World of Tanks: HEAT": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "WoT HEAT/wgcs_api.exe"
+  },
+  "World of Warcraft: Midnight": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "World of Warcraft/_retail_/Wow.exe"
+  },
+  "Wuthering Waves": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "Wuthering Waves/Wuthering Waves Game/Client/Binaries/Win64/Wuthering Waves.exe"
+  },
+  "XCOM 2": {
+    "category": "Game",
+    "developer": "Firaxis Games",
+    "publisher": "2K",
+    "platform": "PC",
+    "exe": "XCOM 2/XCom2-WarOfTheChosen/Binaries/Win64/XCom2.exe"
+  },
+  "Yu-Gi-Oh! Master Duel": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "Yu-Gi-Oh! Master Duel/masterduel.exe"
+  },
+  "Zenless Zone Zero": {
+    "category": "Game",
+    "platform": "PC",
+    "exe": "ZenlessZoneZero Game/ZenlessZoneZero.exe"
+  }
+}
