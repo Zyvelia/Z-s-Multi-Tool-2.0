@@ -17,6 +17,9 @@ dist/
 # ── Third-party binary, not our code — see Readme for how to get it ────
 modules/folder_gen/assets/mGBA.exe
 
+# ── Local-only scripts — not project source, don't ship in the repo ────
+git_push.bat
+
 # ── Editor/OS junk ────────────────────────────────────────────────────
 .vscode/
 .idea/

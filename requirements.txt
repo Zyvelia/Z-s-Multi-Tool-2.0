@@ -19,6 +19,7 @@ requests==2.34.2
 scapy==2.7.0
 sounddevice==0.5.5
 soundfile==0.14.0
+tkinterdnd2==0.6.2
 yt-dlp==2026.6.9
 
 # ---
@@ -33,4 +34,4 @@ yt-dlp==2026.6.9
 #   - Npcap + Nmap (system tools required by scapy / python-nmap for the
 #     network_auditor module's packet capture / port scanning)
 #
-# Installed via: pip install -r requirements.txt
+# Installed via: pip install -r requirements.txt
