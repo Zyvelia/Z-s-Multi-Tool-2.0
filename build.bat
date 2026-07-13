@@ -55,6 +55,13 @@ REM NOTE: --name deliberately has NO apostrophe. PyInstaller writes the name
 REM straight into a single-quoted Python string inside the generated .spec
 REM file, so "Z's Multi Tool" breaks that string and crashes the build with
 REM a SyntaxError. We build as "Zs Multi Tool" and rename the exe after.
+REM NOTE: no --add-data for "data" here on purpose. CryptoService/
+REM VaultService/AuthService all resolve through core/paths.py straight to
+REM %APPDATA%\ZsMultiTool\... at runtime and only fall back to a local
+REM data/ folder for one-time legacy migration if it happens to exist.
+REM Bundling it would (a) fail the build on a fresh checkout, since
+REM data/ is gitignored and usually won't exist, and (b) if it DID
+REM exist, would ship your real vault.json + master.key inside the exe.
 python -m PyInstaller ^
     --noconfirm ^
     --onefile ^
@@ -83,7 +90,6 @@ python -m PyInstaller ^
     --add-data "modules;modules" ^
     --add-data "core;core" ^
     --add-data "pages;pages" ^
-    --add-data "data;data" ^
     --add-data "assets;assets" ^
     --add-data "settings.json;." ^
     main.py

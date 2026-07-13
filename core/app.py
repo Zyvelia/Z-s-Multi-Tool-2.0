@@ -10,6 +10,7 @@ from core import updater
 from core.services.crypto_service import CryptoService
 from core.services.vault_service import VaultService
 from core.services.auth_service import AuthService
+from core.services.totp_service import TotpService
 from core.services.discord_service import DiscordService # Added import
 
 from pages.catalog_page import CatalogPage
@@ -57,6 +58,10 @@ class App(ctk.CTk):
         self.discord_service.connect()          # Added DiscordService connection
 
         self.vault_service = VaultService(
+            self.crypto_service
+        )
+
+        self.totp_service = TotpService(
             self.crypto_service
         )
 

@@ -1,7 +1,7 @@
 from .lock_screen import PasswordVaultLockScreen
 
 
-def open_vault(manager):
+def open_security_vault(manager):
     return PasswordVaultLockScreen(
         manager.container,
         manager
@@ -11,9 +11,9 @@ def open_vault(manager):
 def register(plugin_manager):
 
     plugin_manager.register({
-        "name": "Password Vault",
+        "name": "Security Vault",
         "category": "Utilities",
-        "desc": "Encrypted password manager",
+        "desc": "Encrypted passwords and authenticator (2FA) codes, in one place.",
         "icon": "🔐",
-        "open": open_vault
+        "open": open_security_vault
     })

@@ -2,7 +2,7 @@
 from PyInstaller.utils.hooks import collect_data_files
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('modules', 'modules'), ('core', 'core'), ('pages', 'pages'), ('data', 'data'), ('assets', 'assets'), ('settings.json', '.')]
+datas = [('modules', 'modules'), ('core', 'core'), ('pages', 'pages'), ('assets', 'assets'), ('settings.json', '.')]
 binaries = []
 hiddenimports = ['PIL._tkinter_finder', 'scapy.all', 'nmap', 'vlc', 'pyperclip', 'pypresence', 'pystray._win32', 'sounddevice', 'soundfile', 'psutil', 'cryptography.fernet', 'yt_dlp', 'pygame', 'pygame.mixer']
 datas += collect_data_files('pypresence')

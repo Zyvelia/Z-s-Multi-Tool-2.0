@@ -1,6 +1,9 @@
 import os
 import json
+import hmac
+import base64
 import hashlib
+import secrets
 import time # Added for auto-lock functionality
 
 from core import paths
@@ -12,6 +15,13 @@ class AuthService:
         paths.data_path("vault_settings.json"),
         "data", "vault_settings.json"
     )
+
+    # PBKDF2-HMAC-SHA256 iteration count. 600,000 is the current OWASP
+    # baseline (2023 guidance) for PBKDF2-SHA256 — high enough to make
+    # offline brute-forcing of a stolen vault_settings.json expensive,
+    # while still taking a human-imperceptible ~50-100ms to verify.
+    PBKDF2_ITERATIONS = 600_000
+    SALT_BYTES = 16
 
     def __init__(self):
 
@@ -26,6 +36,8 @@ class AuthService:
                     f,
                     indent=4
                 )
+
+        self._harden_file_permissions()
 
         # Initialize auto-lock properties
         self.last_activity = time.time()
@@ -46,11 +58,76 @@ class AuthService:
         with open(self.FILE, "w") as f:
             json.dump(data, f, indent=4)
 
-    def _hash(self, password):
+        self._harden_file_permissions()
 
-        return hashlib.sha256(
-            password.encode()
-        ).hexdigest()
+    def _harden_file_permissions(self):
+        """
+        Restrict vault_settings.json to the owning user only (rw-------).
+        No-op (best effort) on platforms/filesystems that don't support
+        POSIX permission bits, e.g. some Windows filesystems.
+        """
+        try:
+            os.chmod(self.FILE, 0o600)
+        except Exception:
+            pass
+
+    # -------------------------------------------------
+    # Password hashing: salted PBKDF2-HMAC-SHA256
+    # -------------------------------------------------
+    # Stored format: "pbkdf2_sha256$<iterations>$<salt_b64>$<hash_b64>"
+    # A random salt per-vault defeats precomputed rainbow tables, and the
+    # iteration count makes each guess expensive for an offline attacker
+    # (unlike a single unsalted SHA-256 call, which a modern GPU can test
+    # billions of times per second).
+
+    def _hash(self, password, salt=None, iterations=None):
+
+        if salt is None:
+            salt = secrets.token_bytes(self.SALT_BYTES)
+        if iterations is None:
+            iterations = self.PBKDF2_ITERATIONS
+
+        digest = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode(),
+            salt,
+            iterations
+        )
+
+        return "pbkdf2_sha256${}${}${}".format(
+            iterations,
+            base64.b64encode(salt).decode(),
+            base64.b64encode(digest).decode()
+        )
+
+    def _verify_hash(self, password, stored):
+        """
+        Verifies a password against a stored hash. Transparently supports
+        the legacy unsalted-SHA256 format so existing vaults keep working;
+        callers should re-hash and re-save on a successful legacy match
+        (see verify_master_password) to upgrade the vault in place.
+        """
+
+        if stored.startswith("pbkdf2_sha256$"):
+            try:
+                _, iterations, salt_b64, hash_b64 = stored.split("$", 3)
+                salt = base64.b64decode(salt_b64)
+                expected = base64.b64decode(hash_b64)
+            except (ValueError, Exception):
+                return False
+
+            candidate = hashlib.pbkdf2_hmac(
+                "sha256",
+                password.encode(),
+                salt,
+                int(iterations)
+            )
+
+            return hmac.compare_digest(candidate, expected)
+
+        # Legacy format: bare hex sha256 digest, no salt.
+        legacy_candidate = hashlib.sha256(password.encode()).hexdigest()
+        return hmac.compare_digest(legacy_candidate, stored)
 
     # =====================================================
     # AUTO-LOCK METHODS
@@ -127,12 +204,21 @@ class AuthService:
     ):
 
         data = self._load()
+        stored = data.get("master_password", "")
+
+        if not self._verify_hash(password, stored):
+            return False
+
+        # Transparent migration: if this vault still has a legacy
+        # unsalted-SHA256 hash, upgrade it to salted PBKDF2 now that we
+        # have the plaintext password in hand. Runs once, silently.
+        if not stored.startswith("pbkdf2_sha256$"):
+            data["master_password"] = self._hash(password)
+            self._save(data)
 
         # Unlock and touch on successful verification
-        if self._hash(password) == data.get("master_password", ""):
-            self.unlock()
-            return True
-        return False
+        self.unlock()
+        return True
 
     def change_master_password(
         self,
@@ -153,4 +239,35 @@ class AuthService:
 
         self._save(data)
         self.touch() # Update activity after changing password
-        return True
+        return True
+
+    # =====================================================
+    # PASSWORD STRENGTH
+    # =====================================================
+
+    @staticmethod
+    def password_strength(password):
+        """
+        Lightweight, dependency-free strength estimate for UI feedback.
+        Returns (score 0-4, label). Not a substitute for a real entropy
+        estimator (e.g. zxcvbn) but enough to steer users away from
+        obviously weak master passwords at creation time.
+        """
+        if not password:
+            return 0, "Empty"
+
+        score = 0
+        if len(password) >= 8:
+            score += 1
+        if len(password) >= 12:
+            score += 1
+        if any(c.islower() for c in password) and any(c.isupper() for c in password):
+            score += 1
+        if any(c.isdigit() for c in password):
+            score += 1
+        if any(not c.isalnum() for c in password):
+            score += 1
+
+        score = min(score, 4)
+        labels = ["Very weak", "Weak", "Fair", "Strong", "Very strong"]
+        return score, labels[score]

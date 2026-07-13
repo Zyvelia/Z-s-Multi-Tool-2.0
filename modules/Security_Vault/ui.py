@@ -10,15 +10,26 @@ except ImportError:
     pyperclip = None
 
 from core import theme
+from core.services.auth_service import AuthService
+from .authenticator_tab import AuthenticatorTab
 
 BG = theme.BG
 PANEL = theme.PANEL
 CARD = theme.PANEL_2
+BORDER = theme.BORDER
 
 ACCENT = theme.ACCENT
+ACCENT_HOVER = theme.ACCENT_HOVER
 
 TEXT = theme.TEXT
 MUTED = theme.MUTED
+FAINT = theme.FAINT
+
+ERROR = theme.ERROR
+SUCCESS = theme.SUCCESS
+DANGER = theme.DANGER
+
+STRENGTH_COLORS = [DANGER, "#e0803f", "#e0c53f", "#8bd15a", SUCCESS]
 
 
 class PasswordVaultPage(ctk.CTkFrame):
@@ -33,7 +44,7 @@ class PasswordVaultPage(ctk.CTkFrame):
 
         self.configure(fg_color=BG)
 
-        self.grid_rowconfigure(2, weight=1)
+        self.grid_rowconfigure(1, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
         # Better Generator - Checkbox variables
@@ -67,10 +78,11 @@ class PasswordVaultPage(ctk.CTkFrame):
         header.grid_columnconfigure(1, weight=1)
         header.grid_columnconfigure(0, weight=0)
         header.grid_columnconfigure(2, weight=0)
+        header.grid_columnconfigure(3, weight=0)
 
         ctk.CTkLabel(
             header,
-            text="🔐 Password Vault",
+            text="🔐 Security Vault",
             font=("Segoe UI", 26, "bold"),
             text_color=TEXT
         ).grid(row=0, column=1, sticky="w", padx=(10, 0))
@@ -83,17 +95,49 @@ class PasswordVaultPage(ctk.CTkFrame):
             fg_color=CARD,
             hover_color=ACCENT
         )
-        self.favorites_toggle_button.grid(row=0, column=2, padx=10, pady=10)
+        self.favorites_toggle_button.grid(row=0, column=2, padx=(10, 5), pady=10)
 
+        # Change Master Password
+        ctk.CTkButton(
+            header,
+            text="🔑 Change Password",
+            command=self.open_change_password_dialog,
+            fg_color=CARD,
+            hover_color=ACCENT
+        ).grid(row=0, column=3, padx=(5, 10), pady=10)
+
+        # ---------------- TABS ----------------
+        # "Passwords" holds everything the vault already did; "Authenticator"
+        # is the new TOTP tab. Both live behind the same master-password
+        # lock screen, so no extra gating needed here.
+
+        self.tabview = ctk.CTkTabview(
+            self,
+            fg_color=BG,
+            segmented_button_fg_color=PANEL,
+            segmented_button_selected_color=ACCENT,
+            segmented_button_selected_hover_color=ACCENT,
+        )
+        self.tabview.grid(row=1, column=0, sticky="nsew", padx=15, pady=(0, 15))
+
+        passwords_tab = self.tabview.add("🔐 Passwords")
+        authenticator_tab = self.tabview.add("🔑 Authenticator")
+
+        passwords_tab.grid_rowconfigure(1, weight=1)
+        passwords_tab.grid_columnconfigure(0, weight=1)
+
+        authenticator_tab.grid_rowconfigure(0, weight=1)
+        authenticator_tab.grid_columnconfigure(0, weight=1)
+
+        AuthenticatorTab(authenticator_tab, self.manager).grid(row=0, column=0, sticky="nsew")
 
         # ---------------- STATS (Better Dashboard Stats Card) ----------------
 
-        stats_frame = ctk.CTkFrame(self, fg_color=PANEL)
+        stats_frame = ctk.CTkFrame(passwords_tab, fg_color=PANEL)
         stats_frame.grid(
-            row=1,
+            row=0,
             column=0,
             sticky="ew",
-            padx=15,
             pady=(0, 10)
         )
         # Configure columns for the new dashboard layout (4 stats + 1 security score)
@@ -148,16 +192,15 @@ class PasswordVaultPage(ctk.CTkFrame):
         # ---------------- MAIN ----------------
 
         main = ctk.CTkFrame(
-            self,
+            passwords_tab,
             fg_color=BG
         )
 
         main.grid(
-            row=2,
+            row=1,
             column=0,
             sticky="nsew",
-            padx=15,
-            pady=(0, 15)
+            pady=(0, 0)
         )
 
         main.grid_rowconfigure(1, weight=1)
@@ -630,6 +673,116 @@ class PasswordVaultPage(ctk.CTkFrame):
             self.render()
 
         ctk.CTkButton(dialog, text="Save Changes", command=save_edited_entry).pack(pady=10)
+
+
+    # =====================================================
+    # CHANGE MASTER PASSWORD
+    # =====================================================
+
+    def open_change_password_dialog(self):
+
+        auth = self.manager.container.auth_service
+
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Change Master Password")
+        dialog.geometry("380x420")
+        dialog.transient(self.master)
+        dialog.configure(fg_color=PANEL)
+        dialog.grab_set()  # modal — this touches vault security, don't let it get lost behind other windows
+
+        ctk.CTkLabel(
+            dialog,
+            text="🔑 Change Master Password",
+            font=theme.font(17, "bold"),
+            text_color=TEXT
+        ).pack(pady=(20, 4))
+
+        ctk.CTkLabel(
+            dialog,
+            text="You'll need your current password to confirm.",
+            font=theme.font(11),
+            text_color=MUTED,
+            wraplength=300
+        ).pack(pady=(0, 16))
+
+        def labeled_entry(text):
+            ctk.CTkLabel(
+                dialog, text=text, anchor="w", font=theme.font(12), text_color=MUTED
+            ).pack(fill="x", padx=24, pady=(4, 2))
+            e = ctk.CTkEntry(
+                dialog, show="•", height=36,
+                fg_color=CARD, border_color=BORDER, corner_radius=theme.RADIUS_SM
+            )
+            e.pack(fill="x", padx=24)
+            return e
+
+        current_entry = labeled_entry("Current password")
+        new_entry = labeled_entry("New password")
+
+        strength_bar = ctk.CTkProgressBar(
+            dialog, height=4, corner_radius=2,
+            progress_color=STRENGTH_COLORS[0], fg_color=BORDER
+        )
+        strength_bar.pack(fill="x", padx=24, pady=(6, 0))
+        strength_bar.set(0)
+
+        strength_label = ctk.CTkLabel(dialog, text=" ", font=theme.font(11), text_color=FAINT)
+        strength_label.pack(anchor="e", padx=24)
+
+        def update_strength(_event=None):
+            score, label = AuthService.password_strength(new_entry.get())
+            strength_bar.configure(progress_color=STRENGTH_COLORS[max(score - 1, 0)])
+            strength_bar.set(score / 4)
+            strength_label.configure(text=label if new_entry.get() else " ")
+
+        new_entry.bind("<KeyRelease>", update_strength)
+
+        confirm_entry = labeled_entry("Confirm new password")
+
+        status_label = ctk.CTkLabel(dialog, text="", font=theme.font(11), text_color=ERROR, wraplength=300)
+        status_label.pack(pady=(10, 0))
+
+        def submit():
+            current = current_entry.get()
+            new = new_entry.get()
+            confirm = confirm_entry.get()
+
+            if len(new) < 8:
+                status_label.configure(text_color=ERROR, text="New password must be at least 8 characters.")
+                return
+
+            if new != confirm:
+                status_label.configure(text_color=ERROR, text="New passwords do not match.")
+                return
+
+            if new == current:
+                status_label.configure(text_color=ERROR, text="New password must be different from the current one.")
+                return
+
+            if not auth.change_master_password(current, new):
+                status_label.configure(text_color=ERROR, text="Current password is incorrect.")
+                current_entry.delete(0, "end")
+                return
+
+            status_label.configure(text_color=SUCCESS, text="Master password changed.")
+            dialog.after(700, dialog.destroy)
+
+        current_entry.bind("<Return>", lambda e: new_entry.focus_set())
+        new_entry.bind("<Return>", lambda e: confirm_entry.focus_set())
+        confirm_entry.bind("<Return>", lambda e: submit())
+
+        ctk.CTkButton(
+            dialog,
+            text="Change Password",
+            height=38,
+            fg_color=ACCENT,
+            hover_color=ACCENT_HOVER,
+            text_color="#0b0d10",
+            font=theme.font(13, "bold"),
+            command=submit
+        ).pack(fill="x", padx=24, pady=(18, 0))
+
+        current_entry.focus_set()
 
 
     # =====================================================
