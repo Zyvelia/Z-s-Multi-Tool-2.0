@@ -4,6 +4,7 @@ import random
 import os
 import time
 import threading
+from array import array
 
 
 # ---------------------------------------------------------------------------
@@ -33,6 +34,69 @@ class State:
 
 
 
+class LazyPlaylist:
+    """
+    A sequence-like view over a (potentially huge) list of song IDs backed
+    by a db.Library. Behaves like a list of file paths — len(), indexing,
+    iteration, os.path.basename(playlist[i]) — so the rest of the engine
+    and the UI don't need to know the difference. It never holds more than
+    a small cache of resolved paths/tags in memory, so it's safe to load
+    the entire 750,000+ song library as a single "playlist".
+    """
+
+    def __init__(self, db, ids):
+        self.db = db
+        self.ids = ids if isinstance(ids, array) else array('q', ids)
+        self._path_cache = {}
+        self._meta_cache = {}
+        self._cache_order = []
+
+    def __len__(self):
+        return len(self.ids)
+
+    def __bool__(self):
+        return len(self.ids) > 0
+
+    def _touch(self, i):
+        self._cache_order.append(i)
+        if len(self._cache_order) > 512:
+            old = self._cache_order.pop(0)
+            self._path_cache.pop(old, None)
+            self._meta_cache.pop(old, None)
+
+    def __getitem__(self, i):
+        if isinstance(i, slice):
+            return [self[j] for j in range(*i.indices(len(self)))]
+        if i < 0:
+            i += len(self)
+        if i in self._path_cache:
+            return self._path_cache[i]
+        path = self.db.get_path(self.ids[i])
+        self._path_cache[i] = path
+        self._touch(i)
+        return path
+
+    def __iter__(self):
+        for i in range(len(self)):
+            yield self[i]
+
+    def id_at(self, i):
+        if i < 0:
+            i += len(self)
+        return self.ids[i]
+
+    def meta_at(self, i):
+        """Returns the DB row (title/artist/album/duration/path) for index i."""
+        if i < 0:
+            i += len(self)
+        if i in self._meta_cache:
+            return self._meta_cache[i]
+        song = self.db.get_song(self.ids[i])
+        self._meta_cache[i] = song
+        self._touch(i)
+        return song
+
+
 class PygameMusicEngine:
     """
     Drop-in replacement for VLCMusicEngine.
@@ -46,6 +110,7 @@ class PygameMusicEngine:
 
         self.playlist    = []
         self.index       = -1
+        self.db          = None   # set when a library queue is loaded via load_ids()
 
         self.shuffle     = False
         self.repeat_mode = "off"   # off | one | all
@@ -93,8 +158,22 @@ class PygameMusicEngine:
     # ── Load ──────────────────────────────────────────────────
 
     def load(self, files):
+        """Load an explicit, small list of file paths (e.g. 'Add Files')."""
+        self.db       = None
         self.playlist = [os.path.abspath(f) for f in (files or [])]
         self.index    = 0 if self.playlist else -1
+        self._state   = _State.Stopped
+        self._paused  = False
+
+    def load_ids(self, db, ids, start_index=0):
+        """
+        Load a (possibly huge, e.g. 750,000+) list of song IDs backed by a
+        db.Library. Used for browsing/searching/shuffling the full library
+        without ever materializing every file path in memory at once.
+        """
+        self.db       = db
+        self.playlist = LazyPlaylist(db, ids)
+        self.index    = start_index if len(self.playlist) else -1
         self._state   = _State.Stopped
         self._paused  = False
 
@@ -216,6 +295,10 @@ class PygameMusicEngine:
     # ── Playlist Management ───────────────────────────────────
 
     def remove_track(self, index):
+        if isinstance(self.playlist, LazyPlaylist):
+            # Removing one song from a library-backed queue isn't a
+            # meaningful operation here — use the search box instead.
+            return
         if not (0 <= index < len(self.playlist)):
             return
 
@@ -272,6 +355,11 @@ class PygameMusicEngine:
         """
         if self.index < 0 or not self.playlist:
             return 0
+        if isinstance(self.playlist, LazyPlaylist):
+            meta = self.playlist.meta_at(self.index)
+            if meta and meta.get("duration"):
+                return meta["duration"]
+            return 0
         path = self.playlist[self.index]
         try:
             from mutagen import File as MutagenFile
@@ -281,6 +369,19 @@ class PygameMusicEngine:
         except Exception:
             pass
         return 0
+
+    def get_current_meta(self):
+        """
+        Returns the DB row (title/artist/album/duration/path) for the
+        currently loaded track, or None if not applicable (e.g. an ad-hoc
+        file list rather than a library queue). Lets the UI show proper
+        tag-based titles without re-reading the file over the network.
+        """
+        if self.index < 0 or not self.playlist:
+            return None
+        if isinstance(self.playlist, LazyPlaylist):
+            return self.playlist.meta_at(self.index)
+        return None
 
     def release(self):
         """Releases pygame mixer resources."""

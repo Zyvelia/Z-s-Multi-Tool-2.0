@@ -1,10 +1,12 @@
+import os
+import random
+import threading
+
 import customtkinter as ctk
 from tkinter import filedialog
-import os
-
-from mutagen import File as MutagenFile
 
 from .player import VLCMusicEngine, State
+from . import db as musicdb
 from core import theme
 
 BG      = theme.BG
@@ -20,10 +22,26 @@ _BTN = dict(fg_color=PANEL_2, hover_color=ACCENT, text_color=TEXT,
 _BTN_ACCENT = dict(fg_color=ACCENT, hover_color=theme.ACCENT_DIM, text_color="white",
                    height=34, corner_radius=8)
 
+PAGE_SIZE   = 100     # rows rendered at once — fine even with 750,000+ songs total
+SCAN_WORKERS = 6      # concurrent tag-reader threads (network share = I/O bound, so
+                       # a handful of threads in flight speeds this up a lot)
+
 
 def _make_btn(parent, text, cmd, **overrides):
     kw = {**_BTN, **overrides}
     return ctk.CTkButton(parent, text=text, command=cmd, **kw)
+
+
+def _fmt_row(meta, fallback_path):
+    if meta:
+        title = meta.get("title") or os.path.basename(meta.get("path") or fallback_path)
+        artist = meta.get("artist")
+        return f"{artist} - {title}" if artist else title
+    return os.path.basename(fallback_path or "?")
+
+
+def _fmt_count(n):
+    return f"{n:,}"
 
 
 class MusicPage(ctk.CTkFrame):
@@ -35,20 +53,45 @@ class MusicPage(ctk.CTkFrame):
         self.engine = getattr(manager, "music_engine", None) or VLCMusicEngine()
         manager.music_engine = self.engine
 
-        self.song_buttons = []
+        # Shared SQLite library index — lives on local disk, not the
+        # network share, so browsing/searching/shuffling stay instant
+        # even with 750,000+ songs indexed.
+        self.db = getattr(manager, "music_db", None) or musicdb.Library()
+        manager.music_db = self.db
+
+        # Scan progress is stored on the manager (not on this widget) so
+        # a background scan keeps going and stays trackable even if the
+        # user closes and reopens the Music Player page mid-scan.
+        self.scan_state = getattr(manager, "music_scan_state", None)
+        if self.scan_state is None:
+            self.scan_state = {"scanning": False, "found": 0, "updated": 0,
+                                "stage": "idle", "stop_event": threading.Event()}
+            manager.music_scan_state = self.scan_state
+        self._last_seen_stage = self.scan_state["stage"]
+
         self.active_index = -1
         self._loop_running = False
-        self._discord_rpc_active = False # NEW: Flag to track RPC status
+        self._discord_rpc_active = False
+
+        # Browse/search state
+        self._result_ids = self.db.all_ids()
+        self._page = 0
+        self._search_seq = 0
+        self._search_after_id = None
+        self.row_widgets = []
 
         self._build_ui()
         self._sync_initial_state()
+        self._render_page()
         self._start_loop()
+        self._maybe_autoscan()
 
     # ── Build ─────────────────────────────────────────────────
 
     def _build_ui(self):
         self._build_header()
-        self._build_playlist_panel()
+        self._build_library_controls()
+        self._build_browse_panel()
         self._build_now_playing()
         self._build_controls()
 
@@ -64,39 +107,70 @@ class MusicPage(ctk.CTkFrame):
         self.status = ctk.CTkLabel(header, text="Idle", text_color=MUTED)
         self.status.pack(side="right", padx=14)
 
-    def _build_playlist_panel(self):
+    def _build_library_controls(self):
+        panel = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
+        panel.pack(fill="x", padx=12, pady=6)
+
+        row = ctk.CTkFrame(panel, fg_color="transparent")
+        row.pack(fill="x", padx=10, pady=(10, 4))
+
+        _make_btn(row, "📁  Set Music Folder", self.pick_folder,
+                  width=170).pack(side="left", padx=(0, 6))
+        _make_btn(row, "🔄  Rescan Now", self.rescan_now,
+                  width=130).pack(side="left", padx=(0, 6))
+
+        self.folder_label = ctk.CTkLabel(
+            row, text=self._folder_display(), text_color=MUTED, anchor="w")
+        self.folder_label.pack(side="left", fill="x", expand=True, padx=(6, 0))
+
+        self.scan_status = ctk.CTkLabel(
+            panel, text="", text_color=MUTED, anchor="w",
+            font=("Segoe UI", 11))
+        self.scan_status.pack(fill="x", padx=14, pady=(0, 10))
+
+    def _build_browse_panel(self):
         panel = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
         panel.pack(fill="both", expand=True, padx=12, pady=6)
 
-        # Header row
         top = ctk.CTkFrame(panel, fg_color="transparent")
-        top.pack(fill="x", padx=10, pady=(8, 0))
+        top.pack(fill="x", padx=10, pady=(8, 4))
 
-        ctk.CTkLabel(top, text="Playlist",
+        ctk.CTkLabel(top, text="Library",
                      font=("Segoe UI", 15, "bold"), text_color=TEXT).pack(side="left")
 
-        self.playlist_stats = ctk.CTkLabel(top, text="0 songs", text_color=MUTED)
-        self.playlist_stats.pack(side="right")
+        self.results_count = ctk.CTkLabel(top, text="0 songs", text_color=MUTED)
+        self.results_count.pack(side="right")
 
-        # Load buttons row
-        load_row = ctk.CTkFrame(panel, fg_color="transparent")
-        load_row.pack(fill="x", padx=10, pady=(6, 4))
+        big_row = ctk.CTkFrame(panel, fg_color="transparent")
+        big_row.pack(fill="x", padx=10, pady=(0, 6))
 
-        _make_btn(load_row, "＋ Add Files", self.load_files,
-                  **_BTN_ACCENT).pack(side="left", padx=(0, 6))
-        _make_btn(load_row, "📁 Load Folder", self.load_folder_playlist
-                  ).pack(side="left")
+        _make_btn(big_row, "🔀  Shuffle All ▶", self.shuffle_all,
+                  **_BTN_ACCENT, width=170).pack(side="left", padx=(0, 6))
+        _make_btn(big_row, "▶  Play All (in order)", self.play_all,
+                  width=170).pack(side="left", padx=(0, 6))
+        _make_btn(big_row, "＋  Add Files (quick queue)", self.load_files,
+                  width=190).pack(side="left")
 
-        # Search
         self.search_entry = ctk.CTkEntry(
-            panel, placeholder_text="Search playlist…", corner_radius=8)
+            panel, placeholder_text="Search title / artist / album…", corner_radius=8)
         self.search_entry.pack(fill="x", padx=10, pady=(0, 6))
-        self.search_entry.bind("<KeyRelease>", lambda e: self._filter_playlist())
+        self.search_entry.bind("<KeyRelease>", self._on_search_key)
 
-        # Song list
         self.song_buttons_frame = ctk.CTkScrollableFrame(
             panel, fg_color=PANEL_2, corner_radius=8)
-        self.song_buttons_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self.song_buttons_frame.pack(fill="both", expand=True, padx=10, pady=(0, 4))
+
+        pager = ctk.CTkFrame(panel, fg_color="transparent")
+        pager.pack(fill="x", padx=10, pady=(0, 10))
+
+        self.prev_page_btn = _make_btn(pager, "◀ Prev", self.prev_page, width=90)
+        self.prev_page_btn.pack(side="left")
+
+        self.page_label = ctk.CTkLabel(pager, text="Page 1 / 1", text_color=MUTED)
+        self.page_label.pack(side="left", expand=True)
+
+        self.next_page_btn = _make_btn(pager, "Next ▶", self.next_page, width=90)
+        self.next_page_btn.pack(side="right")
 
     def _build_now_playing(self):
         card = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
@@ -123,7 +197,6 @@ class MusicPage(ctk.CTkFrame):
         outer = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
         outer.pack(fill="x", padx=12, pady=(4, 12))
 
-        # Transport row
         transport = ctk.CTkFrame(outer, fg_color="transparent")
         transport.pack(pady=(10, 4))
 
@@ -134,7 +207,6 @@ class MusicPage(ctk.CTkFrame):
             _make_btn(transport, text, cmd, width=56).grid(
                 row=0, column=col, padx=4)
 
-        # Mode row
         mode_row = ctk.CTkFrame(outer, fg_color="transparent")
         mode_row.pack(pady=(0, 4))
 
@@ -144,7 +216,6 @@ class MusicPage(ctk.CTkFrame):
         self.repeat_btn = _make_btn(mode_row, "🔁  Repeat", self.toggle_repeat, width=130)
         self.repeat_btn.grid(row=0, column=1, padx=6)
 
-        # Volume row
         vol_row = ctk.CTkFrame(outer, fg_color="transparent")
         vol_row.pack(fill="x", padx=14, pady=(4, 12))
 
@@ -163,7 +234,6 @@ class MusicPage(ctk.CTkFrame):
         self.volume.set(vol)
         self.engine.set_volume(vol)
 
-        # Update initial shuffle/repeat button states
         if self.engine.shuffle:
             self.shuffle_btn.configure(text="🔀  Shuffle", fg_color=ACCENT)
 
@@ -173,9 +243,12 @@ class MusicPage(ctk.CTkFrame):
         elif mode == "one":
             self.repeat_btn.configure(text="🔂  Repeat One", fg_color="#2ecc71")
 
-        # Initial UI state update
+        self.results_count.configure(text=f"{_fmt_count(len(self._result_ids))} songs")
         self._update_playback_ui_state()
 
+    def _folder_display(self):
+        folder = self.db.get_setting("music_folder")
+        return folder if folder else "No music folder set yet"
 
     # ── Loop ─────────────────────────────────────────────────
 
@@ -191,7 +264,6 @@ class MusicPage(ctk.CTkFrame):
         current = max(0, self.engine.get_time())
         total   = max(0, self.engine.get_length())
 
-        # Update now playing time and progress bar
         if total > 0:
             self.progress.set(current / total)
             self.time_label.configure(
@@ -201,116 +273,208 @@ class MusicPage(ctk.CTkFrame):
             self.progress.set(0)
             self.time_label.configure(text="00:00 / 00:00")
 
-        # Call the new unified UI state updater
         self._update_playback_ui_state()
+        self._poll_scan_state()
 
         self.after(300, self._update_loop)
 
-    # ── Load Files ────────────────────────────────────────────
+    # ── Library folder / scanning ───────────────────────────────
+
+    def pick_folder(self):
+        folder = filedialog.askdirectory()
+        if not folder:
+            return
+        self.db.set_setting("music_folder", folder)
+        self.folder_label.configure(text=folder)
+        self.rescan_now()
+
+    def rescan_now(self):
+        folder = self.db.get_setting("music_folder")
+        if not folder:
+            self.status.configure(text="Set a music folder first")
+            return
+        if self.scan_state["scanning"]:
+            self.status.configure(text="Already scanning…")
+            return
+        self._begin_scan(folder)
+
+    def _maybe_autoscan(self):
+        if getattr(self.manager, "_music_autoscanned", False):
+            return
+        self.manager._music_autoscanned = True
+        folder = self.db.get_setting("music_folder")
+        if folder:
+            self._begin_scan(folder)
+
+    def _begin_scan(self, folder):
+        state = self.scan_state
+        state["scanning"] = True
+        state["found"] = 0
+        state["updated"] = 0
+        state["stage"] = "starting"
+        state["stop_event"] = threading.Event()
+
+        def progress_cb(found, updated, stage):
+            state["found"] = found
+            state["updated"] = updated
+            state["stage"] = stage
+
+        def worker():
+            try:
+                self.db.scan(folder, progress_cb=progress_cb,
+                             stop_event=state["stop_event"], workers=SCAN_WORKERS)
+            finally:
+                state["scanning"] = False
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _poll_scan_state(self):
+        state = self.scan_state
+        if state["scanning"]:
+            self.scan_status.configure(
+                text=f"Scanning… {_fmt_count(state['found'])} files seen, "
+                     f"{_fmt_count(state['updated'])} indexed/updated")
+        elif self._last_seen_stage != state["stage"] and state["stage"] in ("done", "aborted"):
+            self.scan_status.configure(
+                text=f"Scan {state['stage']} — {_fmt_count(self.db.count())} songs in library")
+            self._last_seen_stage = state["stage"]
+            # Refresh whatever's currently being browsed/searched now that
+            # the index may have changed.
+            self._run_search(immediate=True)
+        elif not state["scanning"] and state["stage"] == "idle":
+            pass
+
+    # ── Add Files (small ad-hoc queue, bypasses the library index) ──
 
     def load_files(self):
         files = filedialog.askopenfilenames(
             filetypes=[("Audio Files", "*.mp3 *.wav *.flac *.ogg *.m4a")])
         if files:
-            self._load_playlist(list(files))
+            self.engine.load(list(files))
+            self.engine.play()
             self.status.configure(text="Files loaded")
+            self._update_playback_ui_state()
 
-    def load_folder_playlist(self):
-        folder = filedialog.askdirectory()
-        if not folder:
-            return
+    # ── Browse / Search / Paging ─────────────────────────────────
 
-        ext = (".mp3", ".wav", ".flac", ".ogg", ".m4a")
-        files = sorted(
-            os.path.join(root, f)
-            for root, _dirs, filenames in os.walk(folder)
-            for f in filenames
-            if f.lower().endswith(ext)
-        )
+    def _on_search_key(self, event=None):
+        if self._search_after_id:
+            self.after_cancel(self._search_after_id)
+        self._search_after_id = self.after(350, self._run_search)
 
-        if not files:
-            self.status.configure(text="No audio files found")
-            return
+    def _run_search(self, immediate=False):
+        query = self.search_entry.get() if hasattr(self, "search_entry") else ""
+        self._search_seq += 1
+        seq = self._search_seq
 
-        self._load_playlist(files)
-        self.status.configure(text=f"Folder loaded ({len(files)} songs)")
+        def worker():
+            ids = self.db.search_ids(query)
+            self.after(0, lambda: self._apply_search_results(seq, ids))
 
-    # ── Playlist Core ─────────────────────────────────────────
+        if immediate:
+            worker()
+        else:
+            threading.Thread(target=worker, daemon=True).start()
 
-    def _load_playlist(self, files):
-        self.engine.load(files)
-        self.playlist_stats.configure(
-            text=f"{len(files)} {'song' if len(files) == 1 else 'songs'}")
+    def _apply_search_results(self, seq, ids):
+        if seq != self._search_seq:
+            return  # a newer search superseded this one
+        self._result_ids = ids
+        self._page = 0
+        self.results_count.configure(text=f"{_fmt_count(len(ids))} songs")
+        self._render_page()
 
+    def _total_pages(self):
+        return max(1, (len(self._result_ids) + PAGE_SIZE - 1) // PAGE_SIZE)
+
+    def prev_page(self):
+        if self._page > 0:
+            self._page -= 1
+            self._render_page()
+
+    def next_page(self):
+        if self._page + 1 < self._total_pages():
+            self._page += 1
+            self._render_page()
+
+    def _render_page(self):
         for w in self.song_buttons_frame.winfo_children():
             w.destroy()
+        self.row_widgets = []
 
-        self.song_buttons.clear()
-        # Active index is set in _update_playback_ui_state later
+        start = self._page * PAGE_SIZE
+        end = min(start + PAGE_SIZE, len(self._result_ids))
+        page_ids = list(self._result_ids[start:end])
+        metas = self.db.get_songs(page_ids)
 
-        for i, f in enumerate(files):
-            name = os.path.basename(f)
+        for offset, sid in enumerate(page_ids):
+            global_index = start + offset
+            meta = metas.get(sid)
+            text = f"{global_index + 1}.  {_fmt_row(meta, None)}"
 
             row = ctk.CTkFrame(self.song_buttons_frame, fg_color=PANEL, corner_radius=6)
             row.pack(fill="x", padx=4, pady=2)
 
             btn = ctk.CTkButton(
-                row, text=f"{i + 1}.  {name}",
+                row, text=text,
                 fg_color=PANEL, hover_color=ACCENT, text_color=TEXT,
                 anchor="w", height=30, corner_radius=6,
-                command=lambda idx=i: self.play_song(idx))
+                command=lambda gi=global_index: self.play_result(gi))
             btn.pack(side="left", fill="x", expand=True)
 
-            ctk.CTkButton(
-                row, text="✕", width=32, height=30,
-                fg_color="transparent", hover_color=DANGER,
-                text_color=MUTED, corner_radius=6,
-                command=lambda idx=i: self.remove_song(idx)
-            ).pack(side="right", padx=2)
+            self.row_widgets.append((global_index, btn))
 
-            self.song_buttons.append(btn)
+        total_pages = self._total_pages()
+        self.page_label.configure(text=f"Page {self._page + 1} / {total_pages}")
+        self.prev_page_btn.configure(state="normal" if self._page > 0 else "disabled")
+        self.next_page_btn.configure(
+            state="normal" if self._page + 1 < total_pages else "disabled")
 
-        self._filter_playlist()
-        self._update_playback_ui_state() # Update UI after loading new playlist
-
-    def _filter_playlist(self):
-        search = self.search_entry.get().lower()
-
-        for i, row_widget in enumerate(self.song_buttons_frame.winfo_children()):
-            if i < len(self.engine.playlist): # Ensure index is valid for current playlist
-                # Get the actual song path from engine.playlist, as it's the source of truth
-                song_path = self.engine.playlist[i]
-                name = os.path.basename(song_path).lower()
-
-                if search in name:
-                    row_widget.pack(fill="x", padx=4, pady=2)
-                else:
-                    row_widget.pack_forget()
-            else:
-                row_widget.pack_forget()
-
+        self._highlight_active()
 
     # ── Playback ─────────────────────────────────────────────
 
-    def play_song(self, index):
-        self.engine.play_at(index)
-        self._update_playback_ui_state() # Update UI after explicit play
+    def play_result(self, global_index):
+        self.engine.load_ids(self.db, self._result_ids, start_index=global_index)
+        self.engine.play()
+        self._update_playback_ui_state()
+
+    def shuffle_all(self):
+        ids = self.db.all_ids()
+        if not len(ids):
+            self.status.configure(text="Library is empty — set a music folder first")
+            return
+        start = random.randrange(len(ids))
+        self.engine.load_ids(self.db, ids, start_index=start)
+        self.engine.shuffle = True
+        self.shuffle_btn.configure(fg_color=ACCENT)
+        self.engine.play()
+        self._update_playback_ui_state()
+
+    def play_all(self):
+        ids = self.db.all_ids()
+        if not len(ids):
+            self.status.configure(text="Library is empty — set a music folder first")
+            return
+        self.engine.load_ids(self.db, ids, start_index=0)
+        self.engine.play()
+        self._update_playback_ui_state()
 
     def play(self):
         self.engine.play()
-        self._update_playback_ui_state() # Update UI after explicit play
+        self._update_playback_ui_state()
 
     def pause(self):
         self.engine.pause()
-        self._update_playback_ui_state() # Update UI after explicit pause
+        self._update_playback_ui_state()
 
     def next(self):
         self.engine.next()
-        self._update_playback_ui_state() # Update UI after explicit next
+        self._update_playback_ui_state()
 
     def prev(self):
         self.engine.prev()
-        self._update_playback_ui_state() # Update UI after explicit prev
+        self._update_playback_ui_state()
 
     def set_volume(self, value):
         self.engine.set_volume(value)
@@ -319,10 +483,7 @@ class MusicPage(ctk.CTkFrame):
 
     def toggle_shuffle(self):
         self.engine.shuffle = not self.engine.shuffle
-        if self.engine.shuffle:
-            self.shuffle_btn.configure(text="🔀  Shuffle", fg_color=ACCENT)
-        else:
-            self.shuffle_btn.configure(text="🔀  Shuffle", fg_color=PANEL_2)
+        self.shuffle_btn.configure(fg_color=ACCENT if self.engine.shuffle else PANEL_2)
 
     def toggle_repeat(self):
         modes = ["off", "all", "one"]
@@ -336,143 +497,91 @@ class MusicPage(ctk.CTkFrame):
         else:
             self.repeat_btn.configure(text="🔂  Repeat One", fg_color="#2ecc71")
 
-    # ── Remove Song ───────────────────────────────────────────
-
-    def remove_song(self, index):
-        self.engine.remove_track(index)
-        self._load_playlist(self.engine.playlist) # Reload playlist to update buttons
-        self.status.configure(text="Removed") # Status will be overridden by _update_playback_ui_state soon
-        self._update_playback_ui_state() # Ensure UI reflects new state
-
     # ── Highlight ─────────────────────────────────────────────
 
     def _highlight_active(self):
-        for i, btn in enumerate(self.song_buttons):
-            if i == self.active_index:
+        for global_index, btn in self.row_widgets:
+            if global_index == self.active_index and self._current_queue_is(self._result_ids):
                 btn.configure(fg_color=ACCENT, text_color="white")
             else:
-                original_fg_color = PANEL
-                # Check if the song's row is currently visible due to search filter
-                if self.engine.playlist and i < len(self.engine.playlist):
-                    song_path = self.engine.playlist[i]
-                    search = self.search_entry.get().lower()
-                    if search in os.path.basename(song_path).lower():
-                        btn.configure(fg_color=original_fg_color, text_color=TEXT)
-                    # Else, if not in search, it's packed_forget, no need to configure its color
-                else: # Fallback if playlist is empty or index out of bounds
-                     btn.configure(fg_color=original_fg_color, text_color=TEXT)
+                btn.configure(fg_color=PANEL, text_color=TEXT)
 
+    def _current_queue_is(self, ids):
+        # Only highlight a browse row as "active" when the engine's queue is
+        # actually this same result set (not, say, an ad-hoc "Add Files" list).
+        playlist = self.engine.playlist
+        return getattr(playlist, "ids", None) is ids
 
     # ── NEW: Unified UI Playback State Updater ────────────────
 
     def _update_playback_ui_state(self):
-        """
-        Updates the UI elements (active song label, highlight, status, Discord RPC)
-        based on the current state of the VLCMusicEngine.
-        This should be called whenever the engine's playback state or index might have changed.
-        """
         current_engine_index = self.engine.index
         is_playing = self.engine.is_playing()
         engine_state = self.engine.get_state()
 
-        # Update active song highlight if index has changed
         if current_engine_index != self.active_index:
             self.active_index = current_engine_index
             self._highlight_active()
-            # If the index changed, it implies a new song is starting or has changed state
-            self.update_discord_song(force_update=True) # Force update Discord RPC
+            self.update_discord_song(force_update=True)
 
-        # Update current song label
         if self.engine.playlist and 0 <= self.active_index < len(self.engine.playlist):
-            self.current_song_label.configure(
-                text=os.path.basename(self.engine.playlist[self.active_index]))
+            meta = self.engine.get_current_meta()
+            if meta:
+                self.current_song_label.configure(text=_fmt_row(meta, None))
+            else:
+                self.current_song_label.configure(
+                    text=os.path.basename(self.engine.playlist[self.active_index]))
         else:
             self.current_song_label.configure(text="Nothing playing")
 
-
-        # Update status label
         if is_playing:
             self.status.configure(text=f"Playing ▶ Track {self.active_index + 1}")
-            # If we are playing, ensure Discord RPC is updated
             if not self._discord_rpc_active:
                 self.update_discord_song(force_update=True)
         elif engine_state == State.Paused:
             self.status.configure(text="Paused ⏸")
-            # Clear Discord RPC if transitioning to paused from playing
             if self._discord_rpc_active:
                 self.update_discord_song(force_clear=True)
         elif (current_engine_index == -1 and not self.engine.playlist) or \
              (current_engine_index == -1 and self.engine.playlist and engine_state == State.Stopped):
-            # No songs loaded OR Playlist loaded but stopped (e.g., after stop button or end of playlist without repeat)
             self.status.configure(text="Idle" if not self.engine.playlist else "Stopped")
-            # Clear Discord RPC if not playing and RPC was active
             if self._discord_rpc_active:
                 self.update_discord_song(force_clear=True)
-        elif engine_state == State.Ended: # Should usually be caught by next song playing, but as fallback
+        elif engine_state == State.Ended:
             self.status.configure(text="Finished")
-            # Clear Discord RPC if truly finished and RPC was active
             if self._discord_rpc_active:
                 self.update_discord_song(force_clear=True)
 
     # ──────────────────────────────────────────────────────────
 
-    # ── Helpers ───────────────────────────────────────────
-
-    def get_song_info(self, filepath):
-        try:
-            audio = MutagenFile(filepath, easy=True)
-            if audio:
-                title = None
-                artist = None
-
-                if "title" in audio:
-                    title = audio["title"][0]
-
-                if "artist" in audio:
-                    artist = audio["artist"][0]
-
-                if artist and title:
-                    return f"{artist} - {title}"
-                if title:
-                    return title
-        except Exception:
-            pass
-        return os.path.basename(filepath)
-
-    def update_discord_song(self, force_clear=False, force_update=False): # Added flags
+    def update_discord_song(self, force_clear=False, force_update=False):
         try:
             discord_service = self.manager.container.discord_service
 
             if force_clear:
-                if self._discord_rpc_active: # Only clear if it was active
+                if self._discord_rpc_active:
                     discord_service.clear()
                     self._discord_rpc_active = False
                 return
 
             if self.engine.index < 0 or not self.engine.is_playing():
-                if self._discord_rpc_active: # Only clear if it was active
+                if self._discord_rpc_active:
                     discord_service.clear()
                     self._discord_rpc_active = False
                 return
 
-            filepath = self.engine.playlist[self.engine.index]
-            song = self.get_song_info(filepath)
+            meta = self.engine.get_current_meta()
+            song = _fmt_row(meta, self.engine.playlist[self.engine.index]) if meta \
+                else os.path.basename(self.engine.playlist[self.engine.index])
 
-            # Only update RPC if a change is needed or forced
             if force_update or not self._discord_rpc_active or \
                (self._discord_rpc_active and discord_service.last_details != "🎵 Listening to Music") or \
-               (self._discord_rpc_active and discord_service.last_state != song): # Assuming last_details/state exists in DiscordService
-                discord_service.update(
-                    "🎵 Listening to Music",
-                    song
-                )
-                self._discord_rpc_active = True # Mark RPC as active
-                # To prevent unnecessary updates, you might also want to store
-                # the last updated details/state in DiscordService and check against them.
+               (self._discord_rpc_active and discord_service.last_state != song):
+                discord_service.update("🎵 Listening to Music", song)
+                self._discord_rpc_active = True
 
         except Exception as e:
             print(f"Error updating Discord RPC: {e}")
-            # Ensure Discord status is cleared on error and mark RPC as inactive
             if self._discord_rpc_active:
                 try:
                     discord_service.clear()
