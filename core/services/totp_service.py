@@ -115,12 +115,26 @@ class TotpService:
 
     FILE = paths.data_path("totp.json")
 
+    # Deleted entries land here instead of disappearing outright — a
+    # misclick on the remove button (or removing the wrong account) would
+    # otherwise mean re-doing 2FA setup with the site itself, which isn't
+    # always possible without the original device. Trash is capped by age
+    # rather than count, same idea as a recycle bin.
+    TRASH_FILE = paths.data_path("totp_trash.json")
+    TRASH_RETENTION_DAYS = 30
+
     def __init__(self, crypto):
         self.crypto = crypto
 
         if not os.path.exists(self.FILE):
             with open(self.FILE, "w") as f:
                 json.dump([], f)
+
+        if not os.path.exists(self.TRASH_FILE):
+            with open(self.TRASH_FILE, "w") as f:
+                json.dump([], f)
+
+        self._purge_expired_trash()
 
     def _load(self):
         try:
@@ -131,6 +145,17 @@ class TotpService:
 
     def _save(self, data):
         with open(self.FILE, "w") as f:
+            json.dump(data, f, indent=4)
+
+    def _load_trash(self):
+        try:
+            with open(self.TRASH_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            return []
+
+    def _save_trash(self, data):
+        with open(self.TRASH_FILE, "w") as f:
             json.dump(data, f, indent=4)
 
     # ---------------- CREATE ----------------
@@ -151,11 +176,96 @@ class TotpService:
         })
         self._save(data)
 
-    # ---------------- DELETE ----------------
+    # ---------------- DELETE / RECOVER ----------------
 
     def delete_entry(self, entry_id: str):
-        data = [item for item in self._load() if item.get("id") != entry_id]
+        """Soft delete: moves the entry to trash rather than erasing it,
+        so an accidental click (or the wrong row) can be undone. Use
+        purge_entry() for a permanent, unrecoverable delete."""
+        data = self._load()
+        keep, removed = [], None
+        for item in data:
+            if item.get("id") == entry_id:
+                removed = item
+            else:
+                keep.append(item)
+
+        if removed is None:
+            return
+
+        self._save(keep)
+
+        trash = self._load_trash()
+        removed["deleted"] = datetime.now().isoformat()
+        trash.append(removed)
+        self._save_trash(trash)
+
+    def get_trash(self):
+        """Deleted entries still awaiting purge, decrypted for display —
+        same trust boundary as get_entries() (vault must be unlocked)."""
+        results = []
+        for item in self._load_trash():
+            try:
+                results.append({
+                    "id": item.get("id"),
+                    "name": item.get("name", "Account"),
+                    "issuer": item.get("issuer", ""),
+                    "secret": self.crypto.decrypt(item["secret"]),
+                    "created": item.get("created", ""),
+                    "deleted": item.get("deleted", ""),
+                })
+            except Exception:
+                pass
+
+        results.sort(key=lambda e: e["deleted"], reverse=True)
+        return results
+
+    def restore_entry(self, entry_id: str):
+        """Moves an entry back out of trash and into the live list."""
+        trash = self._load_trash()
+        keep, restored = [], None
+        for item in trash:
+            if item.get("id") == entry_id:
+                restored = item
+            else:
+                keep.append(item)
+
+        if restored is None:
+            return False
+
+        self._save_trash(keep)
+
+        restored.pop("deleted", None)
+        data = self._load()
+        data.append(restored)
         self._save(data)
+        return True
+
+    def purge_entry(self, entry_id: str):
+        """Permanently, irreversibly deletes a trashed entry."""
+        trash = [item for item in self._load_trash() if item.get("id") != entry_id]
+        self._save_trash(trash)
+
+    def _purge_expired_trash(self):
+        """Drops trash entries older than TRASH_RETENTION_DAYS. Called on
+        startup so trash doesn't grow forever, without needing a background
+        timer — cheap because it only runs once per app launch."""
+        trash = self._load_trash()
+        if not trash:
+            return
+
+        cutoff = datetime.now().timestamp() - (self.TRASH_RETENTION_DAYS * 86400)
+        kept = []
+        for item in trash:
+            try:
+                deleted_at = datetime.fromisoformat(item.get("deleted", "")).timestamp()
+                if deleted_at >= cutoff:
+                    kept.append(item)
+            except Exception:
+                kept.append(item)  # malformed timestamp — don't lose data over it
+
+        if len(kept) != len(trash):
+            self._save_trash(kept)
 
     # ---------------- RENAME ----------------
 
