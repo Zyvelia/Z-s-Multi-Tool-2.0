@@ -12,6 +12,8 @@ from core.services.vault_service import VaultService
 from core.services.auth_service import AuthService
 from core.services.totp_service import TotpService
 from core.services.discord_service import DiscordService # Added import
+from core.services.tailscale_service import TailscaleService
+from core.services.vault_web_server import VaultWebServer
 
 from pages.catalog_page import CatalogPage
 from pages.settings_page import SettingsPage
@@ -64,6 +66,24 @@ class App(ctk.CTk):
         self.totp_service = TotpService(
             self.crypto_service
         )
+
+        # =====================================================
+        # REMOTE ACCESS (Tailscale + loopback web server)
+        # =====================================================
+        # Lets the Security Vault's Settings tab expose passwords/TOTP
+        # codes to your phone over your own Tailscale network. The web
+        # server only ever binds to 127.0.0.1; reachability from the
+        # phone comes from `tailscale serve` reverse-proxying that
+        # loopback port over HTTPS to your tailnet. Nothing is started
+        # here — it stays off until toggled on from Settings.
+
+        self.tailscale_service = TailscaleService()
+
+        self.vault_web_server = VaultWebServer({
+            "auth_service": self.auth_service,
+            "vault_service": self.vault_service,
+            "totp_service": self.totp_service,
+        })
 
         # =====================================================
         # PAGE MANAGER
@@ -154,6 +174,13 @@ class App(ctk.CTk):
     def quit_app(self):
         """Full quit: X button or tray 'Quit'. Never leaves a tray icon behind."""
         self.tray.hide()
+        try:
+            self.tailscale_service.cancel_auto_off_timer()
+            if self.vault_web_server.is_running():
+                self.tailscale_service.disable_serve()
+                self.vault_web_server.stop()
+        except Exception:
+            pass
         try:
             self.quit()
         finally:

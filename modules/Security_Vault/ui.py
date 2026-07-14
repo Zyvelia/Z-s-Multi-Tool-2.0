@@ -12,6 +12,7 @@ except ImportError:
 from core import theme
 from core.services.auth_service import AuthService
 from .authenticator_tab import AuthenticatorTab
+from .remote_access_tab import RemoteAccessTab
 
 BG = theme.BG
 PANEL = theme.PANEL
@@ -122,6 +123,7 @@ class PasswordVaultPage(ctk.CTkFrame):
 
         passwords_tab = self.tabview.add("🔐 Passwords")
         authenticator_tab = self.tabview.add("🔑 Authenticator")
+        settings_tab = self.tabview.add("⚙ Settings")
 
         passwords_tab.grid_rowconfigure(1, weight=1)
         passwords_tab.grid_columnconfigure(0, weight=1)
@@ -129,7 +131,11 @@ class PasswordVaultPage(ctk.CTkFrame):
         authenticator_tab.grid_rowconfigure(0, weight=1)
         authenticator_tab.grid_columnconfigure(0, weight=1)
 
+        settings_tab.grid_rowconfigure(0, weight=1)
+        settings_tab.grid_columnconfigure(0, weight=1)
+
         AuthenticatorTab(authenticator_tab, self.manager).grid(row=0, column=0, sticky="nsew")
+        RemoteAccessTab(settings_tab, self.manager).grid(row=0, column=0, sticky="nsew")
 
         # ---------------- STATS (Better Dashboard Stats Card) ----------------
 

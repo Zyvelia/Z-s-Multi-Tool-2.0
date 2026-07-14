@@ -22,10 +22,10 @@ PANEL_2 = "#1b2030"      # secondary buttons, inputs, "CARD"/"raised" surfaces
 PANEL_HOVER = "#212739"  # hover state for cards/panels
 BORDER = "#252d3d"       # subtle separators / card borders
 
-ACCENT = "#4ea1ff"
-ACCENT_HOVER = "#75b6ff"
-ACCENT_DIM = "#2f7fd6"
-ACCENT_MUTED = "#274873"
+ACCENT = "#a78bfa"
+ACCENT_HOVER = "#c4b5fd"
+ACCENT_DIM = "#8b5cf6"
+ACCENT_MUTED = "#3b2f63"
 
 DANGER = "#b33939"
 DANGER_BG = "#2a1b1b"
@@ -49,7 +49,7 @@ TEXT_MID = MUTED
 TEXT_LOW = FAINT
 RED = DANGER
 RED_DIM = "#8f2d2d"
-ACCENT_GLOW = "#152035"   # faint tinted fill, used behind selected rows/tabs
+ACCENT_GLOW = "#211a35"   # faint tinted fill, used behind selected rows/tabs
 
 # =====================================================
 # FONTS

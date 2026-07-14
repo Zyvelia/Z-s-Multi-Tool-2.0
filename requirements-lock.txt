@@ -61,6 +61,7 @@ PySide6_Addons==6.11.1
 PySide6_Essentials==6.11.1
 pystray==0.19.5
 python-dateutil==2.9.0.post0
+python-mpv==1.0.8
 python-nmap==0.7.1
 python-vlc==3.0.21203
 pythonnet==3.1.0
@@ -76,6 +77,9 @@ shiboken6==6.11.1
 six==1.17.0
 sounddevice==0.5.5
 soundfile==0.14.0
+tkinterdnd2==0.6.2
+tkinterweb==4.25.3
+tkinterweb-tkhtml==2.1.1
 typing_extensions==4.15.0
 urllib3==2.7.0
 Werkzeug==3.1.8

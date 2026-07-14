@@ -11,7 +11,7 @@ def register(manager):
     manager.register({
         "name": "Music Player",
         "category": "Media",
-        "desc": "PyGame-powered audio player with a SQLite-indexed library (handles 750,000+ songs)",
+        "desc": "PyGame-powered audio player with a SQLite-indexed library",
         "icon": "🎵",
         "open": open_music,
         "widget": build_mini_widget
