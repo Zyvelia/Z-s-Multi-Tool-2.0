@@ -1,8 +1,10 @@
 import customtkinter as ctk
 from tkinter import filedialog
 import os
-import re
 import json
+import sys
+import subprocess
+import urllib.request
 import threading
 
 try:
@@ -57,10 +59,6 @@ def _find_ffmpeg() -> str:
     return None       # still let yt-dlp try
 
 
-def _sanitize(name: str) -> str:
-    return re.sub(r'[<>:"/\\|?*]', '', name).strip()
-
-
 # ── Main page ─────────────────────────────────────────────────────────────────
 
 class YTDownloaderPage(ctk.CTkFrame):
@@ -73,6 +71,7 @@ class YTDownloaderPage(ctk.CTkFrame):
 
         self._build_ui()
         self._load_settings()
+        threading.Thread(target=self._check_for_update, daemon=True).start()
 
     # ── Build ──────────────────────────────────────────────────────────────────
 
@@ -113,6 +112,10 @@ class YTDownloaderPage(ctk.CTkFrame):
         self._dl_btn = _make_btn(inner, "⬇  Download", self._start_download,
                                  **_BTN_ACCENT, width=130)
         self._dl_btn.pack(side="left")
+
+        self._update_btn = _make_btn(inner, "⟳  Update yt-dlp", self._start_update,
+                                     width=140)
+        self._update_btn.pack(side="left", padx=(8, 0))
 
     def _build_options_row(self):
         panel = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
@@ -262,6 +265,107 @@ class YTDownloaderPage(ctk.CTkFrame):
         entry.insert(0, value)
         entry.configure(state='readonly')
 
+    # ── yt-dlp updates ────────────────────────────────────────────────────────
+
+    def _check_for_update(self):
+        """Best-effort, silent-on-failure check against PyPI for a newer yt-dlp."""
+        if youtube_dl is None:
+            return
+        try:
+            current = youtube_dl.version.__version__
+        except Exception:
+            return
+        try:
+            with urllib.request.urlopen(
+                "https://pypi.org/pypi/yt-dlp/json", timeout=5
+            ) as resp:
+                data = json.load(resp)
+            latest = data.get("info", {}).get("version")
+        except Exception:
+            return
+        if not latest:
+            return
+        # yt-dlp versions are dates (YYYY.MM.DD[.rev]) but aren't always
+        # zero-padded consistently between sources (e.g. "2026.7.4" vs
+        # "2026.07.04" are the same release) — compare numerically per
+        # segment rather than as raw strings to avoid false positives.
+        def _parts(v):
+            out = []
+            for p in v.split("."):
+                try:
+                    out.append(int(p))
+                except ValueError:
+                    out.append(p)
+            return out
+
+        if _parts(latest) != _parts(current):
+            self._log_msg(f"ℹ A newer yt-dlp is available: {latest} (you have {current}). "
+                          f"Click 'Update yt-dlp' to install it.")
+
+    def _start_update(self):
+        if youtube_dl is None:
+            self._log_msg("❌ yt-dlp not installed. Run: pip install yt-dlp")
+            return
+        self._update_btn.configure(state="disabled", text="Updating…")
+        threading.Thread(target=self._update_worker, daemon=True).start()
+
+    def _update_worker(self):
+        try:
+            # A frozen/bundled build (PyInstaller etc.) has no pip and no
+            # source install to upgrade — running pip here would either fail
+            # outright or silently update an environment the app doesn't
+            # actually use. Tell the user plainly instead of pretending it
+            # worked.
+            if getattr(sys, "frozen", False):
+                self._log_msg(
+                    "❌ This is a bundled build — it has no pip to update itself. "
+                    "Grab the latest release build, or run the app from source "
+                    "with 'pip install -U yt-dlp' in that environment."
+                )
+                return
+
+            self._log_msg("Checking for pip...")
+            try:
+                subprocess.run(
+                    [sys.executable, "-m", "pip", "--version"],
+                    check=True, capture_output=True, text=True,
+                )
+            except FileNotFoundError:
+                self._log_msg(
+                    "❌ Couldn't find Python/pip on PATH. Install pip, or update "
+                    "manually with: pip install -U yt-dlp"
+                )
+                return
+            except subprocess.CalledProcessError as e:
+                self._log_msg(f"❌ pip isn't working: {e.stderr or e}")
+                return
+
+            self._log_msg("Updating yt-dlp...")
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "--upgrade", "yt-dlp"],
+                capture_output=True, text=True,
+            )
+            stdout = result.stdout or ""
+            for line in stdout.splitlines():
+                self._log_msg(line)
+            if result.returncode != 0:
+                self._log_msg(f"❌ Update failed: {result.stderr.strip()}")
+                return
+
+            if "Successfully installed" in stdout:
+                self._log_msg(
+                    "✅ yt-dlp updated. Restart the app for it to take effect."
+                )
+            else:
+                # "Requirement already satisfied" case — pip exits 0 having
+                # done nothing, so don't claim an update happened.
+                self._log_msg("✅ Already up to date — nothing to install.")
+        except Exception as e:
+            self._log_msg(f"❌ Update error: {e}")
+        finally:
+            self.after(0, lambda: self._update_btn.configure(
+                state="normal", text="⟳  Update yt-dlp"))
+
     # ── File pickers ──────────────────────────────────────────────────────────
 
     def _browse_output(self):
@@ -377,13 +481,35 @@ class YTDownloaderPage(ctk.CTkFrame):
             else:
                 outtmpl = os.path.join(output_dir, "%(title)s.%(ext)s")
 
+            # android/ios/web_safari don't support cookies and get silently
+            # skipped when a cookiefile is set, which was leaving only the
+            # "tv" client in play (the one hitting 403s). Pick clients that
+            # actually get used for the auth mode in play.
+            if cookie:
+                player_clients = ["web", "mweb", "tv"]
+            else:
+                player_clients = ["default", "android", "ios"]
+
             opts = {
-                "outtmpl":        outtmpl,
-                "logger":         _YTLogger(),
-                "progress_hooks": [self._progress_hook],
-                "quiet":          True,
-                "no_warnings":    True,
-                "noplaylist":     dl_type != "playlist",
+                "outtmpl":         outtmpl,
+                "logger":          _YTLogger(),
+                "progress_hooks":  [self._progress_hook],
+                "quiet":           True,
+                "no_warnings":     True,
+                "noplaylist":      dl_type != "playlist",
+                # Sanitize titles for illegal filesystem characters instead of
+                # relying on the unused _sanitize() helper.
+                "windowsfilenames": True,
+                # Retry harder — YouTube throttling/403s are often transient.
+                "retries":          10,
+                "fragment_retries": 10,
+                # Don't let one bad video in a playlist kill the whole batch.
+                "ignoreerrors":     dl_type == "playlist",
+                "extractor_args": {
+                    "youtube": {
+                        "player_client": player_clients,
+                    }
+                },
             }
 
             if self.ffmpeg_dir:
@@ -405,19 +531,56 @@ class YTDownloaderPage(ctk.CTkFrame):
 
             if cookie:
                 self._log_msg(f"Using cookie file: {cookie}")
+            try:
+                ver = youtube_dl.version.__version__
+            except Exception:
+                ver = "unknown"
+            self._log_msg(f"yt-dlp version: {ver}")
             self._log_msg("Starting download...")
 
-            with youtube_dl.YoutubeDL(opts) as ydl:
-                ydl.download([url])
+            try:
+                with youtube_dl.YoutubeDL(opts) as ydl:
+                    ret = ydl.download([url])
+            except youtube_dl.utils.DownloadError as e:
+                # YouTube is currently 403'ing the split adaptive audio/video
+                # streams for some videos while the combined "progressive"
+                # format (itag 18) still works. Retry once with that before
+                # giving up.
+                if "403" in str(e) and opts.get("format") != "18/best":
+                    self._log_msg(
+                        "⚠ Adaptive stream blocked (403) — retrying with a "
+                        "combined format (18)…"
+                    )
+                    fallback_opts = dict(opts)
+                    fallback_opts["format"] = "18/best"
+                    with youtube_dl.YoutubeDL(fallback_opts) as ydl:
+                        ret = ydl.download([url])
+                else:
+                    raise
 
-            self._log_msg("✅ Download complete!")
-            self._set_status("✅ Done", SUCCESS)
-            self._set_progress(1.0)
+            # With ignoreerrors=True (playlist mode), failures don't raise —
+            # ydl.download() returns non-zero instead. Report that honestly
+            # rather than always claiming success.
+            if ret:
+                self._log_msg("⚠ Finished, but one or more items failed — see errors above.")
+                self._set_status("⚠ Finished with errors", "#f0a500")
+            else:
+                self._log_msg("✅ Download complete!")
+                self._set_status("✅ Done", SUCCESS)
+                self._set_progress(1.0)
 
         except Exception as e:
             import traceback
             self._log_msg(f"❌ Error: {e}")
             self._log_msg(traceback.format_exc())
+            msg = str(e)
+            if "403" in msg or "unavailable" in msg.lower():
+                self._log_msg(
+                    "💡 YouTube changes how it blocks downloaders often. "
+                    "If this just started happening, run: pip install -U yt-dlp "
+                    "(or 'yt-dlp -U' / '--update-to nightly' if it's a standalone exe) "
+                    "and try again."
+                )
             self._set_status("❌ Failed", DANGER)
 
         finally:
