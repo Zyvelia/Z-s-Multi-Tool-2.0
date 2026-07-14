@@ -59,6 +59,14 @@ class GamingHubUI(ctk.CTkFrame):
         self.hub_settings = self.load_hub_settings()
         self.build_ui()
 
+        # Show last-known results instantly from cache (no scanning),
+        # then optionally kick off a real rescan in the background if
+        # auto_scan is enabled — the cached list gets replaced once
+        # that finishes.
+        cached_games = self.scanner.load_cache()
+        if cached_games:
+            self.display_games(cached_games)
+
         if self.hub_settings.get("auto_scan"):
             self.after(200, self.scan_games)
 
@@ -228,6 +236,22 @@ class GamingHubUI(ctk.CTkFrame):
             command=lambda x: self.load_selected_game_path()
         )
 
+        hide_row = ctk.CTkFrame(panel, fg_color="transparent")
+        hide_row.pack(fill="x", padx=20, pady=(0, 4))
+
+        self._ghost_btn(
+            hide_row, "🙈 Hide from list",
+            command=self.hide_save_game, width=140
+        ).pack(side="left")
+
+        self._ghost_btn(
+            hide_row, "👁 Unhide a game…",
+            command=self.open_unhide_menu, width=140
+        ).pack(side="left", padx=(6, 0))
+
+        self.unhide_row = ctk.CTkFrame(panel, fg_color="transparent")
+        # packed on demand by open_unhide_menu(), not shown by default
+
         self._section(panel, "Save folder")
 
         path_row = ctk.CTkFrame(panel, fg_color="transparent")
@@ -248,13 +272,9 @@ class GamingHubUI(ctk.CTkFrame):
 
         self._btn(panel, "Save Path",
                   command=self.save_current_path).pack(
-            fill="x", padx=20, pady=(0, 4))
-        
-        self._ghost_btn(panel, "🚫 Hide From Save Manager",
-                        command=self.block_save_game, text_color=RED).pack(
-            fill="x", padx=20, pady=(4, 10))
+            fill="x", padx=20, pady=(0, 10))
 
-        # STEP 2: Add Save Explorer Label
+        # ── Save Explorer ──────────────────────────────
         ctk.CTkLabel(
             panel,
             text="📂 Save Explorer",
@@ -263,13 +283,16 @@ class GamingHubUI(ctk.CTkFrame):
         ).pack(
             anchor="w",
             padx=20,
-            pady=(15, 5)
+            pady=(5, 5)
         )
 
-        # STEP 2: Add Treeview for Save Explorer
+        tree_wrap = ctk.CTkFrame(panel, fg_color="transparent")
+        tree_wrap.pack(fill="x", padx=20, pady=10)
+
         self.file_tree = ttk.Treeview(
-            panel,
-            show="tree headings"
+            tree_wrap,
+            show="tree",
+            height=8
         )
         style = ttk.Style(panel)
         style.theme_use("clam")
@@ -296,19 +319,34 @@ class GamingHubUI(ctk.CTkFrame):
                   background=[('active', BORDER)]
                  )
 
-        self.file_tree.pack(
-            fill="both",
-            expand=True,
-            padx=20,
-            pady=10
+        style.configure("Save.Vertical.TScrollbar",
+                        background=BG_RAISED,
+                        troughcolor=BG_PANEL,
+                        bordercolor=BORDER,
+                        arrowcolor=TEXT_MID,
+                        lightcolor=BG_RAISED,
+                        darkcolor=BG_RAISED,
+                        relief="flat",
+                        gripcount=0
+                       )
+        style.map("Save.Vertical.TScrollbar",
+                  background=[('active', BORDER), ('pressed', BORDER)],
+                  arrowcolor=[('active', ACCENT)]
+                 )
+
+        tree_scroll = ttk.Scrollbar(
+            tree_wrap, orient="vertical", command=self.file_tree.yview,
+            style="Save.Vertical.TScrollbar"
         )
-        # STEP 4: Detect Selection
+        self.file_tree.configure(yscrollcommand=tree_scroll.set)
+
+        self.file_tree.pack(side="left", fill="both", expand=True)
+        tree_scroll.pack(side="right", fill="y")
         self.file_tree.bind(
             "<<TreeviewSelect>>",
             self.file_selected
         )
-        
-        # STEP 3: Add File Information Panel
+
         self.file_info = ctk.CTkLabel(
             panel,
             text="No file selected.",
@@ -321,70 +359,20 @@ class GamingHubUI(ctk.CTkFrame):
             pady=5
         )
 
-        # STEP 12: Add new buttons under file_info
-        buttons = ctk.CTkFrame(panel, fg_color="transparent")
-        buttons.pack(
-            fill="x",
-            padx=20,
-            pady=5
-        )
-
-        # Using _ghost_btn for consistent styling
-        self._ghost_btn(
-            buttons,
-            "📂 Open File",
-            command=self.open_selected_file,
-            width=100
-        ).pack(
-            side="left",
-            padx=(0, 5)
-        )
-
-        self._ghost_btn(
-            buttons,
-            "📁 Open Folder",
-            command=self.open_selected_folder,
-            width=120
-        ).pack(
-            side="left",
-            padx=5
-        )
-
-        self._ghost_btn(
-            buttons,
-            "🗑 Delete",
-            command=self.delete_selected_file,
-            width=80,
-            text_color=RED
-        ).pack(
-            side="left",
-            padx=5
-        )
-
-
-        self._section(panel, "Actions")
-
+        # ── Only two actions: Backup + Deny Write toggle ──
         btn_row = ctk.CTkFrame(panel, fg_color="transparent")
-        btn_row.pack(fill="x", padx=20, pady=(0, 20))
+        btn_row.pack(fill="x", padx=20, pady=(5, 20))
 
-        self._ghost_btn(btn_row, "📂  Open Folder", width=130,
-                        command=self.open_selected_save_folder).pack(
-            side="left", padx=(0, 8))
+        self._btn(
+            btn_row, "💾  Backup", width=140,
+            command=self.backup_selected_path
+        ).pack(side="left", padx=(0, 8))
 
-        self._btn(btn_row, "💾  Backup", width=110,
-                  command=self.backup_selected_game).pack(
-            side="left", padx=(0, 8))
-            
-        self._ghost_btn(btn_row, "🔒 Protect Saves", width=110,
-                        command=self.lock_selected_game, text_color=TEXT_MID).pack(
-            side="left", padx=(0, 8))
-
-        self._ghost_btn(btn_row, "🔓 Unprotect Saves", width=110,
-                        command=self.unlock_selected_game, text_color=TEXT_MID).pack(
-            side="left", padx=(0, 8))
-
-
-        self._ghost_btn(btn_row, "♻  Restore", width=110).pack(side="left")
+        self.deny_write_btn = self._ghost_btn(
+            btn_row, "🔒 Deny Write", width=150,
+            command=self.toggle_deny_write, text_color=TEXT_MID
+        )
+        self.deny_write_btn.pack(side="left")
 
     # ── Settings tab ─────────────────────────────────────
 
@@ -479,6 +467,50 @@ class GamingHubUI(ctk.CTkFrame):
             self._label(panel, "No drives detected.",
                         size=11, color=TEXT_LOW).pack(anchor="w", padx=20)
 
+        # ── Backup output folder ─────────────────────────
+
+        self._section(panel, "Backup Output Folder")
+        self._label(
+            panel,
+            "Where game save backups are written. Leave blank to use "
+            "the default app data folder.",
+            size=11, color=TEXT_LOW
+        ).pack(anchor="w", padx=20, pady=(0, 6))
+
+        backup_row = ctk.CTkFrame(panel, fg_color="transparent")
+        backup_row.pack(fill="x", padx=20, pady=(0, 14))
+
+        self.backup_folder_entry = ctk.CTkEntry(
+            backup_row,
+            placeholder_text="Default app data folder",
+            fg_color=BG_RAISED, border_color=BORDER,
+            text_color=TEXT_HI, placeholder_text_color=TEXT_LOW,
+            font=(FONT, 12)
+        )
+        self.backup_folder_entry.pack(side="left", fill="x", expand=True)
+        current = self.save_manager.settings.get("backup_folder", "")
+        if current:
+            self.backup_folder_entry.insert(0, current)
+
+        self._ghost_btn(
+            backup_row, "Browse", command=self.browse_backup_folder, width=80
+        ).pack(side="left", padx=(6, 0))
+
+        self._btn(
+            panel, "Save Backup Folder",
+            command=self.save_backup_folder_setting
+        ).pack(fill="x", padx=20, pady=(0, 4))
+
+    def browse_backup_folder(self):
+        folder = filedialog.askdirectory()
+        if folder:
+            self.backup_folder_entry.delete(0, "end")
+            self.backup_folder_entry.insert(0, folder)
+
+    def save_backup_folder_setting(self):
+        folder = self.backup_folder_entry.get().strip()
+        self.save_manager.set_backup_folder(folder)
+
     # ── hub settings (persisted to AppData) ──────────────
 
     HUB_SETTINGS_FILE = paths.data_path("gaming_hub", "hub_settings.json")
@@ -556,6 +588,7 @@ class GamingHubUI(ctk.CTkFrame):
         for game in games:
             if not self.save_manager.is_blocked(game.name):
                 names.append(game.name)
+        names.sort(key=str.lower)
 
         if names:
             self.game_dropdown.configure(values=names)
@@ -563,6 +596,13 @@ class GamingHubUI(ctk.CTkFrame):
         else:
             self.game_dropdown.configure(values=["No Games Found"])
             self.game_dropdown.set("No Games Found")
+
+        # CTkOptionMenu.set() above does NOT fire the dropdown's `command`
+        # callback (that only fires on a manual user selection), so
+        # without this the Save Manager tab would show the first game
+        # selected but with no save path / file tree loaded until the
+        # user manually reselects it. Load it explicitly here instead.
+        self.load_selected_game_path()
 
         self.show_games(games)
 
@@ -651,6 +691,7 @@ class GamingHubUI(ctk.CTkFrame):
         if game == "No Games Found":
             self.file_info.configure(text="No file selected.")
             self.file_tree.delete(*self.file_tree.get_children())
+            self._refresh_deny_write_label()
             return
         path = self.save_manager.get_path(game)
         self.save_path_entry.insert(0, path)
@@ -665,36 +706,81 @@ class GamingHubUI(ctk.CTkFrame):
         else:
             print(f"Game path not found or invalid: {game.path}")
 
-    def open_selected_save_folder(self):
-        """Opens the save folder for the currently selected game in the dropdown."""
-        game_name = self.game_dropdown.get()
-        if game_name == "No Games Found":
-            return
-
-        save_path = self.save_path_entry.get().strip()
-        if not save_path:
-             save_path = self.save_manager.get_path(game_name)
-
-        if save_path and os.path.exists(save_path):
-            try:
-                os.startfile(save_path)
-            except Exception as e:
-                print(f"Failed to open save folder for {game_name} at {save_path}: {e}")
-        else:
-            print(f"Save path not found or invalid for {game_name}: {save_path}")
-
-
     def hide_game(self, game):
         self.scanner.block_game(game.name)
         self._scan_thread()
 
-    def block_save_game(self):
+    def hide_save_game(self):
+        """Hides the currently selected game from the Save Manager
+        dropdown only (the game still shows up fine in the Library tab -
+        this doesn't touch the scanner's block list)."""
         game_name = self.game_dropdown.get()
         if game_name == "No Games Found":
             return
 
         self.save_manager.block_game(game_name)
         self.display_games(self.games)
+
+    def open_unhide_menu(self):
+        """Shows a small dropdown of currently hidden games plus an
+        Unhide button, so a game hidden by mistake can be brought back
+        without having to remember its exact name. Calling this again
+        while it's already open just closes it."""
+        if self.unhide_row.winfo_ismapped():
+            self.close_unhide_menu()
+            return
+
+        for widget in self.unhide_row.winfo_children():
+            widget.destroy()
+
+        hidden = self.save_manager.get_blocked_games()
+
+        if not hidden:
+            self._label(
+                self.unhide_row, "No games are currently hidden.",
+                size=11, color=TEXT_LOW
+            ).pack(side="left", padx=(0, 6))
+            self._ghost_btn(
+                self.unhide_row, "✕", width=32,
+                command=self.close_unhide_menu
+            ).pack(side="left")
+            self.unhide_row.pack(fill="x", padx=20, pady=(0, 4))
+            return
+
+        self.unhide_dropdown = ctk.CTkOptionMenu(
+            self.unhide_row, values=hidden,
+            fg_color=BG_RAISED, button_color=BG_RAISED,
+            button_hover_color=BORDER,
+            dropdown_fg_color=BG_PANEL,
+            dropdown_hover_color=BG_RAISED,
+            text_color=TEXT_HI,
+            font=(FONT, 13)
+        )
+        self.unhide_dropdown.pack(side="left", fill="x", expand=True)
+
+        self._ghost_btn(
+            self.unhide_row, "Unhide", width=90,
+            command=self.unhide_selected_game
+        ).pack(side="left", padx=(6, 0))
+
+        self._ghost_btn(
+            self.unhide_row, "✕", width=32,
+            command=self.close_unhide_menu
+        ).pack(side="left", padx=(6, 0))
+
+        self.unhide_row.pack(fill="x", padx=20, pady=(0, 4))
+
+    def close_unhide_menu(self):
+        self.unhide_row.pack_forget()
+
+    def unhide_selected_game(self):
+        if not hasattr(self, "unhide_dropdown"):
+            return
+
+        game_name = self.unhide_dropdown.get()
+        self.save_manager.unblock_game(game_name)
+        self.display_games(self.games)
+        self.close_unhide_menu()
 
     def filter_games(self, event=None):
         search = self.search_entry.get().lower()
@@ -726,51 +812,6 @@ class GamingHubUI(ctk.CTkFrame):
         for game in games:
             self._build_game_card(game)
 
-    def backup_selected_game(self):
-
-        game_name = self.game_dropdown.get()
-
-        if game_name == "No Games Found":
-
-            return
-
-        try:
-
-            backup = self.save_manager.backup_game(
-                game_name
-            )
-
-            print(
-                f"Backup created: {backup}"
-            )
-
-        except ValueError as e:
-            print(f"Backup failed: {e}")
-        except Exception as e:
-            print(f"An unexpected error occurred during backup: {e}")
-
-    def lock_selected_game(self):
-        game_name = self.game_dropdown.get()
-        if game_name == "No Games Found":
-            return
-
-        try:
-            self.save_manager.lock_saves(game_name)
-            print(f"Saves for {game_name} protected (read-only).")
-        except Exception as e:
-            print(f"Failed to protect saves for {game_name}: {e}")
-
-    def unlock_selected_game(self):
-        game_name = self.game_dropdown.get()
-        if game_name == "No Games Found":
-            return
-
-        try:
-            self.save_manager.unlock_saves(game_name)
-            print(f"Saves for {game_name} unprotected (read-write).")
-        except Exception as e:
-            print(f"Failed to unprotect saves for {game_name}: {e}")
-
     def format_size(self, size):
         for unit in ["B", "KB", "MB", "GB"]:
             if size < 1024:
@@ -782,6 +823,7 @@ class GamingHubUI(ctk.CTkFrame):
         selected_items = self.file_tree.selection()
         if not selected_items:
             self.file_info.configure(text="No file selected.")
+            self._refresh_deny_write_label()
             return
 
         item_id = selected_items[0]
@@ -790,12 +832,18 @@ class GamingHubUI(ctk.CTkFrame):
 
         if not values:
             self.file_info.configure(text="No file selected.")
+            self._refresh_deny_write_label()
             return
 
         path = values[0]
 
+        lock_status = "🔒 Protected (read-only + ACL deny)" if self.save_manager.is_locked(path) else "🔓 Writable"
+
         if not os.path.isfile(path):
-            self.file_info.configure(text=f"Selected: {os.path.basename(path)} (Folder)")
+            self.file_info.configure(
+                text=f"Selected: {os.path.basename(path)} (Folder) — {lock_status}"
+            )
+            self._refresh_deny_write_label()
             return
 
         size = self.format_size(os.path.getsize(path))
@@ -806,10 +854,11 @@ class GamingHubUI(ctk.CTkFrame):
         self.file_info.configure(
             text=(
                 f"{os.path.basename(path)}\n"
-                f"Size: {size}\n"
+                f"Size: {size} | {lock_status}\n"
                 f"Modified: {modified.strftime('%Y-%m-%d %H:%M:%S')}"
             )
         )
+        self._refresh_deny_write_label()
 
     def load_save_tree(self):
         game = self.game_dropdown.get()
@@ -820,6 +869,7 @@ class GamingHubUI(ctk.CTkFrame):
 
         if game == "No Games Found":
             self.file_info.configure(text="No game selected for Save Explorer.")
+            self._refresh_deny_write_label()
             return
 
         try:
@@ -827,24 +877,28 @@ class GamingHubUI(ctk.CTkFrame):
 
             if not data:
                 self.file_info.configure(text="No save files found for this game.")
+                self._refresh_deny_write_label()
                 return
 
             for folder_path, files in data:
                 parent_full_path = os.path.join(self.save_manager.get_path(game), folder_path)
-                
+                folder_lock = "🔒" if self.save_manager.is_locked(parent_full_path) else "📁"
+
                 if folder_path == ".":
                     parent_id = self.file_tree.insert(
                         "",
                         "end",
-                        text="📁 (Root Folder)",
-                        values=(parent_full_path,)
+                        text=f"{folder_lock} (Root Folder)",
+                        values=(parent_full_path,),
+                        open=True
                     )
                 else:
                     parent_id = self.file_tree.insert(
                         "",
                         "end",
-                        text=f"📁 {folder_path}",
-                        values=(parent_full_path,)
+                        text=f"{folder_lock} {folder_path}",
+                        values=(parent_full_path,),
+                        open=True
                     )
 
                 for file in files:
@@ -853,13 +907,15 @@ class GamingHubUI(ctk.CTkFrame):
                         folder_path,
                         file
                     )
+                    file_icon = "🔒" if self.save_manager.is_locked(full_path) else "📄"
                     self.file_tree.insert(
                         parent_id,
                         "end",
-                        text=f"📄 {file}",
+                        text=f"{file_icon} {file}",
                         values=(full_path,)
                     )
             self.file_info.configure(text="Select a file or folder above.")
+            self._refresh_deny_write_label()
 
         except Exception as e:
             self.file_info.configure(text=f"Error loading save tree: {e}")
@@ -878,56 +934,52 @@ class GamingHubUI(ctk.CTkFrame):
 
         return values[0]
 
-    def open_selected_file(self):
-        path = self.get_selected_path()
-        if not path:
-            return
-        
-        if os.path.isfile(path):
-            try:
-                os.startfile(path)
-            except Exception as e:
-                print(f"Failed to open file {path}: {e}")
-        else:
-            print(f"Path is not a file: {path}")
-
-    def open_selected_folder(self):
-        path = self.get_selected_path()
-        if not path:
-            return
-        
-        if os.path.isdir(path):
-            folder_to_open = path
-        else:
-            folder_to_open = os.path.dirname(path)
-
-        if os.path.exists(folder_to_open):
-            try:
-                os.startfile(folder_to_open)
-            except Exception as e:
-                print(f"Failed to open folder {folder_to_open}: {e}")
-        else:
-            print(f"Folder not found: {folder_to_open}")
-
-    def delete_selected_file(self):
-        path = self.get_selected_path()
-        if not path:
+    def backup_selected_path(self):
+        game_name = self.game_dropdown.get()
+        if game_name == "No Games Found":
             return
 
-        if not os.path.exists(path):
-            print(f"File or folder does not exist: {path}")
-            self.load_save_tree()
+        # If something's highlighted in the Save Explorer, back up just
+        # that file/folder. Otherwise fall back to the whole save folder.
+        path = self.get_selected_path()
+
+        try:
+            backup = self.save_manager.backup_game(game_name, source_path=path)
+            self.file_info.configure(text=f"Backed up to:\n{backup}")
+        except Exception as e:
+            self.file_info.configure(text=f"Backup failed: {e}")
+
+    def toggle_deny_write(self):
+        game_name = self.game_dropdown.get()
+        if game_name == "No Games Found":
+            return
+
+        # Same target rule as Backup: the highlighted item if there is
+        # one, otherwise the whole configured save folder.
+        path = self.get_selected_path() or self.save_manager.get_path(game_name)
+        if not path:
+            self.file_info.configure(text="No save folder set for this game.")
             return
 
         try:
-            if os.path.isfile(path):
-                os.remove(path)
-                print(f"Deleted file: {path}")
-            elif os.path.isdir(path):
-                shutil.rmtree(path)
-                print(f"Deleted folder: {path}")
-            
+            if self.save_manager.is_locked(path):
+                self.save_manager.unlock_path(path)
+                self.file_info.configure(text=f"🔓 {os.path.basename(path)} is now writable.")
+            else:
+                self.save_manager.lock_path(path)
+                self.file_info.configure(text=f"🔒 {os.path.basename(path)} is now read-only (ACL deny applied).")
             self.load_save_tree()
-            self.file_info.configure(text="No file selected.")
         except Exception as e:
-            print(f"Failed to delete {path}: {e}")
+            self.file_info.configure(text=f"Failed: {e}")
+
+    def _refresh_deny_write_label(self):
+        game_name = self.game_dropdown.get()
+        if game_name == "No Games Found":
+            self.deny_write_btn.configure(text="🔒 Deny Write")
+            return
+
+        path = self.get_selected_path() or self.save_manager.get_path(game_name)
+        if path and self.save_manager.is_locked(path):
+            self.deny_write_btn.configure(text="🔓 Allow Write")
+        else:
+            self.deny_write_btn.configure(text="🔒 Deny Write")

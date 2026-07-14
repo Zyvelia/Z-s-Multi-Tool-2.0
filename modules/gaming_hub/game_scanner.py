@@ -2,6 +2,8 @@ import os
 import re
 import json
 import string
+import datetime
+from dataclasses import asdict
 
 try:
     import winreg
@@ -22,6 +24,10 @@ class GameScanner:
         paths.data_path("gaming_hub", "blocked_games.json"),
         "modules", "gaming_hub", "blocked_games.json"
     )
+
+    # Where the results of the most recent scan get cached, so other
+    # code (or a future run) can see what was found without rescanning.
+    CACHE_FILE = paths.data_path("gaming_hub", "games_cache.json")
 
     # Common Steam install folder names to check on every drive
     STEAM_SUBPATHS = [
@@ -82,15 +88,47 @@ class GameScanner:
                 candidates.append(os.path.join(f"{drive}\\", sub))
         return candidates
 
+    # Folder names that are almost never where a game's real .exe lives —
+    # redistributable installers, engine internals, DLC blobs, etc. Skipping
+    # these keeps find_exe() from wasting time digging through them on
+    # large/cluttered game folders.
+    SKIP_DIRS = {
+        "_commonredist", "redist", "redistributables",
+        "directx", "dotnet", "vcredist",
+        "engine", "binaries", "intermediate",
+        "dlc", "soundtrack", "extras", "artbook",
+        "__pycache__", ".git",
+    }
+
     # Re-added find_exe method as it's used by scan_steam_library
     def find_exe(
         self,
-        folder
+        folder,
+        max_depth=4
     ):
         """
-        Searches for the first .exe file in the given folder and its subdirectories.
+        Searches for the first .exe file in the given folder and its
+        subdirectories, breadth-first-ish via os.walk.
+
+        max_depth caps how many levels below `folder` it will descend
+        (0 = only the top-level folder itself). Most games put their
+        main .exe at or near the top, so this avoids arbitrarily deep
+        walks through huge, deeply-nested install trees. Known junk
+        folders (see SKIP_DIRS) are pruned outright regardless of depth.
         """
+        base_depth = folder.rstrip(os.sep).count(os.sep)
+
         for root, dirs, files in os.walk(folder):
+            depth = root.rstrip(os.sep).count(os.sep) - base_depth
+
+            if depth >= max_depth:
+                dirs[:] = []  # don't descend any further from here
+            else:
+                dirs[:] = [
+                    d for d in dirs
+                    if d.lower() not in self.SKIP_DIRS
+                ]
+
             for file in files:
                 if file.lower().endswith(".exe"):
                     return os.path.join(
@@ -563,7 +601,47 @@ class GameScanner:
         games.extend(self.scan_ubisoft_library())
         games.extend(self.scan_ea_library())
 
+        self.save_cache(games)
+
         return games
+
+    def save_cache(self, games):
+        """
+        Writes the results of the most recent scan to CACHE_FILE
+        (games_cache.json) so they can be inspected or reloaded without
+        re-scanning the whole machine.
+        """
+        try:
+            os.makedirs(os.path.dirname(self.CACHE_FILE), exist_ok=True)
+            with open(self.CACHE_FILE, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "scanned_at": datetime.datetime.now().isoformat(),
+                        "count": len(games),
+                        "games": [asdict(g) for g in games],
+                    },
+                    f,
+                    indent=4,
+                )
+        except Exception as e:
+            print(f"[GameScanner] Failed saving cache: {e}")
+
+    def load_cache(self):
+        """
+        Loads the last cached scan results from CACHE_FILE, if present.
+        Returns a list of Game objects, or an empty list if there's no
+        cache yet or it can't be read.
+        """
+        if not os.path.exists(self.CACHE_FILE):
+            return []
+
+        try:
+            with open(self.CACHE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return [Game(**g) for g in data.get("games", [])]
+        except Exception as e:
+            print(f"[GameScanner] Failed loading cache: {e}")
+            return []
 
     def load_blocked(self):
         """

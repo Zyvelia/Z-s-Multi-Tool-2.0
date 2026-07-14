@@ -3,6 +3,8 @@ import os
 import shutil
 import datetime
 import stat
+import subprocess
+import getpass
 
 from core import paths
 
@@ -21,10 +23,49 @@ class SaveManager:
 
     BACKUP_FOLDER = paths.data_path("gaming_hub", "backups")
 
+    SETTINGS_FILE = paths.data_path("gaming_hub", "save_manager_settings.json")
+
+    # Current user, used as the target for the ACL deny rules in
+    # lock_path()/unlock_path(). This is who most games will be running
+    # as, so denying THIS account write access at the ACL level blocks
+    # writes even if the game resets the read-only attribute.
+    ACL_USER = os.environ.get("USERNAME") or getpass.getuser()
+
     def __init__(self):
 
         self.paths = self.load_paths()
         self.blocked_games = self.load_blocked()
+        self.settings = self.load_settings()
+
+    # ── save manager settings (backup output folder, etc.) ──
+
+    def load_settings(self):
+
+        if not os.path.exists(self.SETTINGS_FILE):
+            return {"backup_folder": ""}
+
+        try:
+            with open(self.SETTINGS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return {"backup_folder": data.get("backup_folder", "")}
+        except Exception:
+            return {"backup_folder": ""}
+
+    def save_settings(self):
+
+        with open(self.SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(self.settings, f, indent=4)
+
+    def get_backup_folder(self):
+        """Returns the active backup destination root - the user's
+        custom folder if one is set, otherwise the default AppData
+        location."""
+        custom = (self.settings.get("backup_folder") or "").strip()
+        return custom if custom else self.BACKUP_FOLDER
+
+    def set_backup_folder(self, folder_path):
+        self.settings["backup_folder"] = (folder_path or "").strip()
+        self.save_settings()
 
     def load_paths(self):
 
@@ -128,16 +169,33 @@ class SaveManager:
 
         self.save_blocked()
 
+    def unblock_game(self, game):
+        """Removes a game from the Save Manager hidden list, making it
+        show up in the game dropdown again."""
+        self.blocked_games.discard(game)
+        self.save_blocked()
+
+    def get_blocked_games(self):
+        """Returns the currently hidden (Save Manager only) games,
+        sorted A-Z, for populating an 'unhide' list in the UI."""
+        return sorted(self.blocked_games, key=str.lower)
+
     def is_blocked(self, game):
 
         return game in self.blocked_games
 
     def backup_game(
         self,
-        game_name
+        game_name,
+        source_path=None
     ):
+        """Backs up either the whole configured save folder for
+        game_name (default) or a single file/subfolder within it
+        (pass source_path, e.g. the item currently selected in the
+        Save Explorer tree). Always writes into get_backup_folder(),
+        which is the user's custom output folder if one is set."""
 
-        save_path = self.get_path(
+        save_path = source_path or self.get_path(
             game_name
         )
 
@@ -156,7 +214,7 @@ class SaveManager:
             )
 
         game_folder = os.path.join(
-            self.BACKUP_FOLDER,
+            self.get_backup_folder(),
             game_name
         )
 
@@ -169,15 +227,23 @@ class SaveManager:
             "%Y-%m-%d_%H-%M-%S"
         )
 
+        item_name = os.path.basename(
+            save_path.rstrip("\\/")
+        ) or game_name
+
         backup_folder = os.path.join(
             game_folder,
-            timestamp
+            f"{timestamp}_{item_name}" if source_path else timestamp
         )
 
-        shutil.copytree(
-            save_path,
-            backup_folder
-        )
+        if os.path.isfile(save_path):
+            os.makedirs(backup_folder, exist_ok=True)
+            shutil.copy2(save_path, os.path.join(backup_folder, item_name))
+        else:
+            shutil.copytree(
+                save_path,
+                backup_folder
+            )
 
         return backup_folder
 
@@ -196,6 +262,21 @@ class SaveManager:
             raise ValueError(
                 "No save path configured."
             )
+
+        # A single-file backup contains just one file - copy it back
+        # over the matching file in the save folder rather than
+        # replacing the whole save folder.
+        contents = os.listdir(backup_folder)
+        if len(contents) == 1 and os.path.isfile(
+            os.path.join(backup_folder, contents[0])
+        ):
+            target_file = os.path.join(save_path, contents[0])
+            os.makedirs(save_path, exist_ok=True)
+            shutil.copy2(
+                os.path.join(backup_folder, contents[0]),
+                target_file
+            )
+            return
 
         if os.path.exists(
             save_path
@@ -216,7 +297,7 @@ class SaveManager:
     ):
 
         folder = os.path.join(
-            self.BACKUP_FOLDER,
+            self.get_backup_folder(),
             game_name
         )
 
@@ -231,17 +312,64 @@ class SaveManager:
             reverse=True
         )
 
-    def lock_saves(self, game_name):
-        path = self.get_path(game_name)
-        if not path:
+    def _acl_deny_write(self, path, recursive=False):
+        """
+        Adds an explicit Windows ACL deny-write rule for the current
+        user on top of the read-only attribute set in lock_path().
+
+        The read-only attribute alone is easy to bypass - some games
+        just clear it (SetFileAttributes) before writing their save,
+        ignoring it entirely. A DENY ACE is enforced by the OS at the
+        permissions level instead, so a normal (non-elevated) process
+        can't just flip it back and write anyway.
+
+        No-op on non-Windows platforms, where icacls doesn't exist.
+        """
+        if os.name != "nt":
+            return
+
+        flags = "(OI)(CI)W" if recursive else "(W)"
+        cmd = ["icacls", path, "/deny", f"{self.ACL_USER}:{flags}"]
+        if recursive:
+            cmd.append("/T")
+
+        try:
+            subprocess.run(cmd, capture_output=True, check=False)
+        except Exception as e:
+            print(f"[SaveManager] ACL deny failed for {path}: {e}")
+
+    def _acl_allow_write(self, path, recursive=False):
+        """Removes the deny-write ACE added by _acl_deny_write(), restoring
+        normal write access at the permissions level."""
+        if os.name != "nt":
+            return
+
+        cmd = ["icacls", path, "/remove:d", self.ACL_USER]
+        if recursive:
+            cmd.append("/T")
+
+        try:
+            subprocess.run(cmd, capture_output=True, check=False)
+        except Exception as e:
+            print(f"[SaveManager] ACL allow failed for {path}: {e}")
+
+    def lock_path(self, path):
+        """Marks a single file, or every file under a folder, read-only
+        (denies write access)."""
+        if not path or not os.path.exists(path):
+            return
+
+        if os.path.isfile(path):
+            try:
+                os.chmod(path, stat.S_IREAD)
+            except Exception as e:
+                print(f"Failed to lock {path}: {e}")
+            self._acl_deny_write(path)
             return
 
         for root, dirs, files in os.walk(path):
             for file in files:
-                file_path = os.path.join(
-                    root,
-                    file
-                )
+                file_path = os.path.join(root, file)
                 try:
                     os.chmod(
                         file_path,
@@ -250,17 +378,28 @@ class SaveManager:
                 except Exception as e:
                     print(f"Failed to lock {file_path}: {e}")
 
-    def unlock_saves(self, game_name):
-        path = self.get_path(game_name)
-        if not path:
+        # One recursive ACL call on the folder (inherits to everything
+        # underneath) instead of one call per file - much faster and
+        # covers files/subfolders added later too.
+        self._acl_deny_write(path, recursive=True)
+
+    def unlock_path(self, path):
+        """Restores write access to a single file, or every file under
+        a folder."""
+        if not path or not os.path.exists(path):
+            return
+
+        if os.path.isfile(path):
+            try:
+                os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+            except Exception as e:
+                print(f"Failed to unlock {path}: {e}")
+            self._acl_allow_write(path)
             return
 
         for root, dirs, files in os.walk(path):
             for file in files:
-                file_path = os.path.join(
-                    root,
-                    file
-                )
+                file_path = os.path.join(root, file)
                 try:
                     os.chmod(
                         file_path,
@@ -268,6 +407,56 @@ class SaveManager:
                     )
                 except Exception as e:
                     print(f"Failed to unlock {file_path}: {e}")
+
+        self._acl_allow_write(path, recursive=True)
+
+    def _acl_has_deny(self, path):
+        """Checks whether the current user already has a DENY write ACE
+        on this path (via icacls). Used so is_locked() stays accurate
+        even if a game clears the read-only attribute but the ACL deny
+        rule set by _acl_deny_write() is still in effect."""
+        if os.name != "nt":
+            return False
+
+        try:
+            result = subprocess.run(
+                ["icacls", path],
+                capture_output=True, text=True, check=False
+            )
+            for line in (result.stdout or "").splitlines():
+                if self.ACL_USER in line and "(DENY)" in line:
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def is_locked(self, path):
+        """Ground-truth protection check straight from the filesystem
+        (not a flag that can go stale) - a file is 'locked' if it
+        isn't writable, OR if it's still covered by an ACL deny rule
+        even after the read-only attribute got reset (some games clear
+        the attribute directly but can't remove a DENY ACE they don't
+        have permission to touch). A folder is reported locked if ANY
+        file inside it is read-only, or the folder itself has a deny
+        rule applied."""
+        if not path or not os.path.exists(path):
+            return False
+
+        if os.path.isfile(path):
+            return not os.access(path, os.W_OK) or self._acl_has_deny(path)
+
+        for root, dirs, files in os.walk(path):
+            for file in files:
+                if not os.access(os.path.join(root, file), os.W_OK):
+                    return True
+
+        return self._acl_has_deny(path)
+
+    def lock_saves(self, game_name):
+        self.lock_path(self.get_path(game_name))
+
+    def unlock_saves(self, game_name):
+        self.unlock_path(self.get_path(game_name))
 
     # STEP 6: Add get_save_tree method
     def get_save_tree(self, game_name):
