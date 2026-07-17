@@ -7,6 +7,8 @@ from tkinter import filedialog
 
 from .player import VLCMusicEngine, State
 from . import db as musicdb
+from .web_server import MusicWebServer
+from .remote_access_tab import RemoteAccessTab
 from core import theme
 
 BG      = theme.BG
@@ -59,6 +61,12 @@ class MusicPage(ctk.CTkFrame):
         self.db = getattr(manager, "music_db", None) or musicdb.Library()
         manager.music_db = self.db
 
+        # Remote-access web server (phone streaming) — lazily created and
+        # stashed on the manager, same pattern as engine/db above, so it
+        # (and any in-progress remote session) survives re-opening this page.
+        self.web_server = getattr(manager, "music_web_server", None) or MusicWebServer(library=self.db)
+        manager.music_web_server = self.web_server
+
         # Scan progress is stored on the manager (not on this widget) so
         # a background scan keeps going and stays trackable even if the
         # user closes and reopens the Music Player page mid-scan.
@@ -90,10 +98,31 @@ class MusicPage(ctk.CTkFrame):
 
     def _build_ui(self):
         self._build_header()
+
+        self.tabview = ctk.CTkTabview(
+            self,
+            fg_color=BG,
+            segmented_button_fg_color=PANEL,
+            segmented_button_selected_color=ACCENT,
+            segmented_button_selected_hover_color=ACCENT,
+        )
+        self.tabview.pack(fill="both", expand=True, padx=12, pady=(4, 12))
+
+        library_tab = self.tabview.add("🎵 Library")
+        settings_tab = self.tabview.add("⚙ Settings")
+
+        # Everything below builds into `self._tab_body` (not `self`) so the
+        # existing pack()-based layout works unchanged inside its tab.
+        self._tab_body = library_tab
+
         self._build_library_controls()
         self._build_browse_panel()
         self._build_now_playing()
         self._build_controls()
+
+        settings_tab.grid_rowconfigure(0, weight=1)
+        settings_tab.grid_columnconfigure(0, weight=1)
+        RemoteAccessTab(settings_tab, self.manager).grid(row=0, column=0, sticky="nsew")
 
     def _build_header(self):
         header = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
@@ -108,7 +137,7 @@ class MusicPage(ctk.CTkFrame):
         self.status.pack(side="right", padx=14)
 
     def _build_library_controls(self):
-        panel = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
+        panel = ctk.CTkFrame(self._tab_body, fg_color=PANEL, corner_radius=10)
         panel.pack(fill="x", padx=12, pady=6)
 
         row = ctk.CTkFrame(panel, fg_color="transparent")
@@ -129,7 +158,7 @@ class MusicPage(ctk.CTkFrame):
         self.scan_status.pack(fill="x", padx=14, pady=(0, 10))
 
     def _build_browse_panel(self):
-        panel = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
+        panel = ctk.CTkFrame(self._tab_body, fg_color=PANEL, corner_radius=10)
         panel.pack(fill="both", expand=True, padx=12, pady=6)
 
         top = ctk.CTkFrame(panel, fg_color="transparent")
@@ -173,7 +202,7 @@ class MusicPage(ctk.CTkFrame):
         self.next_page_btn.pack(side="right")
 
     def _build_now_playing(self):
-        card = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
+        card = ctk.CTkFrame(self._tab_body, fg_color=PANEL, corner_radius=10)
         card.pack(fill="x", padx=12, pady=6)
 
         ctk.CTkLabel(card, text="Now Playing",
@@ -194,7 +223,7 @@ class MusicPage(ctk.CTkFrame):
         self.progress.pack(fill="x", padx=14, pady=(0, 12))
 
     def _build_controls(self):
-        outer = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
+        outer = ctk.CTkFrame(self._tab_body, fg_color=PANEL, corner_radius=10)
         outer.pack(fill="x", padx=12, pady=(4, 12))
 
         transport = ctk.CTkFrame(outer, fg_color="transparent")

@@ -186,6 +186,16 @@ class App(ctk.CTk):
         except Exception:
             pass
         try:
+            # Music Player's remote-access server is created lazily (on the
+            # page_manager, not here) the first time that page is opened, so
+            # it may not exist at all — only stop it if it does.
+            music_web_server = getattr(self.page_manager, "music_web_server", None)
+            if music_web_server and music_web_server.is_running():
+                self.tailscale_service.disable_serve()
+                music_web_server.stop()
+        except Exception:
+            pass
+        try:
             self.quit()
         finally:
             self.destroy()
