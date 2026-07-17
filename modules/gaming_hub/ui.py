@@ -881,7 +881,9 @@ class GamingHubUI(ctk.CTkFrame):
                 return
 
             for folder_path, files in data:
-                parent_full_path = os.path.join(self.save_manager.get_path(game), folder_path)
+                parent_full_path = os.path.normpath(
+                    os.path.join(self.save_manager.get_path(game), folder_path)
+                )
                 folder_lock = "🔒" if self.save_manager.is_locked(parent_full_path) else "📁"
 
                 if folder_path == ".":
@@ -902,11 +904,11 @@ class GamingHubUI(ctk.CTkFrame):
                     )
 
                 for file in files:
-                    full_path = os.path.join(
+                    full_path = os.path.normpath(os.path.join(
                         self.save_manager.get_path(game),
                         folder_path,
                         file
-                    )
+                    ))
                     file_icon = "🔒" if self.save_manager.is_locked(full_path) else "📄"
                     self.file_tree.insert(
                         parent_id,
@@ -982,4 +984,4 @@ class GamingHubUI(ctk.CTkFrame):
         if path and self.save_manager.is_locked(path):
             self.deny_write_btn.configure(text="🔓 Allow Write")
         else:
-            self.deny_write_btn.configure(text="🔒 Deny Write")
+            self.deny_write_btn.configure(text="🔒 Deny Write")

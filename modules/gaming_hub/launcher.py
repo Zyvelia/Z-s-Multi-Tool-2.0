@@ -23,6 +23,9 @@ class GameLauncher:
                 "Executable missing."
             )
 
+        exe_dir = os.path.dirname(game.exe_path)
+
         subprocess.Popen(
-            game.exe_path
+            [game.exe_path],
+            cwd=exe_dir or None
         )

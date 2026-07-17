@@ -29,7 +29,18 @@ class SaveManager:
     # lock_path()/unlock_path(). This is who most games will be running
     # as, so denying THIS account write access at the ACL level blocks
     # writes even if the game resets the read-only attribute.
-    ACL_USER = os.environ.get("USERNAME") or getpass.getuser()
+    #
+    # Qualified as "COMPUTERNAME\username" rather than a bare username -
+    # icacls needs this to resolve to the exact local account. A bare
+    # name is ambiguous (domain-joined machines, synced Microsoft-account
+    # profiles, etc.) and when icacls can't resolve it cleanly it ends up
+    # writing the DENY rule against an unresolved/orphaned SID instead of
+    # your actual account - which shows up as a garbled ID in icacls
+    # output and does nothing, since the account really doing the
+    # writing was never actually denied.
+    _RAW_USER = os.environ.get("USERNAME") or getpass.getuser()
+    _COMPUTERNAME = os.environ.get("COMPUTERNAME", "")
+    ACL_USER = f"{_COMPUTERNAME}\\{_RAW_USER}" if _COMPUTERNAME else _RAW_USER
 
     def __init__(self):
 
@@ -385,17 +396,27 @@ class SaveManager:
 
     def unlock_path(self, path):
         """Restores write access to a single file, or every file under
-        a folder."""
+        a folder.
+
+        Order matters here: the ACL deny rule (if present) blocks
+        FILE_WRITE_ATTRIBUTES too, not just data writes - so if chmod
+        runs first while the deny rule is still active, it fails with
+        WinError 5 even though the overall unlock still succeeds once
+        the ACL rule is removed. Removing the ACL rule first means
+        chmod runs against a path that's actually writable again.
+        """
         if not path or not os.path.exists(path):
             return
 
         if os.path.isfile(path):
+            self._acl_allow_write(path)
             try:
                 os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
             except Exception as e:
                 print(f"Failed to unlock {path}: {e}")
-            self._acl_allow_write(path)
             return
+
+        self._acl_allow_write(path, recursive=True)
 
         for root, dirs, files in os.walk(path):
             for file in files:
@@ -407,8 +428,6 @@ class SaveManager:
                     )
                 except Exception as e:
                     print(f"Failed to unlock {file_path}: {e}")
-
-        self._acl_allow_write(path, recursive=True)
 
     def _acl_has_deny(self, path):
         """Checks whether the current user already has a DENY write ACE
@@ -492,4 +511,4 @@ class SaveManager:
                 )
             )
 
-        return results
+        return results
