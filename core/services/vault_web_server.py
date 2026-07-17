@@ -195,13 +195,19 @@ class _Handler(BaseHTTPRequestHandler):
         body = self._read_json_body()
         password = (body.get("password") or "").strip()
         auth_service = self._services()["auth_service"]
+        alert_service = self._services().get("alert_service")
+        client_ip = self.client_address[0] if self.client_address else "unknown"
 
         if not password or not auth_service.verify_master_password(password):
             _record_failed_login()
+            if alert_service:
+                alert_service.remote_login_attempt(False, client_ip)
             self._send_json(401, {"error": "Incorrect master password."})
             return
 
         _record_successful_login()
+        if alert_service:
+            alert_service.remote_login_attempt(True, client_ip)
         token = _new_session()
         cookie = f"vault_session={token}; Path=/; HttpOnly; SameSite=Strict"
         self._send_json(200, {"ok": True}, set_cookie=cookie)
@@ -242,9 +248,10 @@ class _Handler(BaseHTTPRequestHandler):
 class VaultWebServer:
     """
     Owns the background HTTP server thread. `services` is a dict with
-    auth_service / vault_service / totp_service references — pulled
-    from the app container so the web server always reads the same
-    live vault the desktop UI does.
+    auth_service / vault_service / totp_service / alert_service
+    references — pulled from the app container so the web server always
+    reads the same live vault the desktop UI does, and fires the same
+    login alerts.
     """
 
     def __init__(self, services):

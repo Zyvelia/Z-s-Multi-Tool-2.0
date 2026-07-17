@@ -14,6 +14,7 @@ from core.services.totp_service import TotpService
 from core.services.discord_service import DiscordService # Added import
 from core.services.tailscale_service import TailscaleService
 from core.services.vault_web_server import VaultWebServer
+from core.services.alert_service import AlertService
 
 from pages.catalog_page import CatalogPage
 from pages.settings_page import SettingsPage
@@ -56,6 +57,8 @@ class App(ctk.CTk):
 
         self.auth_service = AuthService()
 
+        self.alert_service = AlertService()
+
         self.discord_service = DiscordService() # Added DiscordService initialization
         self.discord_service.connect()          # Added DiscordService connection
 
@@ -83,6 +86,7 @@ class App(ctk.CTk):
             "auth_service": self.auth_service,
             "vault_service": self.vault_service,
             "totp_service": self.totp_service,
+            "alert_service": self.alert_service,
         })
 
         # =====================================================

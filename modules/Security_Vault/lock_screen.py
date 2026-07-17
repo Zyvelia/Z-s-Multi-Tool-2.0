@@ -34,6 +34,7 @@ class PasswordVaultLockScreen(ctk.CTkFrame):
         self.manager = manager
 
         self.auth = manager.container.auth_service
+        self.alert = manager.container.alert_service
 
         self.configure(fg_color=BG)
 
@@ -377,8 +378,10 @@ class PasswordVaultLockScreen(ctk.CTkFrame):
         password = self.password_entry.get()
 
         if self.auth.verify_master_password(password):
+            self.alert.local_unlock_attempt(True)
             self.open_vault()
         else:
+            self.alert.local_unlock_attempt(False)
             self.error_label.configure(
                 text="Incorrect password."
             )
