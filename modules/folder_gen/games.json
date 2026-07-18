@@ -494,6 +494,13 @@
     "platform": "PC",
     "exe": "SMITE 2/Smite2-Win64-Shipping.exe"
   },
+  "STALZONE": {
+    "category": "Game",
+    "developer": "EXBO",
+    "publisher": "EXBO",
+    "platform": "PC",
+    "exe": "STALZONE/bin/stalcraftw.exe"
+  },
   "Stardew Valley": {
     "category": "Game",
     "developer": "ConcernedApe",
