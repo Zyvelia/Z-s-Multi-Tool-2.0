@@ -680,10 +680,14 @@ class GamingHubUI(ctk.CTkFrame):
 
     def save_current_path(self):
         game = self.game_dropdown.get()
-        path = self.save_path_entry.get().strip()
+        path = self.save_path_entry.get().strip().strip('"').strip("'")
         if not game or game == "No Games Found" or not path:
             return
         self.save_manager.set_path(game, path)
+        # Reflect the cleaned-up value back into the field so what's
+        # displayed matches what actually got saved.
+        self.save_path_entry.delete(0, "end")
+        self.save_path_entry.insert(0, self.save_manager.get_path(game))
 
     def load_selected_game_path(self):
         game = self.game_dropdown.get()
@@ -963,16 +967,89 @@ class GamingHubUI(ctk.CTkFrame):
             self.file_info.configure(text="No save folder set for this game.")
             return
 
+        # lock_path()/unlock_path() walk every file in the folder AND
+        # shell out to icacls with /T (recursive) - on a save folder with
+        # a lot of files that can take a real chunk of time. Tkinter is
+        # single-threaded, so running that directly on the UI thread
+        # freezes the entire app (no redraws, no clicks) until it's
+        # done. Doing the actual work in a background thread keeps the
+        # UI responsive; only the final widget updates happen back on
+        # the main thread via self.after, which is the thread-safe way
+        # to touch Tkinter widgets from another thread.
+        root_path = os.path.normpath(self.save_manager.get_path(game_name))
+        self.deny_write_btn.configure(state="disabled")
+        self.file_info.configure(text="Working…")
+        threading.Thread(
+            target=self._toggle_deny_write_thread,
+            args=(path, root_path),
+            daemon=True
+        ).start()
+
+    def _toggle_deny_write_thread(self, path, root_path):
         try:
-            if self.save_manager.is_locked(path):
+            currently_locked = self.save_manager.is_locked(path)
+
+            # Locking (deny-write) the ROOT save folder itself is
+            # blocked - some games can't function at all with their
+            # whole save directory write-denied, and it's confusing to
+            # recover from. Unlocking the root is still allowed, in
+            # case it's already locked from before this guard existed.
+            # Locking/unlocking individual files or subfolders inside
+            # it is unaffected.
+            is_root = os.path.normpath(path) == root_path
+            if is_root and not currently_locked:
+                self.after(
+                    0, self._toggle_deny_write_done,
+                    "Can't deny write on the root save folder - select "
+                    "a specific file or subfolder to lock instead.",
+                    None, path
+                )
+                return
+
+            if currently_locked:
                 self.save_manager.unlock_path(path)
-                self.file_info.configure(text=f"🔓 {os.path.basename(path)} is now writable.")
+                message = f"🔓 {os.path.basename(path)} is now writable."
             else:
                 self.save_manager.lock_path(path)
-                self.file_info.configure(text=f"🔒 {os.path.basename(path)} is now read-only (ACL deny applied).")
-            self.load_save_tree()
+                message = f"🔒 {os.path.basename(path)} is now read-only (ACL deny applied)."
+            self.after(0, self._toggle_deny_write_done, message, None, path)
         except Exception as e:
-            self.file_info.configure(text=f"Failed: {e}")
+            self.after(0, self._toggle_deny_write_done, None, e, path)
+
+    def _toggle_deny_write_done(self, message, error, path):
+        self.deny_write_btn.configure(state="normal")
+        if error is not None:
+            self.file_info.configure(text=f"Failed: {error}")
+        else:
+            self.file_info.configure(text=message)
+        # load_save_tree() rebuilds the tree from scratch (deletes and
+        # re-inserts every item), so whatever was selected before this
+        # action no longer exists afterward - reselect the same path
+        # in the freshly-built tree so the highlight doesn't just
+        # disappear.
+        self.load_save_tree()
+        self._select_tree_path(path)
+
+    def _select_tree_path(self, target_path):
+        if not target_path:
+            return
+        target_path = os.path.normpath(target_path)
+
+        def _search(parent):
+            for item_id in self.file_tree.get_children(parent):
+                values = self.file_tree.item(item_id, "values")
+                if values and os.path.normpath(values[0]) == target_path:
+                    return item_id
+                found = _search(item_id)
+                if found:
+                    return found
+            return None
+
+        match = _search("")
+        if match:
+            self.file_tree.selection_set(match)
+            self.file_tree.focus(match)
+            self.file_tree.see(match)
 
     def _refresh_deny_write_label(self):
         game_name = self.game_dropdown.get()
@@ -981,7 +1058,29 @@ class GamingHubUI(ctk.CTkFrame):
             return
 
         path = self.get_selected_path() or self.save_manager.get_path(game_name)
-        if path and self.save_manager.is_locked(path):
+        if not path:
+            self.deny_write_btn.configure(text="🔒 Deny Write")
+            return
+
+        # is_locked() also walks the folder and can shell out to icacls -
+        # same freeze risk as the toggle itself, so this runs in the
+        # background too. The button briefly stays on its last known
+        # label until the check finishes, which is harmless.
+        threading.Thread(
+            target=self._refresh_deny_write_label_thread,
+            args=(path,),
+            daemon=True
+        ).start()
+
+    def _refresh_deny_write_label_thread(self, path):
+        try:
+            locked = self.save_manager.is_locked(path)
+        except Exception:
+            locked = False
+        self.after(0, self._refresh_deny_write_label_done, locked)
+
+    def _refresh_deny_write_label_done(self, locked):
+        if locked:
             self.deny_write_btn.configure(text="🔓 Allow Write")
         else:
             self.deny_write_btn.configure(text="🔒 Deny Write")

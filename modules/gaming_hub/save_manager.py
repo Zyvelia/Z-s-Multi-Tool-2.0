@@ -113,13 +113,39 @@ class SaveManager:
                 indent=4
             )
 
+    @staticmethod
+    def _clean_path(path):
+        """Strips whitespace and wrapping quote characters from a path.
+
+        Windows Explorer's "Copy as path" wraps paths in double quotes
+        (it does this specifically when the path contains spaces, which
+        save folders almost always do - "My Games", "Save Games", etc.).
+        If a user pastes that directly into the save-path field, the
+        literal quote characters end up saved into save_paths.json.
+        The field still LOOKS right, but os.path.exists() on a string
+        like '"C:\\...\\SaveGames"' returns False, so the save tree
+        silently comes back empty. Cleaning here (both when saving AND
+        when reading) fixes new entries and self-heals anything already
+        saved with quotes baked in, without needing the user to retype it.
+        """
+        if not path:
+            return path
+
+        path = path.strip()
+
+        for quote_char in ('"', "'", "\u201c", "\u201d"):
+            if len(path) >= 2 and path[0] == quote_char and path[-1] in ('"', "'", "\u201c", "\u201d"):
+                path = path[1:-1].strip()
+
+        return path
+
     def set_path(
         self,
         game_name,
         path
     ):
 
-        self.paths[game_name] = path
+        self.paths[game_name] = self._clean_path(path)
 
         self.save_paths()
 
@@ -128,9 +154,11 @@ class SaveManager:
         game_name
     ):
 
-        return self.paths.get(
-            game_name,
-            ""
+        return self._clean_path(
+            self.paths.get(
+                game_name,
+                ""
+            )
         )
 
     def load_blocked(self):
@@ -323,6 +351,14 @@ class SaveManager:
             reverse=True
         )
 
+    # subprocess.CREATE_NO_WINDOW is only defined on Windows. Every icacls
+    # call below passes this via creationflags, since without it a windowed
+    # (--windowed PyInstaller build has no console of its own) app will
+    # briefly flash a real console window every time icacls runs - which
+    # is what "random terminals popping up" while locking/unlocking a
+    # save was.
+    _NO_WINDOW_FLAGS = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
     def _acl_deny_write(self, path, recursive=False):
         """
         Adds an explicit Windows ACL deny-write rule for the current
@@ -345,7 +381,10 @@ class SaveManager:
             cmd.append("/T")
 
         try:
-            subprocess.run(cmd, capture_output=True, check=False)
+            subprocess.run(
+                cmd, capture_output=True, check=False,
+                creationflags=self._NO_WINDOW_FLAGS
+            )
         except Exception as e:
             print(f"[SaveManager] ACL deny failed for {path}: {e}")
 
@@ -360,7 +399,10 @@ class SaveManager:
             cmd.append("/T")
 
         try:
-            subprocess.run(cmd, capture_output=True, check=False)
+            subprocess.run(
+                cmd, capture_output=True, check=False,
+                creationflags=self._NO_WINDOW_FLAGS
+            )
         except Exception as e:
             print(f"[SaveManager] ACL allow failed for {path}: {e}")
 
@@ -440,7 +482,8 @@ class SaveManager:
         try:
             result = subprocess.run(
                 ["icacls", path],
-                capture_output=True, text=True, check=False
+                capture_output=True, text=True, check=False,
+                creationflags=self._NO_WINDOW_FLAGS
             )
             for line in (result.stdout or "").splitlines():
                 if self.ACL_USER in line and "(DENY)" in line:
