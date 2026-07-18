@@ -1,8 +1,8 @@
 import threading
 import customtkinter as ctk
 
-from .scanner import NetworkScanner
-from .port_scanner import PortScanner
+from .scanner import NetworkScanner, NetworkScannerError
+from .port_scanner import PortScanner, PortScannerError
 from .threat_report import ThreatReporter
 from core import theme
 
@@ -40,6 +40,7 @@ class NetworkAuditorUI(ctk.CTkFrame):
         self.selected_device = None
         self.build_ui()
         self.auto_detect_network()
+        self._check_nmap_available()
 
     # ── widget helpers ───────────────────────────────────
 
@@ -314,6 +315,12 @@ class NetworkAuditorUI(ctk.CTkFrame):
         self.network_entry.delete(0, "end")
         self.network_entry.insert(0, network)
 
+    def _check_nmap_available(self):
+        if not PortScanner.is_nmap_available():
+            self.status.configure(
+                text="Nmap not found — port scanning is disabled until it's installed (nmap.org)."
+            )
+
     def discover_devices(self):
         threading.Thread(
             target=self._discover_thread, daemon=True).start()
@@ -322,7 +329,11 @@ class NetworkAuditorUI(ctk.CTkFrame):
         self.after(0, lambda: self.status.configure(
             text="Scanning network…"))
         network = self.network_entry.get().strip() or "192.168.1.0/24"
-        devices = self.scanner.discover(network)
+        try:
+            devices = self.scanner.discover(network)
+        except NetworkScannerError as e:
+            self.after(0, lambda: self.status.configure(text=str(e)))
+            return
         self.after(0, lambda: self._update_devices(devices))
 
     def _update_devices(self, devices):
@@ -363,7 +374,11 @@ class NetworkAuditorUI(ctk.CTkFrame):
     def _scan_thread(self, ip):
         self.after(0, lambda: self.status.configure(
             text=f"Scanning {ip}…"))
-        ports = self.port_scanner.scan(ip)
+        try:
+            ports = self.port_scanner.scan(ip)
+        except PortScannerError as e:
+            self.after(0, lambda: self.status.configure(text=str(e)))
+            return
         threats = self.threat_reporter.analyze(ports)
         self.after(0, lambda: self._update_results(ports, threats))
 

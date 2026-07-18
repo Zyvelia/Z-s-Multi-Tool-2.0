@@ -1,17 +1,34 @@
 import socket
 import ipaddress
+import time
 from scapy.all import ARP
 from scapy.all import Ether
 from scapy.all import srp
-import requests # Added this import
+import requests
 
 from .models import Device
+
+
+class NetworkScannerError(Exception):
+    """Raised when discovery fails in a way the UI should tell the user
+    about (permissions, missing driver, etc.) rather than silently
+    returning an empty device list."""
 
 
 class NetworkScanner:
     """
     Discovers devices on the local network.
     """
+
+    # Free tier of api.macvendors.com is rate-limited to ~1 req/sec.
+    # Without a cache + backoff, a /24 scan with 20-30 devices can start
+    # getting 429s and each one still costs up to the request timeout.
+    VENDOR_LOOKUP_TIMEOUT = 3
+    VENDOR_MIN_INTERVAL = 1.1  # seconds between outbound vendor lookups
+
+    def __init__(self):
+        self._vendor_cache: dict[str, str] = {}  # OUI (first 8 chars of MAC) -> vendor
+        self._last_vendor_call = 0.0
 
     def discover(
         self,
@@ -21,39 +38,15 @@ class NetworkScanner:
         devices = []
 
         try:
-
-            arp = ARP(
-                pdst=network
-            )
-
-            ether = Ether(
-                dst="ff:ff:ff:ff:ff:ff"
-            )
-
+            arp = ARP(pdst=network)
+            ether = Ether(dst="ff:ff:ff:ff:ff:ff")
             packet = ether / arp
 
-            result = srp(
-                packet,
-                timeout=2,
-                verbose=False
-            )[0]
+            result = srp(packet, timeout=2, verbose=False)[0]
 
             for _, received in result:
-                # Added print statement
-                print(
-                    "FOUND:",
-                    received.psrc,
-                    received.hwsrc
-                )
-
-                hostname = self._get_hostname(
-                    received.psrc
-                )
-
-                # Replaced this block as requested
-                vendor = self.get_vendor(
-                    received.hwsrc
-                )
+                hostname = self._get_hostname(received.psrc)
+                vendor = self.get_vendor(received.hwsrc)
 
                 devices.append(
                     Device(
@@ -64,12 +57,16 @@ class NetworkScanner:
                     )
                 )
 
-        except Exception as e:
-
-            print(
-                "[NetworkScanner]",
-                e
-            )
+        except PermissionError as e:
+            raise NetworkScannerError(
+                "Network scan needs elevated permissions. On Windows, make sure "
+                "Npcap is installed and the app is running as administrator."
+            ) from e
+        except OSError as e:
+            # Covers most scapy/libpcap failures (missing Npcap, no interface, etc.)
+            raise NetworkScannerError(
+                f"Couldn't access the network interface for scanning: {e}"
+            ) from e
 
         return devices
 
@@ -100,28 +97,34 @@ class NetworkScanner:
         except Exception:
             return "192.168.1.0/24"
 
-    # Added this method
     def get_vendor(
         self,
         mac: str
     ) -> str:
+        oui = mac.upper()[:8]  # first 3 octets identify the manufacturer
+        if oui in self._vendor_cache:
+            return self._vendor_cache[oui]
 
+        # Respect the API's ~1 req/sec free-tier limit so a scan with many
+        # new devices doesn't start getting 429s partway through.
+        elapsed = time.monotonic() - self._last_vendor_call
+        if elapsed < self.VENDOR_MIN_INTERVAL:
+            time.sleep(self.VENDOR_MIN_INTERVAL - elapsed)
+
+        vendor = "Unknown Vendor"
         try:
-
-            url = (
-                f"https://api.macvendors.com/{mac}"
-            )
-
-            response = requests.get(
-                url,
-                timeout=3
-            )
+            url = f"https://api.macvendors.com/{mac}"
+            response = requests.get(url, timeout=self.VENDOR_LOOKUP_TIMEOUT)
+            self._last_vendor_call = time.monotonic()
 
             if response.status_code == 200:
-
-                return response.text
-
+                vendor = response.text
+            elif response.status_code == 429:
+                # Rate-limited — don't cache this as "Unknown", just leave
+                # it uncached so a later scan can retry the lookup.
+                return "Unknown Vendor"
         except Exception:
-            pass
+            self._last_vendor_call = time.monotonic()
 
-        return "Unknown Vendor"
+        self._vendor_cache[oui] = vendor
+        return vendor

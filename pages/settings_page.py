@@ -11,9 +11,11 @@ from core import updater
 # Fill in GITHUB_URL once the repo is uploaded — the button below enables
 # itself automatically as soon as this isn't empty.
 DISCORD_URL = "https://discord.gg/vSX49HJMHS"
-GITHUB_URL = ""  # e.g. "https://github.com/your-username/Zs-Multi-Tool"
+GITHUB_URL = "https://github.com/Zyvelia/Z-s-Multi-Tool-2.0/tree/main"
 
-APP_VERSION = "1.0.0"
+# Version now lives in one place: core/updater.py. Bump it there (and
+# tag a matching vX.Y.Z GitHub Release + install.iss MyAppVersion) when
+# you ship — this page just displays it.
 
 
 class SettingsPage(ctk.CTkFrame):
@@ -182,7 +184,7 @@ class SettingsPage(ctk.CTkFrame):
 
         ctk.CTkLabel(
             text_col,
-            text=f"v{APP_VERSION}  •  Built by Z",
+            text=f"v{updater.APP_VERSION}  •  Built by Z",
             font=theme.font(12),
             text_color=theme.MUTED
         ).pack(anchor="w", pady=(2, 0))

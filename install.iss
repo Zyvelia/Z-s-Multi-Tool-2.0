@@ -12,7 +12,7 @@
 ; ============================================================
 
 #define MyAppName "Z's Multi Tool"
-#define MyAppVersion "1.2.0"
+#define MyAppVersion "2.6.0"
 #define MyAppPublisher "Z"
 #define MyAppExeName "Z's Multi Tool.exe"
 #define MyAppIcon "assets\icon.ico"

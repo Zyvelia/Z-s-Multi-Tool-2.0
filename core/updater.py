@@ -5,11 +5,15 @@
 # How it works:
 #   1. check_for_update() hits the GitHub API for the latest release tag
 #      and compares it against APP_VERSION.
-#   2. If newer, apply_update() downloads the released .exe next to the
-#      currently running one, writes a tiny .bat "swap script", launches
-#      it, then exits — a running exe can't overwrite itself on Windows,
-#      so the .bat waits for this process to fully exit, deletes the old
-#      exe, renames the new one into place, and relaunches it.
+#   2. If newer, apply_update() downloads the Inno Setup installer
+#      attached to the release (the same Setup.exe that install.iss
+#      produces — upload it as the release asset, not a raw app exe),
+#      writes a tiny .bat "handoff script", launches it, then exits.
+#      A running exe can't be replaced while it's in use on Windows, so
+#      the .bat waits for this process to fully exit, then runs the
+#      installer silently (/VERYSILENT, same AppId → in-place update,
+#      not a second install) and relaunches the app from its installed
+#      path once setup finishes.
 #
 # Wiring:
 #   - Settings toggle -> "check on launch" (core/app.py calls
@@ -20,6 +24,7 @@
 import os
 import sys
 import subprocess
+import tempfile
 import threading
 from tkinter import messagebox
 
@@ -27,12 +32,12 @@ import requests
 from packaging import version as _version
 
 # ── Fill these in once the repo is public ────────────────────────────────
-GITHUB_OWNER = ""   # e.g. "yourusername"
-GITHUB_REPO = ""    # e.g. "Zs-Multi-Tool"
+GITHUB_OWNER = "Zyvelia"   # e.g. "yourusername"
+GITHUB_REPO = "https://github.com/Zyvelia/Z-s-Multi-Tool-2.0/tree/main"    # e.g. "Zs-Multi-Tool"
 
 # Keep this in sync with APP_VERSION in pages/settings_page.py.
 # Bump it (and tag a matching vX.Y.Z GitHub Release) each time you ship.
-APP_VERSION = "1.0.0"
+APP_VERSION = "2.6.0"
 
 
 def _api_url() -> str:
@@ -63,13 +68,17 @@ def check_for_update():
         if not latest or not assets:
             return None
 
-        exe_asset = next(
+        # Expects the Inno Setup installer (install.iss output, e.g.
+        # "ZsMultiToolSetup.exe") uploaded as the release asset — not a
+        # raw portable exe. apply_update() runs whatever this points to
+        # as an installer.
+        installer_asset = next(
             (a for a in assets if a["name"].lower().endswith(".exe")),
             assets[0]
         )
 
         if _version.parse(latest) > _version.parse(APP_VERSION):
-            return {"version": latest, "url": exe_asset["browser_download_url"]}
+            return {"version": latest, "url": installer_asset["browser_download_url"]}
     except Exception as e:
         print(f"[updater] Update check failed: {e}")
 
@@ -86,9 +95,9 @@ def _download(url: str, dest_path: str):
 
 def apply_update(url: str):
     """
-    Downloads the new exe, writes + launches a swap script, then exits
-    this process so the script can replace the (now-unlocked) exe and
-    relaunch it.
+    Downloads the Inno Setup installer, writes + launches a handoff
+    script, then exits this process so the installer can run against an
+    exe that's no longer locked, and relaunch the app once it's done.
     """
     if not getattr(sys, "frozen", False):
         messagebox.showinfo(
@@ -98,20 +107,22 @@ def apply_update(url: str):
         )
         return
 
-    exe_path = sys.executable
-    exe_dir = os.path.dirname(exe_path)
-    new_exe = os.path.join(exe_dir, "_update_download.exe")
-    bat_path = os.path.join(exe_dir, "_apply_update.bat")
+    exe_path = sys.executable  # install dir doesn't change — same AppId, in-place update
+    installer_path = os.path.join(tempfile.gettempdir(), "_update_setup.exe")
+    bat_path = os.path.join(tempfile.gettempdir(), "_apply_update.bat")
     pid = os.getpid()
 
     try:
-        _download(url, new_exe)
+        _download(url, installer_path)
     except Exception as e:
         messagebox.showerror("Update Failed", f"Could not download update:\n{e}")
         return
 
     # Waits for this process (by PID) to actually exit before touching the
     # exe, rather than a fixed sleep — more reliable if shutdown is slow.
+    # /VERYSILENT + matching AppId in install.iss makes this an in-place
+    # update (registry/uninstall entries and shortcuts stay correct)
+    # rather than a second parallel install.
     bat_script = f"""@echo off
 :wait
 tasklist /fi "PID eq {pid}" | find "{pid}" >nul
@@ -119,9 +130,9 @@ if not errorlevel 1 (
     timeout /t 1 /nobreak >nul
     goto wait
 )
-del "{exe_path}"
-move /y "{new_exe}" "{exe_path}"
+"{installer_path}" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
 start "" "{exe_path}"
+del "{installer_path}"
 del "%~f0"
 """
     with open(bat_path, "w") as f:
