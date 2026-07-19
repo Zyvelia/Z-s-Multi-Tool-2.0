@@ -77,6 +77,103 @@ class GameScanner:
                 candidates.append(os.path.join(f"{drive}\\", sub))
         return candidates
 
+    def _steam_install_path(self):
+        """
+        Finds Steam's own install directory via the registry - this is
+        where steamapps/libraryfolders.vdf lives, the file Steam itself
+        uses to track every library folder a user has ever added,
+        regardless of which drive it's on, what it's named, or how
+        deeply it's nested. Falls back to None if Steam isn't installed
+        or winreg isn't available (non-Windows), so callers can fall
+        back to the drive-guessing scan instead.
+        """
+        if winreg is None:
+            return None
+
+        reg_locations = [
+            (winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam", "SteamPath"),
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Valve\Steam", "InstallPath"),
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Valve\Steam", "InstallPath"),
+        ]
+
+        for hive, key_path, value_name in reg_locations:
+            try:
+                with winreg.OpenKey(hive, key_path) as key:
+                    path = self._reg_value(key, value_name)
+                    if path and os.path.exists(path):
+                        return os.path.normpath(path)
+            except FileNotFoundError:
+                continue
+            except Exception as e:
+                print(f"Steam install path lookup error ({key_path}): {e}")
+
+        return None
+
+    def _parse_library_folders_vdf(self, steam_path):
+        """
+        Parses steamapps/libraryfolders.vdf under the given Steam
+        install path and returns every "steamapps" folder listed in
+        it - the actual set of library locations Steam knows about, in
+        whatever folder name/drive/nesting depth the user picked when
+        they added each one. This is the authoritative source;
+        STEAM_SUBPATHS below is only a fallback guess-list for when
+        this file can't be found or read.
+        """
+        vdf_path = os.path.join(steam_path, "steamapps", "libraryfolders.vdf")
+        steamapps_paths = []
+
+        if not os.path.exists(vdf_path):
+            return steamapps_paths
+
+        try:
+            with open(vdf_path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+
+            # Each library gets its own numbered block containing a
+            # "path" key, e.g.:
+            #   "1"  { "path"  "D:\\Games\\SteamLibrary"  ... }
+            for match in re.finditer(r'"path"\s+"([^"]+)"', content):
+                raw_path = match.group(1).replace("\\\\", "\\")
+                steamapps_path = os.path.join(raw_path, "steamapps")
+                if steamapps_path not in steamapps_paths:
+                    steamapps_paths.append(steamapps_path)
+
+        except Exception as e:
+            print(f"libraryfolders.vdf parse error: {e}")
+
+        return steamapps_paths
+
+    def steam_library_paths(self, drives):
+        """
+        Full set of steamapps paths to scan for this run: whatever
+        Steam's own libraryfolders.vdf reports (accurate, covers any
+        drive/folder name/nesting depth) plus the old per-drive
+        guess-list as a fallback for edge cases - Steam not found,
+        the vdf missing or unreadable, a library set up in a way that
+        predates this file. De-duplicated so nothing gets scanned twice.
+        """
+        paths = []
+        seen = set()
+
+        def _add(p):
+            key = os.path.normcase(os.path.normpath(p))
+            if key not in seen:
+                seen.add(key)
+                paths.append(p)
+
+        steam_path = self._steam_install_path()
+        if steam_path:
+            # Steam's own install folder is a library too, even though
+            # libraryfolders.vdf only lists the *additional* ones.
+            _add(os.path.join(steam_path, "steamapps"))
+            for p in self._parse_library_folders_vdf(steam_path):
+                _add(p)
+
+        for p in self.steam_candidates_for_drives(drives):
+            _add(p)
+
+        return paths
+
     def gog_candidates_for_drives(self, drives):
         """
         Builds the list of "GOG Games" folder paths to check across the
@@ -89,15 +186,45 @@ class GameScanner:
         return candidates
 
     # Folder names that are almost never where a game's real .exe lives —
-    # redistributable installers, engine internals, DLC blobs, etc. Skipping
-    # these keeps find_exe() from wasting time digging through them on
-    # large/cluttered game folders.
+    # redistributable installers, DLC blobs, etc. Skipping these keeps
+    # find_exe() from wasting time digging through them on large/
+    # cluttered game folders.
+    #
+    # NOTE: "Binaries" is deliberately NOT in this list even though it
+    # sounds like engine internals — for Unreal Engine games (Borderlands
+    # 3 and most modern UE titles included) it's exactly where the real,
+    # launchable .exe lives (e.g. <Game>/<Project>/Binaries/Win64/). A
+    # game whose only .exe sits in there was being silently dropped
+    # entirely, since scan_steam_library() only keeps a manifest match
+    # if find_exe() returns something. "Engine" (generic engine
+    # internals/tools, not the game's own exe) stays skipped.
     SKIP_DIRS = {
         "_commonredist", "redist", "redistributables",
         "directx", "dotnet", "vcredist",
-        "engine", "binaries", "intermediate",
+        "engine", "intermediate",
         "dlc", "soundtrack", "extras", "artbook",
         "__pycache__", ".git",
+    }
+
+    # Executable names that are almost never the actual game launcher —
+    # crash reporters, anti-cheat/redist installers, engine helper
+    # processes. Now that "Binaries" folders are searched (see SKIP_DIRS
+    # note above), these often sit right next to the real game exe, so
+    # find_exe() skips past them rather than latching onto whichever one
+    # os.walk() happens to list first.
+    JUNK_EXE_NAMES = {
+        "crashreportclient.exe", "crashreportclienteditor.exe",
+        "unrealcefsubprocess.exe",
+        "unitycrashhandler64.exe", "unitycrashhandler32.exe",
+        "easyanticheat_setup.exe", "eosinstallhelper.exe",
+        "eossdk-win64-shipping.exe", "eossdk-win32-shipping.exe",
+        "vc_redist.x64.exe", "vc_redist.x86.exe",
+        "vcredist_x64.exe", "vcredist_x86.exe",
+        "dotnetfx35.exe", "dotnetfx40.exe",
+        "dxsetup.exe", "dxwebsetup.exe", "directx_setup.exe",
+        "steamservice.exe", "steamerrorreporter.exe", "steamerrorreporter64.exe",
+        "unins000.exe", "uninstall.exe", "installer.exe",
+        "battleye_setup.exe", "beservice_x64.exe", "beservice_x86.exe",
     }
 
     # Re-added find_exe method as it's used by scan_steam_library
@@ -107,16 +234,22 @@ class GameScanner:
         max_depth=4
     ):
         """
-        Searches for the first .exe file in the given folder and its
-        subdirectories, breadth-first-ish via os.walk.
+        Searches for the first non-junk .exe file in the given folder
+        and its subdirectories, breadth-first-ish via os.walk.
 
         max_depth caps how many levels below `folder` it will descend
         (0 = only the top-level folder itself). Most games put their
         main .exe at or near the top, so this avoids arbitrarily deep
         walks through huge, deeply-nested install trees. Known junk
         folders (see SKIP_DIRS) are pruned outright regardless of depth.
+
+        Known junk executables (see JUNK_EXE_NAMES) are skipped in favor
+        of the first "real" candidate; if only junk exes turn up, the
+        first one found is still returned as a last resort rather than
+        treating the game as if it had no exe at all.
         """
         base_depth = folder.rstrip(os.sep).count(os.sep)
+        fallback = ""
 
         for root, dirs, files in os.walk(folder):
             depth = root.rstrip(os.sep).count(os.sep) - base_depth
@@ -130,12 +263,19 @@ class GameScanner:
                 ]
 
             for file in files:
-                if file.lower().endswith(".exe"):
-                    return os.path.join(
-                        root,
-                        file
-                    )
-        return ""
+                if not file.lower().endswith(".exe"):
+                    continue
+
+                full_path = os.path.join(root, file)
+
+                if file.lower() in self.JUNK_EXE_NAMES:
+                    if not fallback:
+                        fallback = full_path
+                    continue
+
+                return full_path
+
+        return fallback
 
     def scan_steam_library(
         self,
@@ -585,7 +725,7 @@ class GameScanner:
 
         scan_drives = drives if drives is not None else self.detect_drives()
 
-        for library in self.steam_candidates_for_drives(scan_drives):
+        for library in self.steam_library_paths(scan_drives):
 
             games.extend(
                 self.scan_steam_library(

@@ -161,6 +161,29 @@ class SaveManager:
             )
         )
 
+    def delete_path(self, game_name):
+        """Removes a game's saved-path entry entirely. Only ever called
+        from an explicit, user-reviewed cleanup action (see
+        get_orphaned_games) - never automatically off a scan result,
+        since a game missing from one scan doesn't mean it's actually
+        uninstalled or that the save path config should be lost."""
+        if game_name in self.paths:
+            del self.paths[game_name]
+            self.save_paths()
+
+    def get_orphaned_games(self, known_game_names):
+        """Returns the saved-path entries whose game name doesn't match
+        any name in known_game_names (the most recent scan results),
+        sorted A-Z, for a manual review-and-remove UI. Case-insensitive
+        match, so stray case drift between the scanner and a
+        hand-entered name doesn't flag something that's really still
+        valid."""
+        known_lower = {name.lower() for name in known_game_names}
+        return sorted(
+            (name for name in self.paths if name.lower() not in known_lower),
+            key=str.lower
+        )
+
     def load_blocked(self):
 
         try:

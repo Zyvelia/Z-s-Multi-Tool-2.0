@@ -249,8 +249,16 @@ class GamingHubUI(ctk.CTkFrame):
             command=self.open_unhide_menu, width=140
         ).pack(side="left", padx=(6, 0))
 
+        self._ghost_btn(
+            hide_row, "🧹 Clean up orphaned saves…",
+            command=self.open_cleanup_menu, width=190
+        ).pack(side="left", padx=(6, 0))
+
         self.unhide_row = ctk.CTkFrame(panel, fg_color="transparent")
         # packed on demand by open_unhide_menu(), not shown by default
+
+        self.cleanup_row = ctk.CTkFrame(panel, fg_color="transparent")
+        # packed on demand by open_cleanup_menu(), not shown by default
 
         self._section(panel, "Save folder")
 
@@ -785,6 +793,86 @@ class GamingHubUI(ctk.CTkFrame):
         self.save_manager.unblock_game(game_name)
         self.display_games(self.games)
         self.close_unhide_menu()
+
+    def open_cleanup_menu(self):
+        """Shows a review list of save-path entries whose game name
+        doesn't match anything from the last scan, so a stale entry can
+        be removed deliberately. This is intentionally manual, not
+        automatic - a game missing from a scan can just mean the
+        scanner missed it (wrong drive, non-standard library folder,
+        etc.), not that it's actually uninstalled. Calling this again
+        while it's already open just closes it."""
+        if self.cleanup_row.winfo_ismapped():
+            self.close_cleanup_menu()
+            return
+
+        for widget in self.cleanup_row.winfo_children():
+            widget.destroy()
+
+        known_names = [g.name for g in self.games]
+        orphaned = self.save_manager.get_orphaned_games(known_names)
+
+        if not orphaned:
+            row = ctk.CTkFrame(self.cleanup_row, fg_color="transparent")
+            row.pack(fill="x")
+            self._label(
+                row, "No orphaned save paths right now.",
+                size=11, color=TEXT_LOW
+            ).pack(side="left", padx=(0, 6))
+            self._ghost_btn(
+                row, "✕", width=32, command=self.close_cleanup_menu
+            ).pack(side="left")
+            self.cleanup_row.pack(fill="x", padx=20, pady=(0, 4))
+            return
+
+        self._label(
+            self.cleanup_row,
+            f"{len(orphaned)} saved path(s) don't match any game from the "
+            "last scan. If a game you know is installed shows up here, "
+            "rescan first - it likely just means the scan missed it.",
+            size=11, color=TEXT_LOW, wraplength=520, justify="left"
+        ).pack(anchor="w", pady=(0, 6))
+
+        control_row = ctk.CTkFrame(self.cleanup_row, fg_color="transparent")
+        control_row.pack(fill="x")
+
+        self.cleanup_dropdown = ctk.CTkOptionMenu(
+            control_row, values=orphaned,
+            fg_color=BG_RAISED, button_color=BG_RAISED,
+            button_hover_color=BORDER,
+            dropdown_fg_color=BG_PANEL,
+            dropdown_hover_color=BG_RAISED,
+            text_color=TEXT_HI,
+            font=(FONT, 13)
+        )
+        self.cleanup_dropdown.pack(side="left", fill="x", expand=True)
+
+        self._ghost_btn(
+            control_row, "Remove", width=90,
+            command=self.remove_orphaned_save_path
+        ).pack(side="left", padx=(6, 0))
+
+        self._ghost_btn(
+            control_row, "✕", width=32,
+            command=self.close_cleanup_menu
+        ).pack(side="left", padx=(6, 0))
+
+        self.cleanup_row.pack(fill="x", padx=20, pady=(0, 4))
+
+    def close_cleanup_menu(self):
+        self.cleanup_row.pack_forget()
+
+    def remove_orphaned_save_path(self):
+        if not hasattr(self, "cleanup_dropdown"):
+            return
+
+        game_name = self.cleanup_dropdown.get()
+        self.save_manager.delete_path(game_name)
+
+        if self.game_dropdown.get() == game_name:
+            self.load_selected_game_path()
+
+        self.open_cleanup_menu()  # re-open to refresh the list in place
 
     def filter_games(self, event=None):
         search = self.search_entry.get().lower()
