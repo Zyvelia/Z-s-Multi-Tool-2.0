@@ -99,6 +99,19 @@ def _cookie_from_headers(headers):
     return None
 
 
+def _bearer_from_headers(headers):
+    # The Zs Multi Tool browser extension can't rely on the SameSite=Strict
+    # session cookie (an extension popup/background page is a different
+    # "site" than 127.0.0.1, so Strict cookies never get attached to its
+    # requests). It authenticates with a plain bearer token instead — same
+    # session store, same expiry, just carried in a header instead of a
+    # cookie. This is only ever readable on 127.0.0.1 loopback traffic.
+    raw = headers.get("Authorization", "")
+    if raw.startswith("Bearer "):
+        return raw[len("Bearer "):].strip()
+    return None
+
+
 class _Handler(BaseHTTPRequestHandler):
 
     server_version = "VaultWeb/1.0"
@@ -114,11 +127,30 @@ class _Handler(BaseHTTPRequestHandler):
     def _services(self):
         return self.server.app_services
 
+    def _cors_headers(self):
+        # Loopback-only server (127.0.0.1), so a permissive CORS policy here
+        # doesn't expose anything beyond what's already reachable by any
+        # process on this same machine. Needed so the browser extension's
+        # popup/background page (origin "chrome-extension://...") and, for
+        # Firefox, its content-script fetches can talk to this API.
+        origin = self.headers.get("Origin")
+        self.send_header("Access-Control-Allow-Origin", origin if origin else "*")
+        self.send_header("Access-Control-Allow-Credentials", "true")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Vary", "Origin")
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self._cors_headers()
+        self.end_headers()
+
     def _send_json(self, status, payload, set_cookie=None):
         body = json.dumps(payload).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        self._cors_headers()
         if set_cookie:
             self.send_header("Set-Cookie", set_cookie)
         self.end_headers()
@@ -147,7 +179,7 @@ class _Handler(BaseHTTPRequestHandler):
                 return {}
 
     def _authed(self):
-        token = _cookie_from_headers(self.headers)
+        token = _cookie_from_headers(self.headers) or _bearer_from_headers(self.headers)
         return _session_valid(token)
 
     # -------------------------------------------------
@@ -176,7 +208,7 @@ class _Handler(BaseHTTPRequestHandler):
         if self.path == "/api/login":
             self._handle_login()
         elif self.path == "/api/logout":
-            token = _cookie_from_headers(self.headers)
+            token = _cookie_from_headers(self.headers) or _bearer_from_headers(self.headers)
             if token:
                 _drop_session(token)
             self._send_json(200, {"ok": True}, set_cookie="vault_session=; Path=/; Max-Age=0")
@@ -210,7 +242,7 @@ class _Handler(BaseHTTPRequestHandler):
             alert_service.remote_login_attempt(True, client_ip)
         token = _new_session()
         cookie = f"vault_session={token}; Path=/; HttpOnly; SameSite=Strict"
-        self._send_json(200, {"ok": True}, set_cookie=cookie)
+        self._send_json(200, {"ok": True, "token": token}, set_cookie=cookie)
 
     def _handle_entries(self):
         vault_service = self._services()["vault_service"]

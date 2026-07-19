@@ -64,8 +64,13 @@ class MusicPage(ctk.CTkFrame):
         # Remote-access web server (phone streaming) — lazily created and
         # stashed on the manager, same pattern as engine/db above, so it
         # (and any in-progress remote session) survives re-opening this page.
-        self.web_server = getattr(manager, "music_web_server", None) or MusicWebServer(library=self.db)
+        self.web_server = getattr(manager, "music_web_server", None) or MusicWebServer(library=self.db, engine=self.engine)
         manager.music_web_server = self.web_server
+        # Always refresh — if the server object was reused from a prior
+        # page-open, its .engine reference should still point at the live
+        # engine so /api/control and /api/now-playing (used by the browser
+        # extension) stay in sync.
+        self.web_server.engine = self.engine
 
         # Scan progress is stored on the manager (not on this widget) so
         # a background scan keeps going and stays trackable even if the

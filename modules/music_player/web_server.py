@@ -79,11 +79,32 @@ class _Handler(BaseHTTPRequestHandler):
     def _lib(self):
         return self.server.library
 
+    def _engine(self):
+        ws = getattr(self.server, "web_server", None)
+        return getattr(ws, "engine", None) if ws else None
+
+    def _cors_headers(self):
+        # Loopback-only (127.0.0.1), so a permissive CORS policy doesn't
+        # expose anything beyond what any other local process could already
+        # reach. Needed for the browser extension's popup/background page
+        # to fetch() this API.
+        origin = self.headers.get("Origin")
+        self.send_header("Access-Control-Allow-Origin", origin if origin else "*")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Vary", "Origin")
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self._cors_headers()
+        self.end_headers()
+
     def _send_json(self, status, payload):
         body = json.dumps(payload).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        self._cors_headers()
         self.end_headers()
         self.wfile.write(body)
 
@@ -93,6 +114,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self._cors_headers()
         self.end_headers()
         self.wfile.write(body)
 
@@ -109,10 +131,19 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_html(200, _PAGE_SHELL)
         elif path == "/api/status":
             self._send_json(200, {"ok": True, "count": self._lib().count()})
+        elif path == "/api/now-playing":
+            self._handle_now_playing()
         elif path == "/api/songs":
             self._handle_songs(qs)
         elif path.startswith("/api/stream/"):
             self._handle_stream(path[len("/api/stream/"):], send_body=True)
+        else:
+            self._send_json(404, {"error": "not found"})
+
+    def do_POST(self):
+        parts = urlsplit(self.path)
+        if parts.path == "/api/control":
+            self._handle_control()
         else:
             self._send_json(404, {"error": "not found"})
 
@@ -128,6 +159,100 @@ class _Handler(BaseHTTPRequestHandler):
     # -------------------------------------------------
     # handlers
     # -------------------------------------------------
+
+    def _handle_now_playing(self):
+        engine = self._engine()
+        if engine is None:
+            self._send_json(200, {"attached": False})
+            return
+
+        try:
+            from .player import State
+        except Exception:
+            State = None
+
+        meta = engine.get_current_meta()
+        song = None
+        if meta:
+            song = _song_json(meta)
+        elif getattr(engine, "playlist", None) and 0 <= engine.index < len(engine.playlist):
+            import os as _os
+            path = engine.playlist[engine.index]
+            song = {"id": None, "title": _os.path.basename(path or "?"), "artist": "", "album": "", "duration": 0}
+
+        state = engine.get_state() if State else None
+        self._send_json(200, {
+            "attached": True,
+            "song": song,
+            "is_playing": engine.is_playing(),
+            "state": state,
+            "position": engine.get_time(),
+            "duration": engine.get_length(),
+            "volume": getattr(engine, "volume", 0.5),
+            "shuffle": getattr(engine, "shuffle", False),
+            "repeat_mode": getattr(engine, "repeat_mode", "off"),
+            "has_prev": engine.index > 0 if getattr(engine, "playlist", None) else False,
+            "has_next": bool(getattr(engine, "playlist", None)) and engine.index + 1 < len(engine.playlist),
+        })
+
+    def _read_json_body(self):
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        if length == 0:
+            return {}
+        raw = self.rfile.read(length).decode("utf-8", errors="ignore")
+        try:
+            return json.loads(raw)
+        except Exception:
+            return {}
+
+    def _handle_control(self):
+        engine = self._engine()
+        if engine is None:
+            self._send_json(409, {"error": "no active playback engine — open the Music Player page in the desktop app first"})
+            return
+
+        body = self._read_json_body()
+        action = body.get("action")
+
+        if action == "play":
+            if engine.index < 0 and getattr(engine, "playlist", None):
+                engine.play_at(0)
+            else:
+                engine.play()
+        elif action == "pause":
+            engine.pause()
+        elif action == "next":
+            engine.next()
+        elif action == "prev":
+            engine.prev()
+        elif action == "set_volume":
+            engine.set_volume(body.get("value", 0.5))
+        elif action == "toggle_shuffle":
+            engine.shuffle = not engine.shuffle
+        elif action == "cycle_repeat":
+            modes = ["off", "all", "one"]
+            engine.repeat_mode = modes[(modes.index(engine.repeat_mode) + 1) % len(modes)]
+        elif action == "play_song":
+            song_id = body.get("song_id")
+            try:
+                song_id = int(song_id)
+            except (TypeError, ValueError):
+                self._send_json(400, {"error": "song_id required"})
+                return
+            lib = self._lib()
+            ids = lib.search_ids("")
+            try:
+                start_index = list(ids).index(song_id)
+            except ValueError:
+                start_index = 0
+                ids = [song_id]
+            engine.load_ids(lib, ids, start_index=start_index)
+            engine.play()
+        else:
+            self._send_json(400, {"error": f"unknown action: {action}"})
+            return
+
+        self._handle_now_playing()
 
     def _handle_songs(self, qs):
         query = (qs.get("q") or [""])[0]
@@ -225,10 +350,19 @@ class MusicWebServer:
     if not provided, a new one is opened against the same on-disk index
     the desktop app uses (Library's SQLite connections are per-thread,
     so sharing or independently opening the same db file is both fine).
+
+    `engine` is the live PygameMusicEngine driving the desktop app's own
+    speakers (manager.music_engine). It's optional — if not supplied,
+    /api/now-playing and /api/control just report "no engine attached"
+    instead of failing outright — but it's what lets the browser
+    extension's remote-control buttons (play/pause/skip/volume) actually
+    control the desktop app's playback, as opposed to the independent
+    phone-streaming session served by /api/songs + /api/stream.
     """
 
-    def __init__(self, library=None):
+    def __init__(self, library=None, engine=None):
         self.library = library or musicdb.Library()
+        self.engine = engine
         self._httpd = None
         self._thread = None
         self.port = None
@@ -245,6 +379,11 @@ class MusicWebServer:
             return False, f"Couldn't bind to port {port}: {e}"
 
         httpd.library = self.library
+        # Store a reference to this wrapper (not just the engine) so that
+        # reassigning self.engine later (e.g. MusicPage re-fetching the
+        # live engine off `manager`) is picked up by in-flight requests
+        # without needing to restart the server.
+        httpd.web_server = self
         thread = threading.Thread(target=httpd.serve_forever, daemon=True)
         thread.start()
 
