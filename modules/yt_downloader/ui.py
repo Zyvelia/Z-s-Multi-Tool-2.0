@@ -17,6 +17,7 @@ except ImportError:
 
 from core import theme
 from core import paths
+from .web_server import YTWebServer
 
 # ── Colours (shared app theme) ───────────────────────────────────────────
 BG      = theme.BG
@@ -36,6 +37,10 @@ SETTINGS_FILE = paths.migrate_legacy_file(
     paths.data_path("yt_downloader", "downloader_settings.json"),
     "modules", "yt_downloader", "downloader_settings.json"
 )
+
+# Music defaults to 8766, Security Vault to 8765 — kept distinct so all
+# three can run at once without a port clash.
+DEFAULT_REMOTE_PORT = 8767
 
 
 def _make_btn(parent, text, cmd, **ov):
@@ -68,10 +73,28 @@ class YTDownloaderPage(ctk.CTkFrame):
         self.manager      = manager
         self.ffmpeg_dir   = _find_ffmpeg()
         self._downloading = False
+        self._remote_job_ids_seen = set()
+
+        # Shared with the browser extension: a loopback server that lets a
+        # "Send to Downloader" button on a YouTube tab queue a download
+        # here. Created once and stashed on the manager (same lazy pattern
+        # Music Player uses) so it survives navigating away from this page.
+        self.web_server = getattr(manager, "yt_web_server", None) or YTWebServer(
+            get_output_dir=lambda: self._out_entry.get().strip(),
+            get_cookie_file=lambda: self._cookie_entry.get().strip(),
+            get_ffmpeg_dir=lambda: self.ffmpeg_dir,
+        )
+        manager.yt_web_server = self.web_server
+        self.web_server.on_job_update = self._on_remote_job_update
 
         self._build_ui()
         self._load_settings()
         threading.Thread(target=self._check_for_update, daemon=True).start()
+
+        if self._autostart_var.get() and not self.web_server.is_running():
+            self._start_remote_access()
+
+        self._refresh_remote_status()
 
     # ── Build ──────────────────────────────────────────────────────────────────
 
@@ -80,6 +103,7 @@ class YTDownloaderPage(ctk.CTkFrame):
         self._build_url_row()
         self._build_options_row()
         self._build_paths_row()
+        self._build_remote_row()
         self._build_log()
 
     def _build_header(self):
@@ -204,6 +228,52 @@ class YTDownloaderPage(ctk.CTkFrame):
         _make_btn(cookie_row, "Browse", self._browse_cookie, width=80).pack(side="left")
         _make_btn(cookie_row, "✕", self._clear_cookie, width=36).pack(side="left", padx=(4, 0))
 
+    def _build_remote_row(self):
+        panel = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
+        panel.pack(fill="x", padx=12, pady=(0, 4))
+
+        top = ctk.CTkFrame(panel, fg_color="transparent")
+        top.pack(fill="x", padx=10, pady=(10, 4))
+
+        ctk.CTkLabel(top, text="🧩  Browser extension (\"Send to Downloader\")",
+                     font=("Segoe UI", 13, "bold"), text_color=TEXT).pack(side="left")
+
+        self._remote_status_lbl = ctk.CTkLabel(top, text="⚪ Off", text_color=MUTED)
+        self._remote_status_lbl.pack(side="right")
+
+        row = ctk.CTkFrame(panel, fg_color="transparent")
+        row.pack(fill="x", padx=10, pady=(0, 6))
+
+        self._remote_start_btn = _make_btn(row, "▶ Start", self._start_remote_access,
+                                           **_BTN_ACCENT, width=90)
+        self._remote_start_btn.pack(side="left")
+
+        self._remote_stop_btn = _make_btn(row, "■ Stop", self._stop_remote_access,
+                                          **_BTN_DANGER, width=90)
+        self._remote_stop_btn.pack(side="left", padx=(8, 0))
+
+        ctk.CTkLabel(row, text="Local port", text_color=MUTED,
+                     font=("Segoe UI", 12)).pack(side="left", padx=(20, 6))
+        self._remote_port_entry = ctk.CTkEntry(
+            row, width=80, fg_color=PANEL_2, text_color=TEXT, border_color=PANEL_2, corner_radius=8)
+        self._remote_port_entry.pack(side="left")
+
+        self._autostart_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            row, text="Auto-start with the app", variable=self._autostart_var,
+            text_color=MUTED, font=("Segoe UI", 12), fg_color=ACCENT, hover_color="#2f7fd6",
+            command=self._save_settings,
+        ).pack(side="left", padx=(20, 0))
+
+        ctk.CTkLabel(
+            panel,
+            text="Turn this on, then use the \"Send to Downloader\" button in the Zs Multi Tool "
+                 "Companion browser extension on any YouTube tab. Downloads land in the output "
+                 "folder above, using the format/quality set here. Loopback only (127.0.0.1) — "
+                 "never reachable off this PC.",
+            text_color=MUTED, font=("Segoe UI", 11), anchor="w", justify="left", wraplength=760,
+        ).pack(fill="x", padx=10, pady=(0, 10))
+
     def _build_log(self):
         panel = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
         panel.pack(fill="x", expand=False, padx=12, pady=(0, 12))
@@ -239,23 +309,99 @@ class YTDownloaderPage(ctk.CTkFrame):
                 self._fmt_var.set(s.get("format", "mp3"))
                 self._type_var.set(s.get("type", "video"))
                 self._quality_var.set(s.get("quality", "192"))
+                self._remote_port_entry.insert(0, str(s.get("remote_port", DEFAULT_REMOTE_PORT)))
+                self._autostart_var.set(bool(s.get("auto_start_remote", False)))
             else:
                 self._set_entry(self._out_entry, os.path.expanduser("~"))
+                self._remote_port_entry.insert(0, str(DEFAULT_REMOTE_PORT))
         except Exception:
             self._set_entry(self._out_entry, os.path.expanduser("~"))
+            if not self._remote_port_entry.get():
+                self._remote_port_entry.insert(0, str(DEFAULT_REMOTE_PORT))
 
     def _save_settings(self):
         try:
             with open(SETTINGS_FILE, "w") as f:
                 json.dump({
-                    "output_dir":  self._out_entry.get(),
-                    "cookie_file": self._cookie_entry.get(),
-                    "format":      self._fmt_var.get(),
-                    "type":        self._type_var.get(),
-                    "quality":     self._quality_var.get(),
+                    "output_dir":        self._out_entry.get(),
+                    "cookie_file":       self._cookie_entry.get(),
+                    "format":            self._fmt_var.get(),
+                    "type":              self._type_var.get(),
+                    "quality":           self._quality_var.get(),
+                    "remote_port":       self._current_remote_port(),
+                    "auto_start_remote": bool(self._autostart_var.get()),
                 }, f, indent=2)
         except Exception:
             pass
+
+    # ── Remote access (browser extension) ───────────────────────────────────
+
+    def _current_remote_port(self):
+        try:
+            return int(self._remote_port_entry.get().strip() or DEFAULT_REMOTE_PORT)
+        except ValueError:
+            return DEFAULT_REMOTE_PORT
+
+    def _start_remote_access(self):
+        port = self._current_remote_port()
+        self._remote_start_btn.configure(state="disabled", text="Starting…")
+
+        def work():
+            ok, msg = self.web_server.start(port)
+            self.after(0, lambda: self._after_start_remote_access(ok, msg))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _after_start_remote_access(self, ok, msg):
+        self._remote_start_btn.configure(state="normal", text="▶ Start")
+        if not ok:
+            self._log_msg(f"❌ Couldn't start browser-extension server: {msg}")
+        else:
+            self._log_msg(f"🧩 Browser-extension server started — {msg}")
+        self._save_settings()
+        self._refresh_remote_status()
+
+    def _stop_remote_access(self):
+        self.web_server.stop()
+        self._log_msg("🧩 Browser-extension server stopped.")
+        self._refresh_remote_status()
+
+    def _refresh_remote_status(self):
+        if not self.winfo_exists():
+            return
+        if self.web_server.is_running():
+            self._remote_status_lbl.configure(
+                text=f"🟢 On — 127.0.0.1:{self.web_server.port}", text_color=SUCCESS)
+            self._remote_start_btn.configure(state="disabled")
+            self._remote_stop_btn.configure(state="normal")
+        else:
+            self._remote_status_lbl.configure(text="⚪ Off", text_color=MUTED)
+            self._remote_start_btn.configure(state="normal")
+            self._remote_stop_btn.configure(state="disabled")
+
+    def _on_remote_job_update(self, job):
+        """Fires (from the server's worker thread) whenever a job queued by
+        the extension changes state. Mirrors it into this page's log/progress
+        so downloads triggered remotely are visible here too, if open."""
+        def _do():
+            if not self.winfo_exists():
+                return
+            first_time = job["id"] not in self._remote_job_ids_seen
+            if first_time and job["status"] in ("queued", "downloading"):
+                self._remote_job_ids_seen.add(job["id"])
+                self._log_msg(f"🧩 Extension queued: {job['url']}  ({job['format']}, {job['type']})")
+
+            if job["status"] == "downloading":
+                self._set_status(f"⬇ (extension) {job['message']}", ACCENT)
+                self._set_progress(job.get("percent", 0.0))
+            elif job["status"] == "done":
+                self._log_msg(f"✅ (extension) Download complete: {job['url']}")
+                self._set_status("✅ Done", SUCCESS)
+                self._set_progress(1.0)
+            elif job["status"] == "error":
+                self._log_msg(f"❌ (extension) {job['url']} — {job['message']}")
+                self._set_status("❌ Failed", DANGER)
+        self.after(0, _do)
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 

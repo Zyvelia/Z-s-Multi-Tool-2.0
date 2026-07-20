@@ -1,3 +1,5 @@
+import os
+
 import customtkinter as ctk
 
 from core import theme
@@ -18,6 +20,8 @@ from core.services.alert_service import AlertService
 
 from modules.music_player import db as music_db
 from modules.music_player.web_server import MusicWebServer
+from modules.yt_downloader.web_server import YTWebServer
+from modules.yt_downloader import ui as yt_downloader_ui
 
 from pages.catalog_page import CatalogPage
 from pages.settings_page import SettingsPage
@@ -114,6 +118,33 @@ class App(ctk.CTk):
                 self.page_manager.music_web_server.start(port)
         except Exception as e:
             print(f"[App] Couldn't auto-start Music Player server: {e}")
+
+        # Same idea for the YouTube Downloader's server, used by the
+        # "Send to Downloader" button in the browser extension. Also
+        # created lazily on first opening that page — see
+        # modules/yt_downloader/ui.py.
+        try:
+            import json
+            if os.path.exists(yt_downloader_ui.SETTINGS_FILE):
+                with open(yt_downloader_ui.SETTINGS_FILE) as f:
+                    _yt_settings = json.load(f)
+            else:
+                _yt_settings = {}
+            if _yt_settings.get("auto_start_remote"):
+                output_dir = _yt_settings.get("output_dir") or os.path.expanduser("~")
+                cookie_file = _yt_settings.get("cookie_file") or ""
+                self.page_manager.yt_web_server = YTWebServer(
+                    get_output_dir=lambda: output_dir,
+                    get_cookie_file=lambda: cookie_file,
+                    get_ffmpeg_dir=lambda: None,
+                    default_format=_yt_settings.get("format", "mp4"),
+                    default_type=_yt_settings.get("type", "video"),
+                    default_quality=_yt_settings.get("quality", "192"),
+                )
+                port = int(_yt_settings.get("remote_port", 8767) or 8767)
+                self.page_manager.yt_web_server.start(port)
+        except Exception as e:
+            print(f"[App] Couldn't auto-start YouTube Downloader server: {e}")
 
         # =====================================================
         # PLUGIN MANAGER
@@ -213,6 +244,14 @@ class App(ctk.CTk):
             if music_web_server and music_web_server.is_running():
                 self.tailscale_service.disable_serve()
                 music_web_server.stop()
+        except Exception:
+            pass
+        try:
+            # YouTube Downloader's extension-facing server — loopback only,
+            # never wired to Tailscale, so just stop it directly.
+            yt_web_server = getattr(self.page_manager, "yt_web_server", None)
+            if yt_web_server and yt_web_server.is_running():
+                yt_web_server.stop()
         except Exception:
             pass
         try:
