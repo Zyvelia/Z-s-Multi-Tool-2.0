@@ -187,6 +187,76 @@ class Library:
 
     # ── scanning ─────────────────────────────────────────────────
 
+    def index_cue_sheet(self, cue_path):
+        """
+        Parse one .cue sheet and index each track it describes as its own
+        library row (synthetic path, real audio_path + cue_start/cue_end
+        window into the shared audio file). Standalone and non-destructive
+        (no scan_seen bookkeeping, no deletion of unrelated rows) — safe
+        to call from a full scan() *or* directly from the live auto-index
+        watcher when a .cue (or its paired audio file) changes.
+
+        Returns (indexed_paths, claimed_audio_paths):
+          indexed_paths       — synthetic `songs.path` values written
+          claimed_audio_paths — real, absolute paths of the audio file(s)
+                                 this cue sheet successfully claimed
+        """
+        conn = self._conn()
+        dirpath = os.path.dirname(cue_path)
+        try:
+            filenames_lower = {f.lower(): f for f in os.listdir(dirpath)}
+        except OSError:
+            return [], set()
+
+        try:
+            cue_tracks = cuesheet.parse_cue(cue_path)
+        except Exception:
+            cue_tracks = []
+        if not cue_tracks:
+            return [], set()
+
+        by_file = {}
+        for t in cue_tracks:
+            by_file.setdefault(t["file"], []).append(t)
+
+        indexed_paths = []
+        claimed_audio_paths = set()
+
+        for ref_name, tlist in by_file.items():
+            real_name = filenames_lower.get(os.path.basename(ref_name).lower())
+            if not real_name:
+                continue  # referenced audio file isn't next to the cue sheet
+            audio_path = os.path.join(dirpath, real_name)
+            try:
+                st = os.stat(audio_path)
+            except OSError:
+                continue
+
+            file_duration = _read_duration(audio_path) or None
+            for t, start, end in cuesheet.windows_for_file_tracks(tlist, file_duration):
+                synth_path = f"{audio_path}::cue{t['track']:02d}"
+                title = t.get("title") or f"Track {t['track']:02d}"
+                artist = t.get("performer")
+                album = t.get("album")
+                duration = (end - start) if end is not None else 0.0
+
+                conn.execute(
+                    "INSERT INTO songs(path, title, artist, album, duration, size, mtime, "
+                    "audio_path, cue_start, cue_end) VALUES (?,?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(path) DO UPDATE SET "
+                    "title=excluded.title, artist=excluded.artist, album=excluded.album, "
+                    "duration=excluded.duration, size=excluded.size, mtime=excluded.mtime, "
+                    "audio_path=excluded.audio_path, cue_start=excluded.cue_start, "
+                    "cue_end=excluded.cue_end",
+                    (synth_path, title, artist, album, duration, st.st_size, st.st_mtime,
+                     audio_path, start, end))
+                indexed_paths.append(synth_path)
+            claimed_audio_paths.add(audio_path)
+
+        if indexed_paths:
+            conn.commit()
+        return indexed_paths, claimed_audio_paths
+
     def scan(self, root, progress_cb=None, stop_event=None, workers=6):
         """
         Incrementally index `root`. Only new/changed files get their tags
@@ -252,65 +322,6 @@ class Library:
                 conn.commit()
                 updated += len(batch)
 
-        def _index_cue_sheet(cue_path, dirpath, filenames_lower):
-            """
-            Parse one .cue sheet and index each track it describes as its
-            own library row (synthetic path, real audio_path + cue_start/
-            cue_end window). Returns the set of lowercased audio-file
-            basenames it successfully claimed (so the plain-file scan
-            below skips them).
-            """
-            nonlocal found, updated
-            claimed_here = set()
-            try:
-                cue_tracks = cuesheet.parse_cue(cue_path)
-            except Exception:
-                cue_tracks = []
-            if not cue_tracks:
-                return claimed_here
-
-            by_file = {}
-            for t in cue_tracks:
-                by_file.setdefault(t["file"], []).append(t)
-
-            for ref_name, tlist in by_file.items():
-                real_name = filenames_lower.get(os.path.basename(ref_name).lower())
-                if not real_name:
-                    continue  # referenced audio file isn't next to the cue sheet
-                audio_path = os.path.join(dirpath, real_name)
-                try:
-                    st = os.stat(audio_path)
-                except OSError:
-                    continue
-
-                file_duration = _read_duration(audio_path) or None
-                for t, start, end in cuesheet.windows_for_file_tracks(tlist, file_duration):
-                    synth_path = f"{audio_path}::cue{t['track']:02d}"
-                    title = t.get("title") or f"Track {t['track']:02d}"
-                    artist = t.get("performer")
-                    album = t.get("album")
-                    duration = (end - start) if end is not None else 0.0
-
-                    found += 1
-                    conn.execute(
-                        "INSERT OR IGNORE INTO scan_seen(path) VALUES (?)", (synth_path,))
-                    conn.execute(
-                        "INSERT INTO songs(path, title, artist, album, duration, size, mtime, "
-                        "audio_path, cue_start, cue_end) VALUES (?,?,?,?,?,?,?,?,?,?) "
-                        "ON CONFLICT(path) DO UPDATE SET "
-                        "title=excluded.title, artist=excluded.artist, album=excluded.album, "
-                        "duration=excluded.duration, size=excluded.size, mtime=excluded.mtime, "
-                        "audio_path=excluded.audio_path, cue_start=excluded.cue_start, "
-                        "cue_end=excluded.cue_end",
-                        (synth_path, title, artist, album, duration, st.st_size, st.st_mtime,
-                         audio_path, start, end))
-                    updated += 1
-                claimed_here.add(real_name.lower())
-
-            if claimed_here:
-                conn.commit()
-            return claimed_here
-
         try:
             for dirpath, dirnames, filenames in os.walk(root):
                 if stop_event and stop_event.is_set():
@@ -321,7 +332,6 @@ class Library:
                 # reference, so those files are indexed per-track instead
                 # of as one single track below.
                 claimed = set()
-                filenames_lower = {f.lower(): f for f in filenames}
                 for fn in filenames:
                     if stop_event and stop_event.is_set():
                         aborted = True
@@ -329,7 +339,13 @@ class Library:
                     if not fn.lower().endswith(CUE_EXTS):
                         continue
                     cue_path = os.path.join(dirpath, fn)
-                    claimed |= _index_cue_sheet(cue_path, dirpath, filenames_lower)
+                    indexed_paths, claimed_audio_paths = self.index_cue_sheet(cue_path)
+                    for p in indexed_paths:
+                        found += 1
+                        updated += 1
+                        conn.execute(
+                            "INSERT OR IGNORE INTO scan_seen(path) VALUES (?)", (p,))
+                    claimed |= {os.path.basename(p).lower() for p in claimed_audio_paths}
                 if aborted:
                     break
 

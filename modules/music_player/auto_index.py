@@ -12,6 +12,12 @@
 #      directory walk needed, so this stays cheap even on a
 #      750,000+ file network share.
 #
+#      Cue sheets (album.ape + album.cue) get the same live treatment:
+#      a changed .cue is re-expanded into its per-track rows via
+#      Library.index_cue_sheet(), and a newly-arrived audio file is
+#      checked against any sibling .cue that already claims it before
+#      falling back to indexing it as one whole-file track.
+#
 #   2. A periodic incremental safety-net scan (Library.scan(), which is
 #      itself cheap for unchanged files). This catches anything the
 #      watcher misses — which happens more than you'd like on network
@@ -31,6 +37,7 @@ import threading
 import time
 
 from . import db as musicdb
+from . import cue as cuesheet
 
 try:
     from watchdog.observers import Observer
@@ -55,27 +62,28 @@ class _Handler(FileSystemEventHandler):
         self._on_removed = on_removed
 
     @staticmethod
-    def _is_audio(path):
-        return path.lower().endswith(musicdb.AUDIO_EXTS)
+    def _is_relevant(path):
+        low = path.lower()
+        return low.endswith(musicdb.AUDIO_EXTS) or low.endswith(musicdb.CUE_EXTS)
 
     def on_created(self, event):
-        if not event.is_directory and self._is_audio(event.src_path):
+        if not event.is_directory and self._is_relevant(event.src_path):
             self._on_changed(event.src_path)
 
     def on_modified(self, event):
-        if not event.is_directory and self._is_audio(event.src_path):
+        if not event.is_directory and self._is_relevant(event.src_path):
             self._on_changed(event.src_path)
 
     def on_moved(self, event):
         if event.is_directory:
             return
-        if self._is_audio(event.src_path):
+        if self._is_relevant(event.src_path):
             self._on_removed(event.src_path)
-        if self._is_audio(event.dest_path):
+        if self._is_relevant(event.dest_path):
             self._on_changed(event.dest_path)
 
     def on_deleted(self, event):
-        if not event.is_directory and self._is_audio(event.src_path):
+        if not event.is_directory and self._is_relevant(event.src_path):
             self._on_removed(event.src_path)
 
 
@@ -200,6 +208,32 @@ class AutoIndexer:
                 return False
             return (time.monotonic() - self._last_event_time) >= DEBOUNCE_SECONDS
 
+    def _sibling_cue_claiming(self, audio_path):
+        """
+        If a .cue sheet already sitting next to `audio_path` references
+        it, return that cue sheet's path. Used when a *new* audio file
+        shows up after its .cue sheet was already there (so no event
+        fires for the cue itself) — otherwise the file would get indexed
+        as one whole-file track instead of being split by the cue.
+        """
+        dirpath = os.path.dirname(audio_path)
+        basename_lower = os.path.basename(audio_path).lower()
+        try:
+            entries = os.listdir(dirpath)
+        except OSError:
+            return None
+        for fn in entries:
+            if not fn.lower().endswith(musicdb.CUE_EXTS):
+                continue
+            candidate = os.path.join(dirpath, fn)
+            try:
+                tracks = cuesheet.parse_cue(candidate)
+            except Exception:
+                continue
+            if any(os.path.basename(t["file"]).lower() == basename_lower for t in tracks):
+                return candidate
+        return None
+
     def _flush_pending(self):
         with self._pending_lock:
             changed = list(self._pending_changed)
@@ -208,13 +242,42 @@ class AutoIndexer:
             self._pending_removed.clear()
         if not changed and not removed:
             return
+
+        cue_changed = [p for p in changed if p.lower().endswith(musicdb.CUE_EXTS)]
+        audio_changed = [p for p in changed if not p.lower().endswith(musicdb.CUE_EXTS)]
+
         try:
             if removed:
                 self.library.remove_paths(removed)
-            if changed:
-                self.library.index_paths(changed)
+
+            # Cue sheets that were created/edited: (re-)expand into
+            # per-track rows, and drop any stale whole-file row for the
+            # audio they now claim.
+            claimed_this_round = set()
+            for cue_path in cue_changed:
+                _indexed, claimed_audio_paths = self.library.index_cue_sheet(cue_path)
+                if claimed_audio_paths:
+                    self.library.remove_paths(list(claimed_audio_paths))
+                claimed_this_round.update(os.path.normcase(p) for p in claimed_audio_paths)
+
+            # Audio files that were created/changed: if a sibling .cue
+            # already claims this file, expand via the cue instead of
+            # adding a plain whole-file row.
+            plain_audio = []
+            for path in audio_changed:
+                if os.path.normcase(path) in claimed_this_round:
+                    continue
+                sibling_cue = self._sibling_cue_claiming(path)
+                if sibling_cue:
+                    self.library.index_cue_sheet(sibling_cue)
+                else:
+                    plain_audio.append(path)
+
+            if plain_audio:
+                self.library.index_paths(plain_audio)
         except Exception:
             return
+
         n = len(changed) + len(removed)
         self._set_status(
             f"Auto-indexed {n} change{'s' if n != 1 else ''} — "
