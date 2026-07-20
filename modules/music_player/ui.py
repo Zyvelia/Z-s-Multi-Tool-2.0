@@ -7,9 +7,19 @@ from tkinter import filedialog
 
 from .player import VLCMusicEngine, State
 from . import db as musicdb
+from . import auto_index
 from .web_server import MusicWebServer
 from .remote_access_tab import RemoteAccessTab
 from core import theme
+
+try:
+    import tkinterdnd2
+    from tkinterdnd2 import DND_FILES, COPY
+    HAS_DND = True
+except ImportError:
+    tkinterdnd2 = None
+    DND_FILES = COPY = None
+    HAS_DND = False
 
 BG      = theme.BG
 PANEL   = theme.PANEL
@@ -81,6 +91,19 @@ class MusicPage(ctk.CTkFrame):
                                 "stage": "idle", "stop_event": threading.Event()}
             manager.music_scan_state = self.scan_state
         self._last_seen_stage = self.scan_state["stage"]
+        self._last_seen_autoindex_text = None
+
+        # Background auto-indexer (filesystem watcher + periodic safety
+        # scan) — lives on the manager so it keeps running even if the
+        # user closes and reopens the Music Player page.
+        self.auto_indexer = getattr(manager, "music_auto_indexer", None)
+        if self.auto_indexer is None:
+            self.auto_indexer = auto_index.AutoIndexer(self.db)
+            manager.music_auto_indexer = self.auto_indexer
+        self.autoindex_status = getattr(manager, "music_autoindex_status", None)
+        if self.autoindex_status is None:
+            self.autoindex_status = {"text": ""}
+            manager.music_autoindex_status = self.autoindex_status
 
         self.active_index = -1
         self._loop_running = False
@@ -98,6 +121,7 @@ class MusicPage(ctk.CTkFrame):
         self._render_page()
         self._start_loop()
         self._maybe_autoscan()
+        self._setup_drag_drop()
 
     # ── Build ─────────────────────────────────────────────────
 
@@ -147,11 +171,20 @@ class MusicPage(ctk.CTkFrame):
 
         row = ctk.CTkFrame(panel, fg_color="transparent")
         row.pack(fill="x", padx=10, pady=(10, 4))
+        self.folder_row = row
 
         _make_btn(row, "📁  Set Music Folder", self.pick_folder,
                   width=170).pack(side="left", padx=(0, 6))
         _make_btn(row, "🔄  Rescan Now", self.rescan_now,
                   width=130).pack(side="left", padx=(0, 6))
+
+        self.autoindex_var = ctk.BooleanVar(
+            value=self.db.get_setting("auto_index_enabled", "1") == "1")
+        ctk.CTkCheckBox(
+            row, text="Auto-index new files", variable=self.autoindex_var,
+            command=self._on_toggle_autoindex, text_color=TEXT,
+            fg_color=ACCENT, hover_color=ACCENT,
+        ).pack(side="left", padx=(0, 6))
 
         self.folder_label = ctk.CTkLabel(
             row, text=self._folder_display(), text_color=MUTED, anchor="w")
@@ -165,6 +198,7 @@ class MusicPage(ctk.CTkFrame):
     def _build_browse_panel(self):
         panel = ctk.CTkFrame(self._tab_body, fg_color=PANEL, corner_radius=10)
         panel.pack(fill="both", expand=True, padx=12, pady=6)
+        self.library_panel = panel
 
         top = ctk.CTkFrame(panel, fg_color="transparent")
         top.pack(fill="x", padx=10, pady=(8, 4))
@@ -184,6 +218,12 @@ class MusicPage(ctk.CTkFrame):
                   width=170).pack(side="left", padx=(0, 6))
         _make_btn(big_row, "＋  Add Files (quick queue)", self.load_files,
                   width=190).pack(side="left")
+
+        if HAS_DND:
+            ctk.CTkLabel(
+                big_row, text="…or drag files/a folder anywhere on this page",
+                text_color=MUTED, font=("Segoe UI", 11)
+            ).pack(side="left", padx=(10, 0))
 
         self.search_entry = ctk.CTkEntry(
             panel, placeholder_text="Search title / artist / album…", corner_radius=8)
@@ -321,6 +361,7 @@ class MusicPage(ctk.CTkFrame):
         self.db.set_setting("music_folder", folder)
         self.folder_label.configure(text=folder)
         self.rescan_now()
+        self._sync_autoindexer(folder)
 
     def rescan_now(self):
         folder = self.db.get_setting("music_folder")
@@ -333,12 +374,37 @@ class MusicPage(ctk.CTkFrame):
         self._begin_scan(folder)
 
     def _maybe_autoscan(self):
-        if getattr(self.manager, "_music_autoscanned", False):
-            return
-        self.manager._music_autoscanned = True
         folder = self.db.get_setting("music_folder")
-        if folder:
-            self._begin_scan(folder)
+        if not getattr(self.manager, "_music_autoscanned", False):
+            self.manager._music_autoscanned = True
+            if folder:
+                self._begin_scan(folder)
+        # Start (or resume) the background auto-indexer regardless of
+        # whether we just kicked off a startup scan — if the page is
+        # being reopened, the indexer is likely already running and
+        # this is a no-op via _sync_autoindexer's running-folder check.
+        self._sync_autoindexer(folder)
+
+    def _sync_autoindexer(self, folder):
+        """Start/stop the background auto-indexer to match the current
+        folder and the "Auto-index new files" checkbox state."""
+        want_running = bool(folder) and self.autoindex_var.get()
+        already_running = self.auto_indexer.running and self.auto_indexer.folder == folder
+        if want_running and not already_running:
+            self.auto_indexer.start(folder, status_cb=self._on_autoindex_status)
+        elif not want_running and self.auto_indexer.running:
+            self.auto_indexer.stop()
+            self.autoindex_status["text"] = ""
+
+    def _on_toggle_autoindex(self):
+        enabled = self.autoindex_var.get()
+        self.db.set_setting("auto_index_enabled", "1" if enabled else "0")
+        self._sync_autoindexer(self.db.get_setting("music_folder"))
+
+    def _on_autoindex_status(self, text):
+        # Called from a background thread — just stash it; the GUI
+        # thread picks it up next time _poll_scan_state runs.
+        self.autoindex_status["text"] = text
 
     def _begin_scan(self, folder):
         state = self.scan_state
@@ -375,19 +441,94 @@ class MusicPage(ctk.CTkFrame):
             # Refresh whatever's currently being browsed/searched now that
             # the index may have changed.
             self._run_search(immediate=True)
-        elif not state["scanning"] and state["stage"] == "idle":
-            pass
+        elif self.autoindex_status["text"]:
+            # Nothing from the manual scanner to report — show the
+            # background auto-indexer's status instead.
+            text = self.autoindex_status["text"]
+            self.scan_status.configure(text=text)
+            if text != self._last_seen_autoindex_text:
+                self._last_seen_autoindex_text = text
+                if text.startswith("Auto-indexed"):
+                    # The index just changed — refresh whatever's
+                    # currently being browsed/searched.
+                    self._run_search(immediate=True)
 
     # ── Add Files (small ad-hoc queue, bypasses the library index) ──
 
     def load_files(self):
+        patterns = " ".join(f"*{ext}" for ext in musicdb.AUDIO_EXTS)
         files = filedialog.askopenfilenames(
-            filetypes=[("Audio Files", "*.mp3 *.wav *.flac *.ogg *.m4a")])
+            filetypes=[("Audio Files", patterns), ("All Files", "*.*")])
         if files:
             self.engine.load(list(files))
             self.engine.play()
             self.status.configure(text="Files loaded")
             self._update_playback_ui_state()
+
+    # ── Drag and drop ────────────────────────────────────────────
+    #
+    # Dropping audio file(s) anywhere on the page queues/plays them,
+    # same as "Add Files". Dropping a folder (with no loose audio files
+    # alongside it) sets it as the music library folder and scans it,
+    # same as "Set Music Folder". Requires the optional `tkinterdnd2`
+    # package — if it's missing, or tkdnd fails to load on this
+    # platform, drag-and-drop is silently unavailable and everything
+    # else still works via the buttons/dialogs as before.
+
+    def _setup_drag_drop(self):
+        if not HAS_DND:
+            return
+
+        ready = getattr(self.manager, "_music_dnd_ready", None)
+        if ready is None:
+            try:
+                tkinterdnd2.TkinterDnD.require(self.winfo_toplevel())
+                ready = True
+            except Exception:
+                ready = False
+            self.manager._music_dnd_ready = ready
+        if not ready:
+            return
+
+        # Register the page itself plus the main visible container frames
+        # — dropping directly on top of a button/entry still works via
+        # the dialogs, this just covers the surrounding background areas.
+        targets = [self, self.library_panel, self.folder_row, self.song_buttons_frame]
+        for widget in targets:
+            try:
+                widget.drop_target_register(DND_FILES)
+                widget.dnd_bind("<<Drop>>", self._on_drop)
+            except Exception:
+                pass
+
+    def _on_drop(self, event):
+        try:
+            paths = self.tk.splitlist(event.data)
+        except Exception:
+            paths = [event.data]
+
+        dirs = [p for p in paths if os.path.isdir(p)]
+        audio_files = [p for p in paths
+                       if os.path.isfile(p) and p.lower().endswith(musicdb.AUDIO_EXTS)]
+
+        if audio_files:
+            self.engine.load(audio_files)
+            self.engine.play()
+            n = len(audio_files)
+            self.status.configure(
+                text=f"{n} file{'s' if n != 1 else ''} added from drag & drop")
+            self._update_playback_ui_state()
+        elif dirs:
+            folder = dirs[0]
+            self.db.set_setting("music_folder", folder)
+            self.folder_label.configure(text=folder)
+            self.status.configure(text=f"Indexing dropped folder: {folder}")
+            self.rescan_now()
+            self._sync_autoindexer(folder)
+        else:
+            self.status.configure(text="No supported audio files in that drop")
+
+        return COPY
 
     # ── Browse / Search / Paging ─────────────────────────────────
 

@@ -25,10 +25,14 @@ import threading
 import queue
 from array import array
 
+from . import cue as cuesheet
+
 AUDIO_EXTS = (
     ".mp3", ".flac", ".wav", ".ogg", ".oga", ".m4a", ".aac",
     ".wma", ".opus", ".aiff", ".aif", ".ape", ".wv",
 )
+
+CUE_EXTS = (".cue",)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS songs (
@@ -107,6 +111,18 @@ def _read_tags(path):
     return title, artist, album, duration
 
 
+def _read_duration(path):
+    """Read just the total duration (seconds) of a file. Never raises."""
+    try:
+        from mutagen import File as MutagenFile
+        audio = MutagenFile(path)
+        if audio and audio.info:
+            return float(getattr(audio.info, "length", 0) or 0)
+    except Exception:
+        pass
+    return 0.0
+
+
 class Library:
     """
     Thread-safe-ish handle to the SQLite library. Each thread that touches
@@ -136,6 +152,16 @@ class Library:
     def _init_schema(self):
         conn = self._conn()
         conn.executescript(SCHEMA)
+
+        # Migrate older DBs: cue-sheet tracks need to point at the real
+        # underlying audio file (audio_path) separately from their own
+        # synthetic, per-track `path` key, plus the segment they cover.
+        existing_cols = {row["name"] for row in conn.execute("PRAGMA table_info(songs)")}
+        for col, decl in (("audio_path", "TEXT"), ("cue_start", "REAL"), ("cue_end", "REAL")):
+            if col not in existing_cols:
+                conn.execute(f"ALTER TABLE songs ADD COLUMN {col} {decl}")
+        conn.commit()
+
         try:
             conn.executescript(FTS_SCHEMA)
             self._has_fts = True
@@ -215,27 +241,106 @@ class Library:
                     break
             if batch:
                 conn.executemany(
-                    "INSERT INTO songs(path, title, artist, album, duration, size, mtime) "
-                    "VALUES (?,?,?,?,?,?,?) "
+                    "INSERT INTO songs(path, title, artist, album, duration, size, mtime, audio_path) "
+                    "VALUES (?,?,?,?,?,?,?,?) "
                     "ON CONFLICT(path) DO UPDATE SET "
                     "title=excluded.title, artist=excluded.artist, album=excluded.album, "
-                    "duration=excluded.duration, size=excluded.size, mtime=excluded.mtime",
-                    [(p, t, ar, al, d, s, m) for (t, ar, al, d, s, m, p) in batch]
+                    "duration=excluded.duration, size=excluded.size, mtime=excluded.mtime, "
+                    "audio_path=excluded.audio_path",
+                    [(p, t, ar, al, d, s, m, p) for (t, ar, al, d, s, m, p) in batch]
                 )
                 conn.commit()
                 updated += len(batch)
+
+        def _index_cue_sheet(cue_path, dirpath, filenames_lower):
+            """
+            Parse one .cue sheet and index each track it describes as its
+            own library row (synthetic path, real audio_path + cue_start/
+            cue_end window). Returns the set of lowercased audio-file
+            basenames it successfully claimed (so the plain-file scan
+            below skips them).
+            """
+            nonlocal found, updated
+            claimed_here = set()
+            try:
+                cue_tracks = cuesheet.parse_cue(cue_path)
+            except Exception:
+                cue_tracks = []
+            if not cue_tracks:
+                return claimed_here
+
+            by_file = {}
+            for t in cue_tracks:
+                by_file.setdefault(t["file"], []).append(t)
+
+            for ref_name, tlist in by_file.items():
+                real_name = filenames_lower.get(os.path.basename(ref_name).lower())
+                if not real_name:
+                    continue  # referenced audio file isn't next to the cue sheet
+                audio_path = os.path.join(dirpath, real_name)
+                try:
+                    st = os.stat(audio_path)
+                except OSError:
+                    continue
+
+                file_duration = _read_duration(audio_path) or None
+                for t, start, end in cuesheet.windows_for_file_tracks(tlist, file_duration):
+                    synth_path = f"{audio_path}::cue{t['track']:02d}"
+                    title = t.get("title") or f"Track {t['track']:02d}"
+                    artist = t.get("performer")
+                    album = t.get("album")
+                    duration = (end - start) if end is not None else 0.0
+
+                    found += 1
+                    conn.execute(
+                        "INSERT OR IGNORE INTO scan_seen(path) VALUES (?)", (synth_path,))
+                    conn.execute(
+                        "INSERT INTO songs(path, title, artist, album, duration, size, mtime, "
+                        "audio_path, cue_start, cue_end) VALUES (?,?,?,?,?,?,?,?,?,?) "
+                        "ON CONFLICT(path) DO UPDATE SET "
+                        "title=excluded.title, artist=excluded.artist, album=excluded.album, "
+                        "duration=excluded.duration, size=excluded.size, mtime=excluded.mtime, "
+                        "audio_path=excluded.audio_path, cue_start=excluded.cue_start, "
+                        "cue_end=excluded.cue_end",
+                        (synth_path, title, artist, album, duration, st.st_size, st.st_mtime,
+                         audio_path, start, end))
+                    updated += 1
+                claimed_here.add(real_name.lower())
+
+            if claimed_here:
+                conn.commit()
+            return claimed_here
 
         try:
             for dirpath, dirnames, filenames in os.walk(root):
                 if stop_event and stop_event.is_set():
                     aborted = True
                     break
+
+                # ── cue sheets first: they "claim" the audio file(s) they
+                # reference, so those files are indexed per-track instead
+                # of as one single track below.
+                claimed = set()
+                filenames_lower = {f.lower(): f for f in filenames}
+                for fn in filenames:
+                    if stop_event and stop_event.is_set():
+                        aborted = True
+                        break
+                    if not fn.lower().endswith(CUE_EXTS):
+                        continue
+                    cue_path = os.path.join(dirpath, fn)
+                    claimed |= _index_cue_sheet(cue_path, dirpath, filenames_lower)
+                if aborted:
+                    break
+
                 for fn in filenames:
                     if stop_event and stop_event.is_set():
                         aborted = True
                         break
                     if not fn.lower().endswith(AUDIO_EXTS):
                         continue
+                    if fn.lower() in claimed:
+                        continue  # already indexed per-track via its .cue sheet
                     path = os.path.join(dirpath, fn)
                     try:
                         st = os.stat(path)
@@ -282,6 +387,49 @@ class Library:
             progress_cb(found, updated, "aborted" if aborted else "done")
         return found, updated
 
+    # ── targeted (non-walk) updates ─────────────────────────────
+    #
+    # Used by the filesystem watcher in auto_index.py: when we already
+    # know exactly which paths changed, there's no need to os.walk the
+    # whole (possibly 750,000+ file) tree just to index a couple of new
+    # songs.
+
+    def index_paths(self, paths):
+        """Add/update specific files by path. Returns count indexed."""
+        conn = self._conn()
+        updated = 0
+        for path in paths:
+            if not path.lower().endswith(AUDIO_EXTS):
+                continue
+            try:
+                st = os.stat(path)
+            except OSError:
+                continue
+            title, artist, album, duration = _read_tags(path)
+            conn.execute(
+                "INSERT INTO songs(path, title, artist, album, duration, size, mtime, audio_path) "
+                "VALUES (?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(path) DO UPDATE SET "
+                "title=excluded.title, artist=excluded.artist, album=excluded.album, "
+                "duration=excluded.duration, size=excluded.size, mtime=excluded.mtime, "
+                "audio_path=excluded.audio_path",
+                (path, title, artist, album, duration, st.st_size, st.st_mtime, path))
+            updated += 1
+        if updated:
+            conn.commit()
+        return updated
+
+    def remove_paths(self, paths):
+        """Remove specific files by path (e.g. after a delete/move-away
+        event). Returns count removed."""
+        paths = list(paths)
+        if not paths:
+            return 0
+        conn = self._conn()
+        conn.executemany("DELETE FROM songs WHERE path=?", [(p,) for p in paths])
+        conn.commit()
+        return len(paths)
+
     # ── queries ──────────────────────────────────────────────────
 
     def count(self):
@@ -327,13 +475,22 @@ class Library:
         return array('q', (r["id"] for r in rows))
 
     def get_path(self, song_id):
+        """
+        Returns the real, playable file path. For cue-sheet tracks this is
+        the underlying whole-album file (their `path` column is a synthetic
+        per-track key, not an openable file). Falls back to `path` itself
+        for rows written before the audio_path column existed.
+        """
         row = self._conn().execute(
-            "SELECT path FROM songs WHERE id=?", (song_id,)).fetchone()
-        return row["path"] if row else None
+            "SELECT path, audio_path FROM songs WHERE id=?", (song_id,)).fetchone()
+        if not row:
+            return None
+        return row["audio_path"] or row["path"]
 
     def get_song(self, song_id):
         row = self._conn().execute(
-            "SELECT id, path, title, artist, album, duration FROM songs WHERE id=?",
+            "SELECT id, path, title, artist, album, duration, "
+            "audio_path, cue_start, cue_end FROM songs WHERE id=?",
             (song_id,)).fetchone()
         return dict(row) if row else None
 
@@ -344,7 +501,8 @@ class Library:
             return {}
         placeholders = ",".join("?" * len(ids))
         rows = self._conn().execute(
-            f"SELECT id, path, title, artist, album, duration FROM songs "
+            f"SELECT id, path, title, artist, album, duration, "
+            f"audio_path, cue_start, cue_end FROM songs "
             f"WHERE id IN ({placeholders})", ids
         ).fetchall()
         return {r["id"]: dict(r) for r in rows}

@@ -20,13 +20,10 @@ scapy==2.7.0
 sounddevice==0.5.5
 soundfile==0.14.0
 tkinterdnd2==0.6.2
+watchdog==6.0.0
 yt-dlp==2026.6.9
 
 # ---
-# youtube_dl removed: it's imported in code but isn't actually installed on
-# the dev machine (`pip show youtube_dl` -> not found), and yt-dlp above is
-# what the yt_downloader module actually uses. If some code path truly needs
-# the old youtube_dl package too, add it back manually.
 #
 # NOT on PyPI, required separately:
 #   - VLC (media player itself — python-vlc just talks to a real VLC install

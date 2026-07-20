@@ -4,6 +4,10 @@ import random
 import os
 import time
 import threading
+import shutil
+import subprocess
+import tempfile
+import hashlib
 from array import array
 
 
@@ -32,6 +36,121 @@ class State:
     Ended          = _State.Ended
     Error          = _State.Error
 
+
+
+# ---------------------------------------------------------------------------
+# ffmpeg transcode fallback
+#
+# pygame.mixer.music plays through SDL_mixer, which has no decoder at all
+# for Monkey's Audio (.ape) and, depending on how SDL_mixer was built, can
+# also choke on some Ogg Vorbis / Opus encodes. Rather than guess which
+# builds support what, we: (1) always pre-transcode known-unsupported
+# formats like .ape, and (2) for anything else, retry once through ffmpeg
+# if the native load fails. Transcoded copies are cached on disk (keyed by
+# path + mtime) so a track is only ever transcoded once.
+# ---------------------------------------------------------------------------
+
+_FFMPEG_PATH = shutil.which("ffmpeg")
+_TRANSCODE_CACHE_DIR = os.path.join(tempfile.gettempdir(), "musicplayer_transcode_cache")
+_TRANSCODE_CACHE_LIMIT = 600  # max cached wav files before pruning oldest
+                              # (raised from 300 now that cue-sheet tracks
+                              # each cache their own short segment)
+
+# Formats SDL_mixer has no built-in decoder for at all — always transcode
+# these up front instead of waiting for a failed load.
+_ALWAYS_TRANSCODE_EXTS = {".ape", ".wv"}
+
+
+def _cache_path_for(path, start=None, end=None):
+    key = f"{os.path.abspath(path)}|{start}|{end}"
+    h = hashlib.sha1(key.encode("utf-8", "ignore")).hexdigest()
+    return os.path.join(_TRANSCODE_CACHE_DIR, h + ".wav")
+
+
+def _prune_transcode_cache():
+    try:
+        entries = [os.path.join(_TRANSCODE_CACHE_DIR, f)
+                   for f in os.listdir(_TRANSCODE_CACHE_DIR)]
+        if len(entries) <= _TRANSCODE_CACHE_LIMIT:
+            return
+        entries.sort(key=lambda p: os.path.getmtime(p))
+        for p in entries[:len(entries) - _TRANSCODE_CACHE_LIMIT]:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
+def _transcode_to_wav(path, start=None, end=None):
+    """
+    Decode `path` to a cached PCM WAV via ffmpeg, optionally extracting
+    just the [start, end) segment in seconds (used for cue-sheet tracks —
+    `end=None` means "to end of file"). Returns the cached wav path, or
+    None if ffmpeg isn't available or the transcode failed.
+    """
+    if not _FFMPEG_PATH:
+        return None
+    try:
+        os.makedirs(_TRANSCODE_CACHE_DIR, exist_ok=True)
+        out_path = _cache_path_for(path, start, end)
+        if os.path.exists(out_path) and os.path.getmtime(out_path) >= os.path.getmtime(path):
+            return out_path
+
+        cmd = [_FFMPEG_PATH, "-y"]
+        if start:
+            cmd += ["-ss", str(start)]
+        cmd += ["-i", path]
+        if end is not None:
+            duration = max(0.05, end - (start or 0))
+            cmd += ["-t", str(duration)]
+        cmd += ["-vn", "-ar", "44100", "-ac", "2", out_path]
+
+        subprocess.run(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=180, check=True,
+        )
+        if os.path.exists(out_path):
+            _prune_transcode_cache()
+            return out_path
+    except Exception as e:
+        print(f"[Pygame] ffmpeg transcode failed for {path} "
+              f"[{start}:{end}]: {e}")
+    return None
+
+
+def _load_with_fallback(path):
+    """
+    Loads `path` into pygame.mixer.music, transcoding through ffmpeg first
+    when needed. Returns True on success, False if nothing worked.
+    """
+    ext = os.path.splitext(path)[1].lower()
+    load_path = path
+
+    if ext in _ALWAYS_TRANSCODE_EXTS:
+        load_path = _transcode_to_wav(path) or path
+
+    try:
+        pygame.mixer.music.load(load_path)
+        return True
+    except pygame.error as e:
+        if load_path != path:
+            # Even the transcoded copy failed — nothing more to try.
+            print(f"[Pygame] Load failed even after transcode for "
+                  f"{os.path.basename(path)}: {e}")
+            return False
+        print(f"[Pygame] Native load failed for {os.path.basename(path)} "
+              f"({e}); trying ffmpeg fallback.")
+        fallback = _transcode_to_wav(path)
+        if not fallback:
+            return False
+        try:
+            pygame.mixer.music.load(fallback)
+            return True
+        except pygame.error as e2:
+            print(f"[Pygame] Fallback load also failed: {e2}")
+            return False
 
 
 class LazyPlaylist:
@@ -198,8 +317,37 @@ class PygameMusicEngine:
             print("[Pygame] Missing file:", path)
             return
 
+        # Cue-sheet tracks (album.ape + album.cue) share one underlying
+        # audio file — `path` here is already that real file (LazyPlaylist
+        # resolves it via db.get_path), so we just need to know which
+        # slice of it this track covers.
+        cue_start = cue_end = None
+        if isinstance(self.playlist, LazyPlaylist):
+            meta = self.playlist.meta_at(i)
+            if meta:
+                cue_start = meta.get("cue_start")
+                cue_end = meta.get("cue_end")
+
         pygame.mixer.music.stop()
-        pygame.mixer.music.load(path)
+
+        if cue_start is not None:
+            segment = _transcode_to_wav(path, cue_start, cue_end)
+            if not segment:
+                self._state = _State.Error
+                print(f"[Pygame] Could not extract cue track (is ffmpeg "
+                      f"installed?): {path} [{cue_start}:{cue_end}]")
+                return
+            try:
+                pygame.mixer.music.load(segment)
+            except pygame.error as e:
+                self._state = _State.Error
+                print(f"[Pygame] Could not play cue track segment: {e}")
+                return
+        elif not _load_with_fallback(path):
+            self._state = _State.Error
+            print(f"[Pygame] Could not play (unsupported format): {path}")
+            return
+
         pygame.mixer.music.play()
         self._apply_volume()
         self._play_started_at = time.monotonic()
