@@ -204,6 +204,14 @@ class RemoteAccessTab(ctk.CTkFrame):
         self.port_entry = ctk.CTkEntry(port_row, width=90, placeholder_text=str(DEFAULT_PORT))
         self.port_entry.pack(side="left", padx=(10, 0))
 
+        self.autostart_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            panel, text="Auto-start the local server when the app opens (music only — "
+                        "doesn't apply to Security Vault)",
+            variable=self.autostart_var, font=("Segoe UI", 12), text_color=MUTED,
+            command=self._on_autostart_toggled,
+        ).grid(row=4, column=0, columnspan=2, sticky="w", padx=15, pady=(0, 8))
+
         ctk.CTkLabel(
             panel,
             text="Opens a mobile library browser + player at your Tailscale address, "
@@ -211,11 +219,15 @@ class RemoteAccessTab(ctk.CTkFrame):
                  "open internet. Your phone streams straight from this PC's library; it "
                  "doesn't control the desktop app's playback.",
             font=("Segoe UI", 11), text_color=MUTED, anchor="w", justify="left", wraplength=560,
-        ).grid(row=4, column=0, columnspan=2, sticky="ew", padx=15, pady=(0, 15))
+        ).grid(row=5, column=0, columnspan=2, sticky="ew", padx=15, pady=(0, 15))
 
     def _load_port_field(self):
         port = self.db.get_setting("remote_port", str(DEFAULT_PORT))
         self.port_entry.insert(0, str(port))
+        self.autostart_var.set(self.db.get_setting("auto_start_server", "0") == "1")
+
+    def _on_autostart_toggled(self):
+        self.db.set_setting("auto_start_server", "1" if self.autostart_var.get() else "0")
 
     def _current_port(self):
         try:

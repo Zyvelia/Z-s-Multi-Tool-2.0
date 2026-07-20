@@ -16,6 +16,9 @@ from core.services.tailscale_service import TailscaleService
 from core.services.vault_web_server import VaultWebServer
 from core.services.alert_service import AlertService
 
+from modules.music_player import db as music_db
+from modules.music_player.web_server import MusicWebServer
+
 from pages.catalog_page import CatalogPage
 from pages.settings_page import SettingsPage
 
@@ -94,6 +97,23 @@ class App(ctk.CTk):
         # =====================================================
 
         self.page_manager = PageManager(self)
+
+        # Music Player's local server (used by the browser extension and
+        # phone streaming) is normally created lazily the first time the
+        # Music Player page is opened — see modules/music_player/ui.py.
+        # If "Auto-start" is turned on in that page's Remote Access tab,
+        # start it here instead, so it's already up as soon as the app
+        # opens rather than only after you visit that page. This never
+        # touches Tailscale/phone access — only the loopback server —
+        # matching the Security Vault side, which stays fully manual.
+        try:
+            _music_library = music_db.Library()
+            if _music_library.get_setting("auto_start_server", "0") == "1":
+                self.page_manager.music_web_server = MusicWebServer(library=_music_library)
+                port = int(_music_library.get_setting("remote_port", "8766") or 8766)
+                self.page_manager.music_web_server.start(port)
+        except Exception as e:
+            print(f"[App] Couldn't auto-start Music Player server: {e}")
 
         # =====================================================
         # PLUGIN MANAGER
