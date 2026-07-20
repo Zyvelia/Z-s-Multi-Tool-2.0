@@ -28,9 +28,24 @@ from array import array
 from . import cue as cuesheet
 
 AUDIO_EXTS = (
-    ".mp3", ".flac", ".wav", ".ogg", ".oga", ".m4a", ".aac",
-    ".wma", ".opus", ".aiff", ".aif", ".ape", ".wv",
+    # "Big" lossy/lossless formats
+    ".mp3", ".flac", ".wav", ".wave", ".ogg", ".oga", ".m4a", ".aac",
+    ".wma", ".opus", ".aiff", ".aif", ".aifc", ".ape", ".wv",
+    # Containers that commonly hold audio-only streams
+    ".mp4", ".m4b", ".m4p", ".m4r", ".mka", ".webm", ".3gp", ".3g2",
+    # Less common / older / niche formats — still real-world audio files
+    # people have in their libraries, all playable via the ffmpeg
+    # transcode fallback in player.py even where mutagen can't tag them
+    ".mpc", ".mp2", ".mp1", ".tta", ".dsf", ".dff", ".caf", ".w64",
+    ".amr", ".ac3", ".dts", ".spx", ".voc", ".au", ".snd", ".gsm",
+    ".mid", ".midi", ".xm", ".mod", ".s3m", ".it",
 )
+
+# Playlist files: text/XML files that list *paths to other audio files*
+# rather than being audio themselves. Handled separately from AUDIO_EXTS —
+# see playlist.py — because they're expanded into a list of tracks rather
+# than indexed as a song in their own right.
+PLAYLIST_EXTS = (".m3u", ".m3u8", ".pls", ".xspf")
 
 CUE_EXTS = (".cue",)
 

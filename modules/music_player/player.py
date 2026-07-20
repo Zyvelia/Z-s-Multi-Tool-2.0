@@ -58,7 +58,12 @@ _TRANSCODE_CACHE_LIMIT = 600  # max cached wav files before pruning oldest
 
 # Formats SDL_mixer has no built-in decoder for at all — always transcode
 # these up front instead of waiting for a failed load.
-_ALWAYS_TRANSCODE_EXTS = {".ape", ".wv"}
+_ALWAYS_TRANSCODE_EXTS = {
+    ".ape", ".wv", ".wma", ".mpc", ".tta", ".dsf", ".dff", ".caf",
+    ".w64", ".amr", ".ac3", ".dts", ".spx", ".voc", ".au", ".snd",
+    ".gsm", ".mid", ".midi", ".xm", ".mod", ".s3m", ".it", ".mka",
+    ".webm", ".3gp", ".3g2", ".m4b", ".m4p", ".m4r",
+}
 
 
 def _cache_path_for(path, start=None, end=None):

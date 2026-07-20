@@ -44,6 +44,24 @@ _MIME_OVERRIDES = {
     ".wma": "audio/x-ms-wma",
     ".aiff": "audio/aiff",
     ".aif": "audio/aiff",
+    ".aifc": "audio/aiff",
+    ".wave": "audio/wav",
+    ".mp4": "audio/mp4",
+    ".m4b": "audio/mp4",
+    ".m4p": "audio/mp4",
+    ".m4r": "audio/mp4",
+    ".mka": "audio/x-matroska",
+    ".webm": "audio/webm",
+    ".3gp": "audio/3gpp",
+    ".3g2": "audio/3gpp2",
+    ".spx": "audio/ogg",
+    ".amr": "audio/amr",
+    # Playlist files — only relevant if one is ever served/downloaded
+    # directly through the remote web UI, not for <audio> playback.
+    ".m3u": "audio/x-mpegurl",
+    ".m3u8": "application/vnd.apple.mpegurl",
+    ".pls": "audio/x-scpls",
+    ".xspf": "application/xspf+xml",
 }
 
 CHUNK_SIZE = 64 * 1024

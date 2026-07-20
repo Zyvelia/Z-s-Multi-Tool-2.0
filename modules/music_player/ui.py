@@ -8,6 +8,7 @@ from tkinter import filedialog
 from .player import VLCMusicEngine, State
 from . import db as musicdb
 from . import auto_index
+from . import playlist as playlistfile
 from .web_server import MusicWebServer
 from .remote_access_tab import RemoteAccessTab
 from core import theme
@@ -455,14 +456,62 @@ class MusicPage(ctk.CTkFrame):
 
     # ── Add Files (small ad-hoc queue, bypasses the library index) ──
 
+    def _expand_playlist_selection(self, paths):
+        """
+        Given a mix of selected/dropped paths, expand any playlist files
+        (.m3u/.m3u8/.pls/.xspf) into the audio tracks they reference, and
+        pass ordinary audio files through unchanged.
+
+        Returns (resolved, playlist_notes):
+          - resolved: flat, ordered list of playable paths.
+          - playlist_notes: one status string per playlist file that was
+            expanded, e.g. "list.m3u: 12/12 tracks found" or
+            "list.m3u: 0/8 tracks found — check the paths inside it",
+            so a playlist that resolves to nothing doesn't just look
+            like the drop/selection was silently ignored.
+        """
+        out = []
+        playlist_notes = []
+        for p in paths:
+            if p.lower().endswith(musicdb.PLAYLIST_EXTS):
+                resolved, total = playlistfile.parse_playlist_report(p)
+                out.extend(resolved)
+                name = os.path.basename(p)
+                if total == 0:
+                    playlist_notes.append(f"{name}: no tracks listed (empty or unreadable)")
+                elif not resolved:
+                    playlist_notes.append(
+                        f"{name}: 0/{total} tracks found — the paths inside it "
+                        f"don't match any files on this machine")
+                else:
+                    playlist_notes.append(f"{name}: {len(resolved)}/{total} tracks found")
+            else:
+                out.append(p)
+        return out, playlist_notes
+
     def load_files(self):
-        patterns = " ".join(f"*{ext}" for ext in musicdb.AUDIO_EXTS)
+        audio_patterns = " ".join(f"*{ext}" for ext in musicdb.AUDIO_EXTS)
+        playlist_patterns = " ".join(f"*{ext}" for ext in musicdb.PLAYLIST_EXTS)
         files = filedialog.askopenfilenames(
-            filetypes=[("Audio Files", patterns), ("All Files", "*.*")])
+            filetypes=[
+                ("Audio + Playlist Files", f"{audio_patterns} {playlist_patterns}"),
+                ("Audio Files", audio_patterns),
+                ("Playlist Files", playlist_patterns),
+                ("All Files", "*.*"),
+            ])
         if files:
-            self.engine.load(list(files))
+            resolved, playlist_notes = self._expand_playlist_selection(files)
+            if not resolved:
+                msg = "; ".join(playlist_notes) if playlist_notes else "No playable tracks found in that selection"
+                self.status.configure(text=msg)
+                return
+            self.engine.load(resolved)
             self.engine.play()
-            self.status.configure(text="Files loaded")
+            n = len(resolved)
+            msg = f"{n} file{'s' if n != 1 else ''} loaded"
+            if playlist_notes:
+                msg += " — " + "; ".join(playlist_notes)
+            self.status.configure(text=msg)
             self._update_playback_ui_state()
 
     # ── Drag and drop ────────────────────────────────────────────
@@ -508,15 +557,20 @@ class MusicPage(ctk.CTkFrame):
             paths = [event.data]
 
         dirs = [p for p in paths if os.path.isdir(p)]
-        audio_files = [p for p in paths
-                       if os.path.isfile(p) and p.lower().endswith(musicdb.AUDIO_EXTS)]
+        dropped_files = [
+            p for p in paths
+            if os.path.isfile(p) and p.lower().endswith(musicdb.AUDIO_EXTS + musicdb.PLAYLIST_EXTS)
+        ]
+        audio_files, playlist_notes = self._expand_playlist_selection(dropped_files)
 
         if audio_files:
             self.engine.load(audio_files)
             self.engine.play()
             n = len(audio_files)
-            self.status.configure(
-                text=f"{n} file{'s' if n != 1 else ''} added from drag & drop")
+            msg = f"{n} file{'s' if n != 1 else ''} added from drag & drop"
+            if playlist_notes:
+                msg += " — " + "; ".join(playlist_notes)
+            self.status.configure(text=msg)
             self._update_playback_ui_state()
         elif dirs:
             folder = dirs[0]
@@ -525,6 +579,11 @@ class MusicPage(ctk.CTkFrame):
             self.status.configure(text=f"Indexing dropped folder: {folder}")
             self.rescan_now()
             self._sync_autoindexer(folder)
+        elif playlist_notes:
+            # A playlist file was dropped but every entry inside it
+            # failed to resolve — tell the user why instead of the
+            # generic "no supported files" message below.
+            self.status.configure(text="; ".join(playlist_notes))
         else:
             self.status.configure(text="No supported audio files in that drop")
 
