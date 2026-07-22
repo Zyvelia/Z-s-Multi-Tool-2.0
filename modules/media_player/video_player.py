@@ -1,11 +1,19 @@
+# Video Player tab (formerly the standalone `media_center` package).
+#
+# Folded in here as a single file since it's only ever used from
+# music_player/ui.py as an extra tab — no need for it to be its own
+# top-level modules/media_center package anymore. It keeps its own
+# separate VLCMediaEngine (manager.media_engine), so there's no
+# conflict with MusicPage's own music engine.
 import os
+import random
 import sys
+import time
 
 import customtkinter as ctk
 from tkinter import filedialog
 import vlc
 
-from .player import VLCMediaEngine
 from core import theme
 
 # ── Colours (matches the app's shared dark theme) ─────────────────────────
@@ -29,7 +37,160 @@ def _make_btn(parent, text, cmd, **overrides):
     return ctk.CTkButton(parent, text=text, command=cmd, **{**_BTN, **overrides})
 
 
-class MediaCenterPage(ctk.CTkFrame):
+# =====================================================
+# ENGINE
+# =====================================================
+
+class VLCMediaEngine:
+
+    def __init__(self):
+        self.instance = vlc.Instance()
+        self.player = self.instance.media_player_new()
+
+        self.playlist = []
+        self.index = -1
+
+        self.shuffle = False
+        self.repeat_mode = "off"  # off | one | all
+
+        self.volume = 0.5
+        self._apply_volume()
+
+    # ── Load ──────────────────────────────────────────────────
+
+    def load(self, files):
+        self.playlist = [os.path.abspath(f) for f in (files or [])]
+        self.index = 0 if self.playlist else -1
+
+    # ── Playback ──────────────────────────────────────────────
+
+    def play(self):
+        if not self.playlist:
+            return
+        if self.index < 0:
+            self.index = 0
+        self.play_at(self.index)
+
+    def play_at(self, i):
+        if not self.playlist or not (0 <= i < len(self.playlist)):
+            return
+
+        self.index = i
+        self.player.stop()
+
+        path = self.playlist[i]
+        if not os.path.exists(path):
+            print("[VLC] Missing file:", path)
+            return
+
+        media = self.instance.media_new(path)
+        self.player.set_media(media)
+        self.player.play()
+        time.sleep(0.05)
+        self._apply_volume()
+        print("[VLC] Playing:", path)
+
+    def pause(self):
+        self.player.pause()
+
+    def stop(self):
+        self.player.stop()
+
+    # ── Volume ────────────────────────────────────────────────
+
+    def set_volume(self, value):
+        try:
+            value = float(value)
+        except Exception:
+            value = 0.5
+        self.volume = max(0.0, min(1.0, value))
+        self._apply_volume()
+
+    def _apply_volume(self):
+        self.player.audio_set_volume(int(self.volume * 100))
+
+    # ── Navigation ────────────────────────────────────────────
+
+    def next(self):
+        if not self.playlist:
+            return
+
+        if self.repeat_mode == "one":
+            self.play_at(self.index)
+            return
+
+        if self.shuffle:
+            self.index = random.randint(0, len(self.playlist) - 1)
+            self.play_at(self.index)
+            return
+
+        if self.index + 1 < len(self.playlist):
+            self.play_at(self.index + 1)
+        elif self.repeat_mode == "all":
+            self.play_at(0)
+        else:
+            self.stop()
+            self.index = -1
+
+    def prev(self):
+        if not self.playlist:
+            return
+
+        if self.shuffle:
+            self.index = random.randint(0, len(self.playlist) - 1)
+            self.play_at(self.index)
+            return
+
+        if self.index - 1 >= 0:
+            self.play_at(self.index - 1)
+        elif self.repeat_mode == "all":
+            self.play_at(len(self.playlist) - 1)
+
+    # ── Playlist Management ───────────────────────────────────
+
+    def remove_track(self, index):
+        if not (0 <= index < len(self.playlist)):
+            return
+
+        del self.playlist[index]
+
+        if self.index > index:
+            self.index -= 1
+        elif self.index == index:
+            self.stop()
+            if not self.playlist:
+                self.index = -1
+            elif self.index >= len(self.playlist):
+                self.index = len(self.playlist) - 1
+                self.play_at(self.index)
+            else:
+                self.play_at(self.index)
+
+        if not self.playlist:
+            self.stop()
+            self.index = -1
+
+    # ── State ─────────────────────────────────────────────────
+
+    def is_playing(self):
+        return self.player.is_playing() == 1
+
+    def get_state(self):
+        return self.player.get_state()
+
+    def get_time(self):
+        return max(0, self.player.get_time() / 1000)
+
+    def get_length(self):
+        length = self.player.get_length()
+        return max(0, length / 1000 if length else 0)
+
+
+# =====================================================
+# UI
+# =====================================================
+
+class VideoPlayerPage(ctk.CTkFrame):
 
     def __init__(self, parent, manager):
         super().__init__(parent, fg_color=BG)
@@ -58,22 +219,44 @@ class MediaCenterPage(ctk.CTkFrame):
     # =====================================================
     # BUILD
     # =====================================================
+    #
+    # Pack order matters here. Everything below the video panel used to
+    # be packed top-down after the (expand=True) playlist, which meant
+    # the transport controls / load button / volume bar only got
+    # whatever cavity was left over — on a short window they'd get
+    # pushed past the bottom edge and become invisible until you
+    # manually resized the window taller.
+    #
+    # Fix: anchor the video panel to the top and the controls/load/volume
+    # row to the bottom (side="bottom"), and build the bottom group in
+    # reverse visual order so the first one packed claims the very
+    # bottom edge. Only the playlist (packed last, fill="both",
+    # expand=True) is left to grow/shrink with whatever space remains
+    # in between — so it's the one that scrolls/shrinks, never the
+    # controls.
 
     def build_ui(self):
         self._build_header()
         self._build_video_panel()
-        self._build_playlist()
-        self._build_progress()
-        self._build_controls()
-        self._build_load_button()
+
+        # Bottom-anchored, built bottom-most-first so the visual order
+        # top-to-bottom stays: progress bar, time, controls, load
+        # button, volume — with volume sitting flush against the
+        # window's bottom edge no matter how short the window gets.
         self._build_volume()
+        self._build_load_button()
+        self._build_controls()
+        self._build_progress()
+
+        # Flexible middle - takes whatever space is left, shrinks first.
+        self._build_playlist()
 
     def _build_header(self):
         self.header = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
-        self.header.pack(fill="x", padx=15, pady=(15, 8))
+        self.header.pack(side="top", fill="x", padx=15, pady=(15, 8))
 
         ctk.CTkLabel(
-            self.header, text="🎬  Media Center", font=("Segoe UI", 22, "bold"), text_color=TEXT,
+            self.header, text="🎬  Video Player", font=("Segoe UI", 22, "bold"), text_color=TEXT,
         ).pack(side="left", padx=10)
 
         self.status = ctk.CTkLabel(self.header, text="Ready", text_color=MUTED)
@@ -81,7 +264,7 @@ class MediaCenterPage(ctk.CTkFrame):
 
     def _build_video_panel(self):
         self.video_frame = ctk.CTkFrame(self, fg_color="black", corner_radius=10, height=320)
-        self.video_frame.pack(fill="x", padx=15, pady=(0, 8))
+        self.video_frame.pack(side="top", fill="x", padx=15, pady=(0, 8))
         self.video_frame.pack_propagate(False)
 
         self.video_label = ctk.CTkLabel(
@@ -104,7 +287,7 @@ class MediaCenterPage(ctk.CTkFrame):
 
     def _build_playlist(self):
         self.playlist_frame = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
-        self.playlist_frame.pack(fill="both", expand=True, padx=15, pady=8)
+        self.playlist_frame.pack(side="top", fill="both", expand=True, padx=15, pady=8)
 
         ctk.CTkLabel(
             self.playlist_frame, text="Playlist", font=("Segoe UI", 15, "bold"), text_color=TEXT,
@@ -115,18 +298,21 @@ class MediaCenterPage(ctk.CTkFrame):
 
     def _build_progress(self):
         self.progress_row = ctk.CTkFrame(self, fg_color="transparent")
-        self.progress_row.pack(fill="x", padx=15, pady=(0, 4))
 
         self.progress = ctk.CTkProgressBar(self.progress_row, progress_color=ACCENT)
         self.progress.set(0)
         self.progress.pack(fill="x")
 
         self.time_label = ctk.CTkLabel(self, text="00:00 / 00:00", text_color=MUTED, font=("Segoe UI", 11))
-        self.time_label.pack(pady=(2, 8))
+
+        # Pack bottommost-first within this pair so the progress bar ends
+        # up above the time text, matching the original visual order.
+        self.time_label.pack(side="bottom", pady=(2, 8))
+        self.progress_row.pack(side="bottom", fill="x", padx=15, pady=(0, 4))
 
     def _build_controls(self):
         self.controls = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
-        self.controls.pack(pady=(0, 8))
+        self.controls.pack(side="bottom", pady=(0, 8))
 
         inner = ctk.CTkFrame(self.controls, fg_color="transparent")
         inner.pack(padx=10, pady=10)
@@ -151,11 +337,11 @@ class MediaCenterPage(ctk.CTkFrame):
             self, text="📂  Open Media Files", command=self.load_files,
             font=("Segoe UI", 13, "bold"), **_BTN_ACCENT,
         )
-        self.load_btn.pack(pady=(0, 8))
+        self.load_btn.pack(side="bottom", pady=(0, 8))
 
     def _build_volume(self):
         self.volume_frame = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
-        self.volume_frame.pack(fill="x", padx=15, pady=(0, 15))
+        self.volume_frame.pack(side="bottom", fill="x", padx=15, pady=(0, 15))
 
         inner = ctk.CTkFrame(self.volume_frame, fg_color="transparent")
         inner.pack(fill="x", padx=12, pady=10)
@@ -351,15 +537,19 @@ class MediaCenterPage(ctk.CTkFrame):
 
         self.video_frame.pack_forget()
 
-        # Re-pack everything in its original top-to-bottom order.
-        self.header.pack(fill="x", padx=15, pady=(15, 8))
-        self.video_frame.pack(fill="x", padx=15, pady=(0, 8))
-        self.playlist_frame.pack(fill="both", expand=True, padx=15, pady=8)
-        self.progress_row.pack(fill="x", padx=15, pady=(0, 4))
-        self.time_label.pack(pady=(2, 8))
-        self.controls.pack(pady=(0, 8))
-        self.load_btn.pack(pady=(0, 8))
-        self.volume_frame.pack(fill="x", padx=15, pady=(0, 15))
+        # Re-pack everything, same sides/order as build_ui so the
+        # "controls always visible" fix still holds after returning
+        # from fullscreen.
+        self.header.pack(side="top", fill="x", padx=15, pady=(15, 8))
+        self.video_frame.pack(side="top", fill="x", padx=15, pady=(0, 8))
+
+        self.volume_frame.pack(side="bottom", fill="x", padx=15, pady=(0, 15))
+        self.load_btn.pack(side="bottom", pady=(0, 8))
+        self.controls.pack(side="bottom", pady=(0, 8))
+        self.time_label.pack(side="bottom", pady=(2, 8))
+        self.progress_row.pack(side="bottom", fill="x", padx=15, pady=(0, 4))
+
+        self.playlist_frame.pack(side="top", fill="both", expand=True, padx=15, pady=8)
 
         self.fullscreen_btn.configure(text="⛶ Fullscreen")
 
@@ -401,7 +591,7 @@ class MediaCenterPage(ctk.CTkFrame):
 
         # Swap the embedded slot for the "video is elsewhere" placeholder.
         self.video_frame.pack_forget()
-        self.popout_placeholder.pack(fill="x", padx=15, pady=(0, 8), before=self.playlist_frame)
+        self.popout_placeholder.pack(side="top", fill="x", padx=15, pady=(0, 8), before=self.playlist_frame)
 
         self.is_popped_out = True
         self.popout_btn.configure(text="🗗 Dock Back")
@@ -416,7 +606,7 @@ class MediaCenterPage(ctk.CTkFrame):
             return
 
         self.popout_placeholder.pack_forget()
-        self.video_frame.pack(fill="x", padx=15, pady=(0, 8), before=self.playlist_frame)
+        self.video_frame.pack(side="top", fill="x", padx=15, pady=(0, 8), before=self.playlist_frame)
 
         if self.popout_window is not None:
             try:

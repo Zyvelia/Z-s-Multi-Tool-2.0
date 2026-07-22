@@ -17,11 +17,8 @@ from core.services.discord_service import DiscordService # Added import
 from core.services.tailscale_service import TailscaleService
 from core.services.vault_web_server import VaultWebServer
 from core.services.alert_service import AlertService
-
-from modules.music_player import db as music_db
-from modules.music_player.web_server import MusicWebServer
-from modules.yt_downloader.web_server import YTWebServer
-from modules.yt_downloader import ui as yt_downloader_ui
+from core.services.music_autostart_service import MusicAutoStartService
+from core.services.yt_autostart_service import YTAutoStartService
 
 from pages.catalog_page import CatalogPage
 from pages.settings_page import SettingsPage
@@ -102,49 +99,26 @@ class App(ctk.CTk):
 
         self.page_manager = PageManager(self)
 
-        # Music Player's local server (used by the browser extension and
-        # phone streaming) is normally created lazily the first time the
-        # Music Player page is opened — see modules/music_player/ui.py.
-        # If "Auto-start" is turned on in that page's Remote Access tab,
-        # start it here instead, so it's already up as soon as the app
-        # opens rather than only after you visit that page. This never
-        # touches Tailscale/phone access — only the loopback server —
-        # matching the Security Vault side, which stays fully manual.
-        try:
-            _music_library = music_db.Library()
-            if _music_library.get_setting("auto_start_server", "0") == "1":
-                self.page_manager.music_web_server = MusicWebServer(library=_music_library)
-                port = int(_music_library.get_setting("remote_port", "8766") or 8766)
-                self.page_manager.music_web_server.start(port)
-        except Exception as e:
-            print(f"[App] Couldn't auto-start Music Player server: {e}")
+        # Music Player's and YouTube Downloader's local web servers (used
+        # by the browser extension / phone streaming / "Send to
+        # Downloader") are each normally created lazily the first time
+        # their page is opened — see modules/media_player/ui.py and
+        # modules/yt_downloader/ui.py. If a module's own "Auto-start"
+        # setting is on, its service starts that server here instead, so
+        # it's already up as soon as the app opens rather than only
+        # after you visit the page. Neither of these touches
+        # Tailscale/phone access — only the loopback server — matching
+        # the Security Vault side, which stays fully manual.
+        #
+        # app.py no longer needs to know how each module reads its own
+        # settings or constructs its own web server — that lives in the
+        # service now, keyed only on the one thing app.py actually needs
+        # to hand it: page_manager.
+        self.music_autostart_service = MusicAutoStartService(self.page_manager)
+        self.music_autostart_service.start_if_enabled()
 
-        # Same idea for the YouTube Downloader's server, used by the
-        # "Send to Downloader" button in the browser extension. Also
-        # created lazily on first opening that page — see
-        # modules/yt_downloader/ui.py.
-        try:
-            import json
-            if os.path.exists(yt_downloader_ui.SETTINGS_FILE):
-                with open(yt_downloader_ui.SETTINGS_FILE) as f:
-                    _yt_settings = json.load(f)
-            else:
-                _yt_settings = {}
-            if _yt_settings.get("auto_start_remote"):
-                output_dir = _yt_settings.get("output_dir") or os.path.expanduser("~")
-                cookie_file = _yt_settings.get("cookie_file") or ""
-                self.page_manager.yt_web_server = YTWebServer(
-                    get_output_dir=lambda: output_dir,
-                    get_cookie_file=lambda: cookie_file,
-                    get_ffmpeg_dir=lambda: None,
-                    default_format=_yt_settings.get("format", "mp4"),
-                    default_type=_yt_settings.get("type", "video"),
-                    default_quality=_yt_settings.get("quality", "192"),
-                )
-                port = int(_yt_settings.get("remote_port", 8767) or 8767)
-                self.page_manager.yt_web_server.start(port)
-        except Exception as e:
-            print(f"[App] Couldn't auto-start YouTube Downloader server: {e}")
+        self.yt_autostart_service = YTAutoStartService(self.page_manager)
+        self.yt_autostart_service.start_if_enabled()
 
         # =====================================================
         # PLUGIN MANAGER
@@ -257,4 +231,4 @@ class App(ctk.CTk):
         try:
             self.quit()
         finally:
-            self.destroy()
+            self.destroy()

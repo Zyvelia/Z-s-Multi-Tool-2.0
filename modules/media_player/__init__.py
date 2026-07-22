@@ -9,9 +9,9 @@ def open_music(manager):
 
 def register(manager):
     manager.register({
-        "name": "Music Player",
+        "name": "Music & Video Player",
         "category": "Media",
-        "desc": "PyGame-powered audio player with a SQLite-indexed library",
+        "desc": "VLC-powered music and video player with a SQLite-indexed library",
         "icon": "🎵",
         "open": open_music,
         "widget": build_mini_widget

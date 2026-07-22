@@ -13,12 +13,12 @@ from .web_server import MusicWebServer
 from .remote_access_tab import RemoteAccessTab
 from core import theme
 
-# Media Center gets folded in here as an extra tab (see _build_ui) rather
-# than living as its own top-level page — it's a self-contained
+# Video Player gets folded in here as an extra tab (see _build_ui) rather
+# than living as its own top-level page/package — it's a self-contained
 # ctk.CTkFrame with the same (parent, manager) constructor this page uses,
 # and it keeps its own separate VLCMediaEngine (manager.media_engine), so
 # there's no conflict with this page's own music engine.
-from modules.media_center.ui import MediaCenterPage
+from .video_player import VideoPlayerPage
 
 try:
     import tkinterdnd2
@@ -147,7 +147,7 @@ class MusicPage(ctk.CTkFrame):
         self.tabview.pack(fill="both", expand=True, padx=12, pady=(4, 12))
 
         library_tab = self.tabview.add("🎵 Library")
-        media_center_tab = self.tabview.add("🎬 Media Center")
+        video_player_tab = self.tabview.add("🎬 Video Player")
         settings_tab = self.tabview.add("⚙ Settings")
 
         # Everything below builds into `self._tab_body` (not `self`) so the
@@ -155,31 +155,40 @@ class MusicPage(ctk.CTkFrame):
         self._tab_body = library_tab
 
         self._build_library_controls()
-        self._build_browse_panel()
-        self._build_now_playing()
-        self._build_controls()
 
-        # Media Center isn't built until this tab is actually opened the
+        # Bottom-anchored (side="bottom"), built bottom-most-first so the
+        # visual top-to-bottom order stays "now playing" above the
+        # transport controls, with the controls panel flush against the
+        # window's bottom edge no matter how short the window gets — it
+        # used to be packed after the expanding browse panel and could
+        # get pushed past the visible area on a small window.
+        self._build_controls()
+        self._build_now_playing()
+
+        # Flexible middle - takes whatever space is left, shrinks first.
+        self._build_browse_panel()
+
+        # Video Player isn't built until this tab is actually opened the
         # first time (see _on_tab_changed) — no point spinning up a second
         # VLC player + its 300ms update loop for people who never touch
         # video playback. This page (like every page in this app, see
         # core/page_manager.py) is only ever constructed once and then
         # shown/hidden for the rest of the session, so a plain instance
         # attribute is enough here — no need to also cache it on manager.
-        self._media_center_tab = media_center_tab
-        self._media_center_page = None
+        self._video_player_tab = video_player_tab
+        self._video_player_page = None
 
         settings_tab.grid_rowconfigure(0, weight=1)
         settings_tab.grid_columnconfigure(0, weight=1)
         RemoteAccessTab(settings_tab, self.manager).grid(row=0, column=0, sticky="nsew")
 
     def _on_tab_changed(self):
-        if self.tabview.get() != "🎬 Media Center":
+        if self.tabview.get() != "🎬 Video Player":
             return
-        if self._media_center_page is not None:
+        if self._video_player_page is not None:
             return
-        self._media_center_page = MediaCenterPage(self._media_center_tab, self.manager)
-        self._media_center_page.pack(fill="both", expand=True)
+        self._video_player_page = VideoPlayerPage(self._video_player_tab, self.manager)
+        self._video_player_page.pack(fill="both", expand=True)
 
     def _build_header(self):
         header = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
@@ -225,7 +234,7 @@ class MusicPage(ctk.CTkFrame):
 
     def _build_browse_panel(self):
         panel = ctk.CTkFrame(self._tab_body, fg_color=PANEL, corner_radius=10)
-        panel.pack(fill="both", expand=True, padx=12, pady=6)
+        panel.pack(side="top", fill="both", expand=True, padx=12, pady=6)
         self.library_panel = panel
 
         top = ctk.CTkFrame(panel, fg_color="transparent")
@@ -276,7 +285,7 @@ class MusicPage(ctk.CTkFrame):
 
     def _build_now_playing(self):
         card = ctk.CTkFrame(self._tab_body, fg_color=PANEL, corner_radius=10)
-        card.pack(fill="x", padx=12, pady=6)
+        card.pack(side="bottom", fill="x", padx=12, pady=6)
 
         ctk.CTkLabel(card, text="Now Playing",
                      font=("Segoe UI", 12, "bold"), text_color=MUTED
@@ -297,7 +306,7 @@ class MusicPage(ctk.CTkFrame):
 
     def _build_controls(self):
         outer = ctk.CTkFrame(self._tab_body, fg_color=PANEL, corner_radius=10)
-        outer.pack(fill="x", padx=12, pady=(4, 12))
+        outer.pack(side="bottom", fill="x", padx=12, pady=(4, 12))
 
         transport = ctk.CTkFrame(outer, fg_color="transparent")
         transport.pack(pady=(10, 4))

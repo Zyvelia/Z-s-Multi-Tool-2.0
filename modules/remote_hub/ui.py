@@ -160,8 +160,8 @@ class RemoteHubPage(ctk.CTkFrame):
         existing = getattr(self.manager, "music_web_server", None)
         if existing:
             return existing
-        from modules.music_player import db as music_db
-        from modules.music_player.web_server import MusicWebServer
+        from modules.media_player import db as music_db
+        from modules.media_player.web_server import MusicWebServer
         server = MusicWebServer(library=music_db.Library())
         self.manager.music_web_server = server
         return server
@@ -194,7 +194,7 @@ class RemoteHubPage(ctk.CTkFrame):
 
     def _ports(self):
         vault_cfg = self.tailscale.load_config()
-        from modules.music_player import db as music_db
+        from modules.media_player import db as music_db
         music_port = int(music_db.Library().get_setting("remote_port", "8766") or 8766)
 
         from modules.yt_downloader import ui as yt_ui
