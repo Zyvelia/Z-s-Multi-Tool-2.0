@@ -48,6 +48,10 @@ class MediaCenterPage(ctk.CTkFrame):
         self.is_fullscreen = False
         self._fs_root = None
 
+        self.is_popped_out = False
+        self.popout_window = None
+        self.popout_video_frame = None
+
         self.build_ui()
         self.after(300, self.update_loop)
 
@@ -88,6 +92,16 @@ class MediaCenterPage(ctk.CTkFrame):
         # Double-click the video area to toggle fullscreen, like most players.
         self.video_frame.bind("<Double-Button-1>", lambda _e: self.toggle_fullscreen())
 
+        # Shown in the video_frame's spot instead of the video itself while
+        # popped out (see toggle_popout below) - keeps the layout from
+        # jumping around and makes it obvious where the video went.
+        self.popout_placeholder = ctk.CTkFrame(self, fg_color=PANEL_2, corner_radius=10, height=60)
+        self.popout_placeholder.pack_propagate(False)
+        ctk.CTkLabel(
+            self.popout_placeholder, text="🗗  Video is playing in its own window",
+            text_color=MUTED, font=("Segoe UI", 13),
+        ).pack(expand=True)
+
     def _build_playlist(self):
         self.playlist_frame = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
         self.playlist_frame.pack(fill="both", expand=True, padx=15, pady=8)
@@ -126,6 +140,11 @@ class MediaCenterPage(ctk.CTkFrame):
             inner, text="⛶ Fullscreen", command=self.toggle_fullscreen, **{**_BTN, "width": 140},
         )
         self.fullscreen_btn.grid(row=0, column=4, padx=(16, 4))
+
+        self.popout_btn = ctk.CTkButton(
+            inner, text="🗗 Pop Out", command=self.toggle_popout, **{**_BTN, "width": 130},
+        )
+        self.popout_btn.grid(row=0, column=5, padx=4)
 
     def _build_load_button(self):
         self.load_btn = ctk.CTkButton(
@@ -245,8 +264,12 @@ class MediaCenterPage(ctk.CTkFrame):
             )
 
     def setup_video_output(self):
-        self.update()  # Ensure the frame has a real window id before we grab it.
-        handle = self.video_frame.winfo_id()
+        # Renders into the popout window's frame instead of the embedded
+        # one if the video's currently popped out.
+        target = self.popout_video_frame if self.is_popped_out else self.video_frame
+
+        target.update()  # Ensure the frame has a real window id before we grab it.
+        handle = target.winfo_id()
 
         try:
             if sys.platform.startswith("win"):
@@ -268,6 +291,12 @@ class MediaCenterPage(ctk.CTkFrame):
     # expand to fill it — the same approach real embedded players use.
 
     def toggle_fullscreen(self):
+        if self.is_popped_out:
+            # Fullscreening this window doesn't make sense while the video
+            # is actually rendering into the separate popout window instead
+            # - maximize that window (normal OS title bar controls) to get
+            # the same effect.
+            return
         if self.is_fullscreen:
             self.exit_fullscreen()
         else:
@@ -333,6 +362,86 @@ class MediaCenterPage(ctk.CTkFrame):
         self.volume_frame.pack(fill="x", padx=15, pady=(0, 15))
 
         self.fullscreen_btn.configure(text="⛶ Fullscreen")
+
+    # =====================================================
+    # POP OUT (video in its own floating window)
+    # =====================================================
+    # VLC renders by being handed a raw window handle (set_hwnd/set_xwindow/
+    # set_nsobject), not through Tkinter's normal parent-child widget tree -
+    # so "popping out" doesn't require reparenting a widget (Tkinter has no
+    # real way to do that across top-level windows anyway). We just build a
+    # frame in a separate CTkToplevel and redirect VLC's output handle to
+    # it instead, same mechanism as embedding, just pointed somewhere else.
+
+    def toggle_popout(self):
+        if self.is_popped_out:
+            self.dock_video_back()
+        else:
+            self.pop_out_video()
+
+    def pop_out_video(self):
+        if self.is_popped_out:
+            return
+
+        if self.is_fullscreen:
+            self.exit_fullscreen()
+
+        self.popout_window = ctk.CTkToplevel(self)
+        self.popout_window.title("Media Center - Video")
+        self.popout_window.geometry("960x540")
+        self.popout_window.configure(fg_color="black")
+        # Closing the popout window (X button) docks the video back into
+        # the tab rather than just vanishing - VLC would otherwise be left
+        # rendering to a handle that no longer exists.
+        self.popout_window.protocol("WM_DELETE_WINDOW", self.dock_video_back)
+
+        self.popout_video_frame = ctk.CTkFrame(self.popout_window, fg_color="black", corner_radius=0)
+        self.popout_video_frame.pack(fill="both", expand=True)
+        self.popout_video_frame.bind("<Double-Button-1>", lambda _e: self._maximize_popout())
+
+        # Swap the embedded slot for the "video is elsewhere" placeholder.
+        self.video_frame.pack_forget()
+        self.popout_placeholder.pack(fill="x", padx=15, pady=(0, 8), before=self.playlist_frame)
+
+        self.is_popped_out = True
+        self.popout_btn.configure(text="🗗 Dock Back")
+        self.fullscreen_btn.configure(state="disabled")
+
+        # Re-point VLC's output at the new window instead of the (now
+        # hidden) embedded frame.
+        self.setup_video_output()
+
+    def dock_video_back(self):
+        if not self.is_popped_out:
+            return
+
+        self.popout_placeholder.pack_forget()
+        self.video_frame.pack(fill="x", padx=15, pady=(0, 8), before=self.playlist_frame)
+
+        if self.popout_window is not None:
+            try:
+                self.popout_window.protocol("WM_DELETE_WINDOW", lambda: None)
+                self.popout_window.destroy()
+            except Exception:
+                pass
+        self.popout_window = None
+        self.popout_video_frame = None
+
+        self.is_popped_out = False
+        self.popout_btn.configure(text="🗗 Pop Out")
+        self.fullscreen_btn.configure(state="normal")
+
+        # Re-point VLC's output back at the embedded frame.
+        self.setup_video_output()
+
+    def _maximize_popout(self):
+        if self.popout_window is None:
+            return
+        try:
+            is_zoomed = self.popout_window.state() == "zoomed"
+            self.popout_window.state("normal" if is_zoomed else "zoomed")
+        except Exception:
+            pass
 
     # =====================================================
     # LOOP

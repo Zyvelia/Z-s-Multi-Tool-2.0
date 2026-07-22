@@ -3,18 +3,27 @@
 # A small, dependency-free HTTP server (stdlib only) that lets the "Zs
 # Multi Tool Companion" browser extension hand off a YouTube URL to this
 # app's downloader — click a button on a YouTube tab, the video shows up
-# downloading here, without any copy/paste. Modeled directly on
+# downloading here, without any copy/paste. Also serves a mobile-friendly
+# page (GET /) so you can paste a link and queue a download from your
+# phone over Tailscale, same idea as Music Player and Security Vault —
+# see remote_access_tab.py. Modeled directly on
 # modules/music_player/web_server.py and core/services/vault_web_server.py.
 #
 # Security model:
-#   - Binds to 127.0.0.1 ONLY. Never reachable from the LAN or the open
-#     internet — only other processes on this same PC (i.e. the browser
-#     extension) can reach it.
-#   - No auth token, matching the Music Player server: nothing served
-#     here is sensitive the way vault passwords are, and being able to
-#     reach 127.0.0.1 on this machine already implies local access.
+#   - Binds to 127.0.0.1 ONLY. Reachable from the LAN/internet only via
+#     `tailscale serve`'s HTTPS proxy (tailnet devices only) — see
+#     core/services/tailscale_service.py — or from other local processes
+#     on this same PC (the browser extension).
+#   - No auth by default, matching the Music Player server: nothing
+#     served here is sensitive the way vault passwords are, and Tailscale
+#     membership is already the trust boundary. If you want an extra
+#     step before your phone (or anyone else on your tailnet) can queue
+#     a download, set an access code in the Settings tab — this gates
+#     POST /api/download only; GET endpoints (status/job list) stay open
+#     since they're read-only. Setting a code also applies to the browser
+#     extension's requests, since they hit the same endpoint.
 #   - Downloads only ever land in the folder configured on this page —
-#     the extension cannot choose an arbitrary path.
+#     nothing can choose an arbitrary path.
 #
 # Threading model:
 #   - Runs independently of the Tkinter UI thread. Each queued job runs
@@ -106,11 +115,30 @@ class _Handler(BaseHTTPRequestHandler):
     # routing
     # -------------------------------------------------
 
+    def _send_html(self, status, html):
+        body = html.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self._cors_headers()
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _code_ok(self, srv):
+        required = (srv.access_code or "").strip()
+        if not required:
+            return True
+        sent = (self.headers.get("X-Access-Code") or "").strip()
+        return sent == required
+
     def do_GET(self):
         path = urlsplit(self.path).path
         srv = self._srv()
 
-        if path == "/api/status":
+        if path in ("/", "/index.html"):
+            self._send_html(200, _mobile_page(bool((srv.access_code or "").strip())))
+        elif path == "/api/status":
             self._send_json(200, {
                 "ok": True,
                 "ready": youtube_dl is not None,
@@ -135,6 +163,10 @@ class _Handler(BaseHTTPRequestHandler):
         srv = self._srv()
 
         if path == "/api/download":
+            if not self._code_ok(srv):
+                self._send_json(401, {"ok": False, "error": "wrong or missing access code"})
+                return
+
             body = self._read_json_body()
             if body is None:
                 self._send_json(400, {"ok": False, "error": "invalid JSON body"})
@@ -181,6 +213,7 @@ class YTWebServer:
         self.default_format = default_format
         self.default_type = default_type
         self.default_quality = default_quality
+        self.access_code = ""   # optional — see _code_ok() above; blank = no gate
 
         self.port = None
         self._httpd = None
@@ -378,3 +411,145 @@ class YTWebServer:
                 self._update_job(job_id, status="done", percent=1.0, message="Done")
         except Exception as e:
             self._update_job(job_id, status="error", message=str(e))
+
+
+# =====================================================
+# MOBILE PAGE (single file, no build step, no external requests)
+# =====================================================
+
+def _mobile_page(needs_code: bool) -> str:
+    return """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>YouTube Downloader</title>
+<style>
+  :root {
+    --bg:#0f1115; --panel:#151922; --card:#1b2030; --accent:#a78bfa;
+    --text:#e8ecf1; --muted:#8a93a6; --danger:#e0555f; --success:#3ecf8e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin:0; background:var(--bg); color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .wrap { max-width:520px; margin:0 auto; padding:20px 16px 60px; }
+  h1 { font-size:22px; margin:10px 0 20px; }
+  .panel { background:var(--panel); border-radius:14px; padding:16px; margin-bottom:14px; }
+  input, select {
+    width:100%; padding:14px; border-radius:10px; border:1px solid #252d3d;
+    background:var(--card); color:var(--text); font-size:16px; margin-bottom:10px;
+  }
+  .row2 { display:flex; gap:10px; }
+  .row2 > * { flex:1; }
+  button {
+    width:100%; padding:14px; border-radius:10px; border:none;
+    background:var(--accent); color:#0b0d10; font-weight:700; font-size:16px;
+  }
+  .card { background:var(--card); border-radius:12px; padding:14px; margin-bottom:10px; }
+  .card .url { font-size:13px; word-break:break-all; color:var(--muted); }
+  .card .msg { font-size:14px; margin-top:6px; }
+  .bar { height:6px; border-radius:3px; background:#252d3d; margin-top:8px; overflow:hidden; }
+  .bar > div { height:100%; background:var(--accent); }
+  .status-done { color:var(--success); }
+  .status-error { color:var(--danger); }
+  .error { color:var(--danger); font-size:14px; margin:-4px 0 10px; }
+  .muted { color:var(--muted); font-size:13px; }
+</style>
+</head>
+<body>
+<div class="wrap" id="app"></div>
+<script>
+const NEEDS_CODE = __NEEDS_CODE__;
+const app = document.getElementById('app');
+let accessCode = NEEDS_CODE ? (sessionStorage.getItem('yt_access_code') || '') : '';
+
+function headers(extra) {
+  const h = Object.assign({ 'Content-Type': 'application/json' }, extra || {});
+  if (accessCode) h['X-Access-Code'] = accessCode;
+  return h;
+}
+
+async function api(path, opts) {
+  const res = await fetch(path, Object.assign({}, opts || {}, { headers: headers((opts || {}).headers) }));
+  let data = {};
+  try { data = await res.json(); } catch (e) {}
+  return { ok: res.ok, status: res.status, data };
+}
+
+function escapeHtml(s) {
+  return (s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function render() {
+  app.innerHTML = `
+    <h1>&#9195;&#65039; YouTube Downloader</h1>
+    <div class="panel">
+      <input id="url" type="url" placeholder="Paste a YouTube link" autofocus>
+      <div class="row2">
+        <select id="type"><option value="video">Video</option><option value="playlist">Playlist</option></select>
+        <select id="format"><option value="mp4">mp4</option><option value="mp3">mp3</option></select>
+      </div>
+      <div id="err" class="error" style="display:none;"></div>
+      <button id="goBtn">Queue Download</button>
+    </div>
+    <div id="jobs"></div>
+    <div class="muted">Reachable only from devices on your Tailscale network.</div>
+  `;
+  document.getElementById('goBtn').onclick = submit;
+  document.getElementById('url').addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
+  refreshJobs();
+}
+
+async function submit() {
+  const url = document.getElementById('url').value.trim();
+  const errEl = document.getElementById('err');
+  errEl.style.display = 'none';
+  if (!url) return;
+
+  if (NEEDS_CODE && !accessCode) {
+    const entered = prompt('Access code required:');
+    if (!entered) return;
+    accessCode = entered.trim();
+    sessionStorage.setItem('yt_access_code', accessCode);
+  }
+
+  const type = document.getElementById('type').value;
+  const format = document.getElementById('format').value;
+  const r = await api('/api/download', { method: 'POST', body: JSON.stringify({ url, type, format }) });
+  if (!r.ok) {
+    if (r.status === 401) { accessCode = ''; sessionStorage.removeItem('yt_access_code'); }
+    errEl.textContent = r.data.error || 'Failed to queue download.';
+    errEl.style.display = 'block';
+    return;
+  }
+  document.getElementById('url').value = '';
+  refreshJobs();
+}
+
+async function refreshJobs() {
+  const r = await api('/api/jobs');
+  const el = document.getElementById('jobs');
+  if (!el) return;
+  const jobs = (r.data.jobs || []).slice().reverse();
+  if (jobs.length === 0) {
+    el.innerHTML = '<div class="muted">No downloads yet.</div>';
+    return;
+  }
+  el.innerHTML = jobs.map(j => `
+    <div class="card">
+      <div class="url">${escapeHtml(j.url)}</div>
+      <div class="msg ${j.status === 'done' ? 'status-done' : j.status === 'error' ? 'status-error' : ''}">${escapeHtml(j.message || j.status)}</div>
+      ${j.status === 'downloading' || j.status === 'queued' ? `<div class="bar"><div style="width:${Math.round((j.percent||0)*100)}%"></div></div>` : ''}
+    </div>
+  `).join('');
+}
+
+render();
+setInterval(refreshJobs, 3000);
+</script>
+</body>
+</html>
+""".replace("__NEEDS_CODE__", "true" if needs_code else "false")

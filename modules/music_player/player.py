@@ -1,5 +1,4 @@
-import pygame
-import pygame.mixer
+import vlc
 import random
 import os
 import time
@@ -12,41 +11,25 @@ from array import array
 
 
 # ---------------------------------------------------------------------------
-# Pygame state constants – mirror the subset of vlc.State used in ui.py
+# State — re-export libVLC's own State enum so ui.py's
+# `from .player import VLCMusicEngine, State` and its `State.Paused` /
+# `State.Ended` checks keep working unchanged. libVLC's State enum already
+# has exactly the members (NothingSpecial/Opening/Buffering/Playing/Paused/
+# Stopped/Ended/Error) the old pygame-based engine hand-rolled to mimic.
 # ---------------------------------------------------------------------------
-class _State:
-    NothingSpecial = 0
-    Opening        = 1
-    Buffering      = 2
-    Playing        = 3
-    Paused         = 4
-    Stopped        = 5
-    Ended          = 6
-    Error          = 7
-
-
-class State:
-    """Drop-in replacement for the vlc.State namespace used by ui.py."""
-    NothingSpecial = _State.NothingSpecial
-    Opening        = _State.Opening
-    Buffering      = _State.Buffering
-    Playing        = _State.Playing
-    Paused         = _State.Paused
-    Stopped        = _State.Stopped
-    Ended          = _State.Ended
-    Error          = _State.Error
-
+State = vlc.State
 
 
 # ---------------------------------------------------------------------------
 # ffmpeg transcode fallback
 #
-# pygame.mixer.music plays through SDL_mixer, which has no decoder at all
-# for Monkey's Audio (.ape) and, depending on how SDL_mixer was built, can
-# also choke on some Ogg Vorbis / Opus encodes. Rather than guess which
-# builds support what, we: (1) always pre-transcode known-unsupported
-# formats like .ape, and (2) for anything else, retry once through ffmpeg
-# if the native load fails. Transcoded copies are cached on disk (keyed by
+# libVLC natively decodes far more formats than SDL_mixer (pygame's old
+# backend) did — MP3/FLAC/OGG/Opus/WMA/APE/AC3/DTS/etc. all play directly.
+# The remaining gap is mostly tracker/module formats (.mod/.s3m/.it/.xm)
+# and MIDI, which need a real synth VLC doesn't reliably provide out of
+# the box. We keep the same ffmpeg pre-transcode path from the old engine
+# for those, plus as a one-time retry if native VLC playback errors out on
+# something unexpected. Transcoded copies are cached on disk (keyed by
 # path + mtime) so a track is only ever transcoded once.
 # ---------------------------------------------------------------------------
 
@@ -56,13 +39,13 @@ _TRANSCODE_CACHE_LIMIT = 600  # max cached wav files before pruning oldest
                               # (raised from 300 now that cue-sheet tracks
                               # each cache their own short segment)
 
-# Formats SDL_mixer has no built-in decoder for at all — always transcode
-# these up front instead of waiting for a failed load.
+# Formats kept on the "always transcode" list even with VLC as the engine —
+# tracker/module formats and MIDI, which need a real synth VLC doesn't
+# reliably provide out of the box. Everything else that used to be on this
+# list (wma/ape/wv/tta/dsf/dff/amr/ac3/dts/spx/voc/au/webm/3gp/m4b/...) is
+# now handled natively by libVLC, so it's been dropped from this list.
 _ALWAYS_TRANSCODE_EXTS = {
-    ".ape", ".wv", ".wma", ".mpc", ".tta", ".dsf", ".dff", ".caf",
-    ".w64", ".amr", ".ac3", ".dts", ".spx", ".voc", ".au", ".snd",
-    ".gsm", ".mid", ".midi", ".xm", ".mod", ".s3m", ".it", ".mka",
-    ".webm", ".3gp", ".3g2", ".m4b", ".m4p", ".m4r",
+    ".mid", ".midi", ".xm", ".mod", ".s3m", ".it",
 }
 
 
@@ -120,42 +103,9 @@ def _transcode_to_wav(path, start=None, end=None):
             _prune_transcode_cache()
             return out_path
     except Exception as e:
-        print(f"[Pygame] ffmpeg transcode failed for {path} "
+        print(f"[VLC] ffmpeg transcode failed for {path} "
               f"[{start}:{end}]: {e}")
     return None
-
-
-def _load_with_fallback(path):
-    """
-    Loads `path` into pygame.mixer.music, transcoding through ffmpeg first
-    when needed. Returns True on success, False if nothing worked.
-    """
-    ext = os.path.splitext(path)[1].lower()
-    load_path = path
-
-    if ext in _ALWAYS_TRANSCODE_EXTS:
-        load_path = _transcode_to_wav(path) or path
-
-    try:
-        pygame.mixer.music.load(load_path)
-        return True
-    except pygame.error as e:
-        if load_path != path:
-            # Even the transcoded copy failed — nothing more to try.
-            print(f"[Pygame] Load failed even after transcode for "
-                  f"{os.path.basename(path)}: {e}")
-            return False
-        print(f"[Pygame] Native load failed for {os.path.basename(path)} "
-              f"({e}); trying ffmpeg fallback.")
-        fallback = _transcode_to_wav(path)
-        if not fallback:
-            return False
-        try:
-            pygame.mixer.music.load(fallback)
-            return True
-        except pygame.error as e2:
-            print(f"[Pygame] Fallback load also failed: {e2}")
-            return False
 
 
 class LazyPlaylist:
@@ -221,16 +171,28 @@ class LazyPlaylist:
         return song
 
 
-class PygameMusicEngine:
+class VLCMusicEngine:
     """
-    Drop-in replacement for VLCMusicEngine.
+    Music playback engine built on libVLC (via python-vlc), replacing the
+    previous pygame.mixer-based engine.
 
-    Public interface is identical so that ui.py needs only a one-line
-    import change (and the removal of vlc.State references).
+    Why: pygame is a compiled C extension tied to a specific Python build,
+    and it lags behind (sometimes for months) on supporting new Python
+    releases. python-vlc is a ctypes wrapper around libvlc.dll — nothing
+    to rebuild per Python version — so it isn't exposed to that problem at
+    all, on this Python version or any future one. It also means the
+    music player and Media Center module now share the same underlying
+    engine instead of running two separate audio stacks.
+
+    Public interface is identical to the old engine so ui.py, mini_widget.py,
+    and web_server.py all keep working unchanged.
     """
 
     def __init__(self):
-        pygame.mixer.init()
+        # --no-video: these are audio files, never open a video output.
+        # --quiet: keep libVLC's own logging off stdout (it's chatty).
+        self.instance = vlc.Instance("--no-video", "--quiet")
+        self.player   = self.instance.media_player_new()
 
         self.playlist    = []
         self.index       = -1
@@ -242,13 +204,22 @@ class PygameMusicEngine:
         self.volume      = 0.5
         self._apply_volume()
 
-        # Internal state tracking
-        self._state           = _State.Stopped
-        self._paused          = False
-        self._play_started_at = 0.0
+        # Tracks the file + cue window currently loaded, so a failed
+        # native playback attempt can be retried once through ffmpeg
+        # without the caller needing to pass anything back in.
+        self._current_path = None
+        self._cue_start = None
+        self._cue_end = None
+        self._retry_done = False
+        # Guards the Ended/Error poll below from firing more than once
+        # per playback attempt (reset every time a new attempt starts).
+        self._ended_handled = True
 
-        # Background polling thread — uses get_busy() only, no pygame
-        # display or event system required, so works fine alongside tkinter.
+        # Background polling thread — mirrors the old engine's design so
+        # behavior around the UI stays as close as possible to before.
+        # libVLC's own State.Ended is reliable and immediate (no "busy
+        # flag lagging by one poll" heuristics needed like SDL_mixer
+        # required).
         self._monitor_thread = threading.Thread(target=self._monitor_loop,
                                                  daemon=True)
         self._monitor_thread.start()
@@ -257,27 +228,75 @@ class PygameMusicEngine:
 
     def _monitor_loop(self):
         """
-        Polls pygame.mixer.music.get_busy() every 200 ms.
-        When a track naturally finishes (not paused/stopped by the user),
-        automatically advances to the next track — no pygame display or
-        event system needed, so it works safely alongside tkinter.
+        Polls the VLC player's own state every 200 ms. Advances to the
+        next track when a track ends naturally, and retries once via
+        ffmpeg if native playback errors out (mirrors the old engine's
+        error-recovery path).
         """
         while True:
-            # Only act when we expected music to be playing but it stopped.
-            # Give newly-started tracks a brief grace period: get_busy()
-            # can momentarily report False right after play() is called
-            # (file still loading/decoding), which would otherwise be
-            # misread as "track ended" and cause an instant skip.
-            if (self._state == _State.Playing
-                    and not pygame.mixer.music.get_busy()
-                    and (time.monotonic() - self._play_started_at) > 0.75):
-                print("[DEBUG] Track ended detected by poll.")
-                self._state = _State.Ended
-                self.next()
+            try:
+                state = self.player.get_state()
+                if state == vlc.State.Ended and not self._ended_handled:
+                    self._ended_handled = True
+                    print("[VLC] Track ended detected by poll.")
+                    self.next()
+                elif state == vlc.State.Error and not self._ended_handled:
+                    self._ended_handled = True
+                    self._retry_with_transcode()
+            except Exception as e:
+                print(f"[VLC] Monitor loop error: {e}")
             time.sleep(0.2)
 
     def _apply_volume(self):
-        pygame.mixer.music.set_volume(self.volume)
+        # libVLC volume is an int 0-100; our public API stays 0.0-1.0 to
+        # match the old engine (ui.py and web_server.py both use 0.0-1.0).
+        self.player.audio_set_volume(int(round(self.volume * 100)))
+
+    def _start_media(self, path, cue_start, cue_end, force_transcode=False):
+        """Builds a vlc.Media for `path` and starts playback."""
+        self._current_path = path
+        self._cue_start = cue_start
+        self._cue_end = cue_end
+
+        if force_transcode:
+            transcoded = _transcode_to_wav(path, cue_start, cue_end)
+            if not transcoded:
+                print(f"[VLC] Could not transcode (is ffmpeg installed?): {path}")
+                return
+            media = self.instance.media_new(transcoded)
+        else:
+            media = self.instance.media_new(path)
+            # libVLC supports playing just a slice of a file directly —
+            # used for cue-sheet tracks that share one underlying audio
+            # file (album.ape + album.cue). No pre-extraction needed.
+            if cue_start is not None:
+                media.add_option(f":start-time={cue_start}")
+            if cue_end is not None:
+                media.add_option(f":stop-time={cue_end}")
+
+        self._ended_handled = False
+        self.player.set_media(media)
+        self.player.play()
+        self._apply_volume()
+        print(f"[VLC] Playing: {os.path.basename(path)} (Index: {self.index})")
+
+    def _retry_with_transcode(self):
+        """
+        Called once from the monitor loop when native VLC playback errors
+        out on a file it couldn't handle — retries the same track through
+        the ffmpeg fallback. If the retry also fails, gives up and skips
+        to the next track rather than looping forever.
+        """
+        if self._retry_done:
+            print(f"[VLC] Retry also failed for "
+                  f"{os.path.basename(self._current_path or '')}; skipping.")
+            self.next()
+            return
+        self._retry_done = True
+        print(f"[VLC] Native playback failed for "
+              f"{os.path.basename(self._current_path or '')}; retrying via ffmpeg.")
+        self._start_media(self._current_path, self._cue_start, self._cue_end,
+                           force_transcode=True)
 
     # ── Load ──────────────────────────────────────────────────
 
@@ -286,8 +305,6 @@ class PygameMusicEngine:
         self.db       = None
         self.playlist = [os.path.abspath(f) for f in (files or [])]
         self.index    = 0 if self.playlist else -1
-        self._state   = _State.Stopped
-        self._paused  = False
 
     def load_ids(self, db, ids, start_index=0):
         """
@@ -298,8 +315,6 @@ class PygameMusicEngine:
         self.db       = db
         self.playlist = LazyPlaylist(db, ids)
         self.index    = start_index if len(self.playlist) else -1
-        self._state   = _State.Stopped
-        self._paused  = False
 
     # ── Playback ──────────────────────────────────────────────
 
@@ -314,12 +329,12 @@ class PygameMusicEngine:
         if not self.playlist or not (0 <= i < len(self.playlist)):
             return
 
-        self.index   = i
-        self._paused = False
+        self.index      = i
+        self._retry_done = False
 
         path = self.playlist[i]
         if not os.path.exists(path):
-            print("[Pygame] Missing file:", path)
+            print("[VLC] Missing file:", path)
             return
 
         # Cue-sheet tracks (album.ape + album.cue) share one underlying
@@ -333,47 +348,19 @@ class PygameMusicEngine:
                 cue_start = meta.get("cue_start")
                 cue_end = meta.get("cue_end")
 
-        pygame.mixer.music.stop()
+        self.player.stop()
 
-        if cue_start is not None:
-            segment = _transcode_to_wav(path, cue_start, cue_end)
-            if not segment:
-                self._state = _State.Error
-                print(f"[Pygame] Could not extract cue track (is ffmpeg "
-                      f"installed?): {path} [{cue_start}:{cue_end}]")
-                return
-            try:
-                pygame.mixer.music.load(segment)
-            except pygame.error as e:
-                self._state = _State.Error
-                print(f"[Pygame] Could not play cue track segment: {e}")
-                return
-        elif not _load_with_fallback(path):
-            self._state = _State.Error
-            print(f"[Pygame] Could not play (unsupported format): {path}")
-            return
-
-        pygame.mixer.music.play()
-        self._apply_volume()
-        self._play_started_at = time.monotonic()
-        self._state = _State.Playing
-        print(f"[Pygame] Playing: {os.path.basename(path)} (Index: {i})")
+        ext = os.path.splitext(path)[1].lower()
+        self._start_media(path, cue_start, cue_end,
+                           force_transcode=(ext in _ALWAYS_TRANSCODE_EXTS))
 
     def pause(self):
-        if self._state == _State.Playing:
-            pygame.mixer.music.pause()
-            self._paused = True
-            self._state  = _State.Paused
-        elif self._state == _State.Paused:
-            # Toggle back to playing on second press
-            pygame.mixer.music.unpause()
-            self._paused = False
-            self._state  = _State.Playing
+        # libvlc_media_player_pause() toggles play/pause on its own —
+        # matches the old engine's toggle-on-second-press behavior.
+        self.player.pause()
 
     def stop(self):
-        pygame.mixer.music.stop()
-        self._state  = _State.Stopped
-        self._paused = False
+        self.player.stop()
 
     # ── Volume ────────────────────────────────────────────────
 
@@ -388,13 +375,10 @@ class PygameMusicEngine:
     # ── Navigation ────────────────────────────────────────────
 
     def next(self):
-        print("[DEBUG] next() method called.")
         if not self.playlist:
-            print("[DEBUG] next() - No playlist.")
             return
 
         if self.repeat_mode == "one":
-            print("[DEBUG] next() - Repeat one, replaying current.")
             self.play_at(self.index)
             return
 
@@ -406,24 +390,19 @@ class PygameMusicEngine:
                 self.index = new_index
             else:
                 self.index = 0
-            print(f"[DEBUG] next() - Shuffle, playing index {self.index}")
             self.play_at(self.index)
             return
 
         if self.index + 1 < len(self.playlist):
-            print(f"[DEBUG] next() - Playing next in sequence: {self.index + 1}")
             self.play_at(self.index + 1)
         elif self.repeat_mode == "all":
-            print("[DEBUG] next() - Repeat all, playing first song.")
             self.play_at(0)
         else:
-            print("[DEBUG] next() - End of playlist, stopping.")
             self.stop()
             self.index = -1
-            print("[Pygame] Playlist finished.")
+            print("[VLC] Playlist finished.")
 
     def prev(self):
-        print("[DEBUG] prev() method called.")
         if not self.playlist:
             return
 
@@ -473,38 +452,28 @@ class PygameMusicEngine:
         if not self.playlist:
             self.stop()
             self.index = -1
-            print("[Pygame] Playlist empty after removal.")
+            print("[VLC] Playlist empty after removal.")
 
     # ── State ─────────────────────────────────────────────────
 
     def is_playing(self):
-        return pygame.mixer.music.get_busy() and not self._paused
+        return self.player.get_state() == vlc.State.Playing
 
     def get_state(self):
-        """
-        Returns a State constant compatible with the vlc.State checks in ui.py.
-        """
-        if self._paused:
-            return State.Paused
-        if pygame.mixer.music.get_busy():
-            return State.Playing
-        if self._state == _State.Stopped:
-            return State.Stopped
-        if self._state == _State.Ended:
-            return State.Ended
-        return State.NothingSpecial
+        """Returns a vlc.State value — same enum ui.py already checks against."""
+        return self.player.get_state()
 
     def get_time(self):
         """Returns current playback position in seconds."""
-        if not pygame.mixer.music.get_busy() and not self._paused:
-            return 0
-        pos_ms = pygame.mixer.music.get_pos()
-        return max(0, pos_ms / 1000) if pos_ms >= 0 else 0
+        ms = self.player.get_time()
+        return max(0, ms / 1000) if ms and ms >= 0 else 0
 
     def get_length(self):
         """
-        Returns track length in seconds using mutagen if available,
-        otherwise returns 0 (progress bar won't show, but playback still works).
+        Returns track length in seconds. Prefers the DB-stored duration
+        (LazyPlaylist queues) or VLC's own parsed length, and falls back
+        to mutagen if neither is available yet (e.g. right as a track
+        starts, before libVLC has finished parsing it).
         """
         if self.index < 0 or not self.playlist:
             return 0
@@ -512,7 +481,11 @@ class PygameMusicEngine:
             meta = self.playlist.meta_at(self.index)
             if meta and meta.get("duration"):
                 return meta["duration"]
-            return 0
+
+        length_ms = self.player.get_length()
+        if length_ms and length_ms > 0:
+            return length_ms / 1000
+
         path = self.playlist[self.index]
         try:
             from mutagen import File as MutagenFile
@@ -537,15 +510,23 @@ class PygameMusicEngine:
         return None
 
     def release(self):
-        """Releases pygame mixer resources."""
-        pygame.mixer.music.stop()
-        pygame.mixer.quit()
-        print("[Pygame] Resources released.")
+        """Releases the VLC player and instance."""
+        try:
+            self.player.stop()
+        except Exception:
+            pass
+        try:
+            self.player.release()
+        except Exception:
+            pass
+        try:
+            self.instance.release()
+        except Exception:
+            pass
+        print("[VLC] Resources released.")
 
 
 # ---------------------------------------------------------------------------
-# Backwards-compat alias so existing code that does
-#   from .player import VLCMusicEngine
-# still works without any changes to ui.py's import line.
+# Backwards-compat alias, in case anything still references the old name.
 # ---------------------------------------------------------------------------
-VLCMusicEngine = PygameMusicEngine
+PygameMusicEngine = VLCMusicEngine

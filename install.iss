@@ -12,7 +12,7 @@
 ; ============================================================
 
 #define MyAppName "Z's Multi Tool"
-#define MyAppVersion "2.6.0"
+#define MyAppVersion "3.0.0"
 #define MyAppPublisher "Z"
 #define MyAppExeName "Z's Multi Tool.exe"
 #define MyAppIcon "assets\icon.ico"
@@ -52,6 +52,15 @@ Name: "startupicon"; Description: "Launch {#MyAppName} at Windows startup"; Grou
 ; settings.json) is already bundled inside this single exe.
 Source: "dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 
+; VLC runtime, needed by media_center and music_player (python-vlc loads
+; libvlc.dll at runtime - PyInstaller can't bundle this into the exe
+; itself). build.bat copies these into dist\ automatically if it finds a
+; local VLC install; if dist\libvlc.dll doesn't exist when you compile
+; this script, re-run build.bat with VLC installed first.
+Source: "dist\libvlc.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\libvlccore.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\plugins\*"; DestDir: "{app}\plugins"; Flags: ignoreversion recursesubdirs createallsubdirs
+
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
@@ -75,7 +84,7 @@ procedure InitializeWizard;
 begin
   WizardForm.WelcomeLabel2.Caption :=
     WizardForm.WelcomeLabel2.Caption + #13#10#13#10 +
-    'Note: the Media Center module needs VLC installed separately, and ' +
-    'the Network Auditor module needs Npcap + Nmap installed separately. ' +
-    'This installer does not bundle those - see the app''s Readme for links.';
+    'Note: the Network Auditor module needs Npcap + Nmap installed ' +
+    'separately. This installer does not bundle those - see the app''s ' +
+    'Readme for links.';
 end;

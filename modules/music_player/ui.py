@@ -13,6 +13,13 @@ from .web_server import MusicWebServer
 from .remote_access_tab import RemoteAccessTab
 from core import theme
 
+# Media Center gets folded in here as an extra tab (see _build_ui) rather
+# than living as its own top-level page — it's a self-contained
+# ctk.CTkFrame with the same (parent, manager) constructor this page uses,
+# and it keeps its own separate VLCMediaEngine (manager.media_engine), so
+# there's no conflict with this page's own music engine.
+from modules.media_center.ui import MediaCenterPage
+
 try:
     import tkinterdnd2
     from tkinterdnd2 import DND_FILES, COPY
@@ -135,10 +142,12 @@ class MusicPage(ctk.CTkFrame):
             segmented_button_fg_color=PANEL,
             segmented_button_selected_color=ACCENT,
             segmented_button_selected_hover_color=ACCENT,
+            command=self._on_tab_changed,
         )
         self.tabview.pack(fill="both", expand=True, padx=12, pady=(4, 12))
 
         library_tab = self.tabview.add("🎵 Library")
+        media_center_tab = self.tabview.add("🎬 Media Center")
         settings_tab = self.tabview.add("⚙ Settings")
 
         # Everything below builds into `self._tab_body` (not `self`) so the
@@ -150,9 +159,27 @@ class MusicPage(ctk.CTkFrame):
         self._build_now_playing()
         self._build_controls()
 
+        # Media Center isn't built until this tab is actually opened the
+        # first time (see _on_tab_changed) — no point spinning up a second
+        # VLC player + its 300ms update loop for people who never touch
+        # video playback. This page (like every page in this app, see
+        # core/page_manager.py) is only ever constructed once and then
+        # shown/hidden for the rest of the session, so a plain instance
+        # attribute is enough here — no need to also cache it on manager.
+        self._media_center_tab = media_center_tab
+        self._media_center_page = None
+
         settings_tab.grid_rowconfigure(0, weight=1)
         settings_tab.grid_columnconfigure(0, weight=1)
         RemoteAccessTab(settings_tab, self.manager).grid(row=0, column=0, sticky="nsew")
+
+    def _on_tab_changed(self):
+        if self.tabview.get() != "🎬 Media Center":
+            return
+        if self._media_center_page is not None:
+            return
+        self._media_center_page = MediaCenterPage(self._media_center_tab, self.manager)
+        self._media_center_page.pack(fill="both", expand=True)
 
     def _build_header(self):
         header = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)

@@ -1,22 +1,10 @@
 from .ui import MediaCenterPage
 
-
-def open_media(manager):
-
-    return MediaCenterPage(
-        manager.container,
-        manager
-    )
-
-
-def register(plugin_manager):
-
-    plugin_manager.register(
-        {
-            "name": "Media Center",
-            "category": "Media",
-            "desc": "Play music and videos with VLC",
-            "icon": "🎬",
-            "open": open_media
-        }
-    )
+# No register() here on purpose — Media Center used to be its own catalog
+# tile, but it now lives inside Music Player as a tab (see
+# modules/music_player/ui.py) instead of appearing separately. Deleting
+# `register()` is enough: core/plugin_manager.py only adds a catalog tile
+# for modules that define one (`if hasattr(module, "register")`), so this
+# stays a normal importable package without needing to touch the loader
+# itself. MediaCenterPage is still imported directly from .ui by
+# music_player, so that keeps working unchanged.

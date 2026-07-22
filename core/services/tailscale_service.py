@@ -30,6 +30,20 @@ DEFAULT_CONFIG = {
     "auto_off_minutes": 30,
 }
 
+# Each app gets its own fixed HTTPS port on this device's tailnet address,
+# instead of all three fighting over the single default (443) address via
+# `tailscale serve --bg http://127.0.0.1:<port>`. This is what lets Music
+# Player, Security Vault, and YouTube Downloader all be reachable at the
+# same time — see enable_app_serve() below. The default port 443 is left
+# free for the Remote Hub's landing page (see hub_service.py), which is
+# what your phone actually opens first and links out from.
+APP_HTTPS_PORTS = {
+    "vault": 8443,
+    "music": 8444,
+    "yt": 8445,
+}
+HUB_HTTPS_PORT = 443
+
 # tailscale up/down and serve calls can hang if the daemon is in a
 # weird state (e.g. waiting on a login flow) — never block the UI
 # thread forever.
@@ -251,20 +265,69 @@ class TailscaleService:
 
     def enable_serve(self, port):
         """
-        Exposes http://127.0.0.1:<port> as https://<this-device>.<tailnet>/
-        to other devices on the tailnet only, using Tailscale's own
-        certificate — nothing is reachable outside the tailnet.
-
-        Uses a longer timeout than the default: the first time `serve`
-        runs on a device it has to synchronously provision an HTTPS
-        cert (via Let's Encrypt) before it can start proxying, which
-        routinely takes longer than the default 20s CLI_TIMEOUT and
-        was causing "tailscale command timed out" on first use.
+        Legacy single-destination form — exposes http://127.0.0.1:<port>
+        as https://<this-device>.<tailnet>/, taking over whatever else
+        was on the default address. Kept only for backwards compatibility;
+        enable_app_serve() below is what every app's Settings tab now
+        uses, since it lets all three apps be live simultaneously.
         """
         return self._run(["serve", "--bg", f"http://127.0.0.1:{port}"], timeout=60)
 
     def disable_serve(self):
+        """Full reset — clears EVERY serve entry (all apps + the hub page). Used on disconnect."""
         return self._run(["serve", "reset"])
+
+    def enable_app_serve(self, app_key, local_port):
+        """
+        Exposes http://127.0.0.1:<local_port> as
+        https://<this-device>.<tailnet>:<app's own fixed port>/ — each
+        app (see APP_HTTPS_PORTS) gets its own address, so turning one
+        on never takes over another's. Same long timeout as the old
+        enable_serve() for the same reason: first-run cert provisioning
+        can take a while.
+        """
+        https_port = APP_HTTPS_PORTS.get(app_key)
+        if not https_port:
+            return False, f"Unknown app '{app_key}'."
+        return self._run(
+            ["serve", "--bg", f"--https={https_port}", f"http://127.0.0.1:{local_port}"],
+            timeout=60,
+        )
+
+    def disable_app_serve(self, app_key):
+        https_port = APP_HTTPS_PORTS.get(app_key)
+        if not https_port:
+            return False, f"Unknown app '{app_key}'."
+        return self._run(["serve", f"--https={https_port}", "off"], timeout=30)
+
+    def is_app_serving(self, app_key):
+        """
+        Best-effort check of whether this app's own HTTPS port currently
+        has a live serve entry. Same "never raise, just say no" philosophy
+        as _is_serving() — this only drives a status label, not anything
+        safety-critical.
+        """
+        https_port = APP_HTTPS_PORTS.get(app_key)
+        if not https_port:
+            return False
+        ok, out = self._run(["serve", "status"])
+        if not ok or not out:
+            return False
+        return f":{https_port}" in out
+
+    def enable_hub_page(self, html_path):
+        """
+        Serves a small static HTML file (built by hub_service.py) at
+        this device's default tailnet address — https://<this-device>.<tailnet>/
+        — so opening that one URL on your phone gives you buttons to
+        whichever of the three apps are currently live, each on its own
+        port from enable_app_serve() above. `tailscale serve` can serve a
+        static file directly with no local web server needed for this part.
+        """
+        return self._run(["serve", "--bg", html_path], timeout=60)
+
+    def disable_hub_page(self):
+        return self._run(["serve", f"--https={HUB_HTTPS_PORT}", "off"], timeout=30)
 
     # =====================================================
     # AUTO-OFF TIMER

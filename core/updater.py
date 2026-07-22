@@ -33,11 +33,11 @@ from packaging import version as _version
 
 # ── Fill these in once the repo is public ────────────────────────────────
 GITHUB_OWNER = "Zyvelia"   # e.g. "yourusername"
-GITHUB_REPO = "https://github.com/Zyvelia/Z-s-Multi-Tool-2.0/tree/main"    # e.g. "Zs-Multi-Tool"
+GITHUB_REPO = "https://github.com/Zyvelia/Z-s-Multi-Tool-2.0"    # e.g. "Zs-Multi-Tool"
 
 # Keep this in sync with APP_VERSION in pages/settings_page.py.
 # Bump it (and tag a matching vX.Y.Z GitHub Release) each time you ship.
-APP_VERSION = "2.6.0"
+APP_VERSION = "3.0.0"
 
 
 def _api_url() -> str:

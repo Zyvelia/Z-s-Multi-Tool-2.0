@@ -22,7 +22,7 @@ navy-and-gold theme.
 |---|---|---|---|
 | 🖥️ | System Monitor | System | Live system statistics |
 | 🎬 | Media Center | Media | Play music and videos with VLC |
-| 🎵 | Music Player | Media | PyGame-powered audio player |
+| 🎵 | Music Player | Media | VLC-powered audio player |
 | 🔊 | Soundboard | Media | Play sounds through your mic or audio device |
 | ▶ | YT Downloader | Media | Download YouTube videos and playlists as MP3 or MP4 |
 | 🌦️ | Weather & News | Info | Live weather + custom news feeds, saved articles, and settings |
@@ -148,7 +148,7 @@ system-level drivers.
 ## Notes / known constraints
 
 - `keyboard`-library-based hotkeys (used by other tools in this ecosystem,
-  e.g. the shiny hunting counter) require running as Administrator.
+   require running as Administrator.
 - CustomTkinter widgets should use a real color constant instead of
   `border_color="transparent"` (use `BORDER`/`BG_PANEL` from `core/theme.py`)
   to avoid rendering glitches.

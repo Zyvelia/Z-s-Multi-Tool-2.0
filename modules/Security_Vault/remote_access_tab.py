@@ -8,9 +8,14 @@
 #      it from a terminal.
 #   2. "Start Remote Access" starts a small local-only web server
 #      (127.0.0.1, never exposed on your LAN) and points Tailscale's
-#      `serve` feature at it, so https://<this-device>.<tailnet>/
+#      `serve` feature at it, so https://<this-device>.<tailnet>:8443/
 #      shows a mobile-friendly vault + authenticator view, protected
 #      by your master password, reachable only from your own devices.
+#      Port 8443 is this app's own fixed address (see APP_HTTPS_PORTS in
+#      core/services/tailscale_service.py) — Music Player and YouTube
+#      Downloader each have their own, so all three can be live at once.
+#      The Remote Hub module gives you a single landing page that links
+#      to whichever of the three are currently up.
 #   3. Auto-off closes remote access again after N minutes so it isn't
 #      left open indefinitely.
 #
@@ -254,7 +259,7 @@ class RemoteAccessTab(ctk.CTkFrame):
         def work():
             ok, msg = self.web_server.start(cfg["web_port"])
             if ok:
-                ok2, msg2 = self.tailscale.enable_serve(cfg["web_port"])
+                ok2, msg2 = self.tailscale.enable_app_serve("vault", cfg["web_port"])
                 if not ok2:
                     ok, msg = ok2, msg2
             self.after(0, lambda: self._after_start_remote_access(ok, msg, cfg))
@@ -280,7 +285,7 @@ class RemoteAccessTab(ctk.CTkFrame):
 
     def _on_stop_remote_access(self):
         self.tailscale.cancel_auto_off_timer()
-        self.tailscale.disable_serve()
+        self.tailscale.disable_app_serve("vault")
         self.web_server.stop()
         self._refresh_status()
 
@@ -455,8 +460,9 @@ class RemoteAccessTab(ctk.CTkFrame):
             hostname = status.get("hostname") or "this-device"
             self.ra_status_label.configure(
                 text=(
-                    f"🟢 On — open https://{hostname}/ on your phone (must be signed into "
-                    f"the same tailnet). Serving locally on 127.0.0.1:{port}."
+                    f"🟢 On — open https://{hostname}:8443/ on your phone (or just use "
+                    f"the Remote Hub page — https://{hostname}/ — if Music Player or "
+                    f"YouTube Downloader are also live). Serving locally on 127.0.0.1:{port}."
                 ),
                 text_color=SUCCESS,
             )

@@ -2,9 +2,9 @@
 from PyInstaller.utils.hooks import collect_data_files
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('modules', 'modules'), ('core', 'core'), ('pages', 'pages'), ('assets', 'assets'), ('settings.json', '.')]
+datas = [('modules', 'modules'), ('core', 'core'), ('pages', 'pages'), ('assets', 'assets')]
 binaries = []
-hiddenimports = ['PIL._tkinter_finder', 'scapy.all', 'nmap', 'vlc', 'pyperclip', 'pypresence', 'pystray._win32', 'sounddevice', 'soundfile', 'psutil', 'cryptography.fernet', 'yt_dlp', 'pygame', 'pygame.mixer']
+hiddenimports = ['PIL._tkinter_finder', 'scapy.all', 'nmap', 'vlc', 'pyperclip', 'pypresence', 'pystray._win32', 'sounddevice', 'soundfile', 'psutil', 'cryptography.fernet', 'yt_dlp']
 datas += collect_data_files('pypresence')
 tmp_ret = collect_all('customtkinter')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]

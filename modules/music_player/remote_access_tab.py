@@ -11,13 +11,13 @@
 #      affects both.
 #   2. "Start Remote Access" starts a small local-only web server
 #      (127.0.0.1, never exposed on your LAN) and points Tailscale's
-#      `serve` feature at it, so https://<this-device>.<tailnet>/ opens
-#      a mobile library browser + player on your phone.
-#   3. Because `tailscale serve` only forwards ONE thing at a time in
-#      this app's simple wrapper, starting remote access here will take
-#      over the address from Security Vault's remote access (or vice
-#      versa) if both are turned on. Turning one off and the other on
-#      is fine — you just can't have both reachable at once.
+#      `serve` feature at it, so https://<this-device>.<tailnet>:8444/
+#      opens a mobile library browser + player on your phone. Port 8444
+#      is this app's own fixed address (see APP_HTTPS_PORTS in
+#      core/services/tailscale_service.py) — Security Vault and YouTube
+#      Downloader each have their own, so all three can be live at once.
+#      The Remote Hub module gives you a single landing page that links
+#      to whichever of the three are currently up.
 #
 # The port is stored in the music library's own settings table (not
 # Tailscale's shared config file) so it never collides with the Security
@@ -257,7 +257,7 @@ class RemoteAccessTab(ctk.CTkFrame):
         def work():
             ok, msg = self.web_server.start(port)
             if ok:
-                ok2, msg2 = self.tailscale.enable_serve(port)
+                ok2, msg2 = self.tailscale.enable_app_serve("music", port)
                 if not ok2:
                     ok, msg = ok2, msg2
             self.after(0, lambda: self._after_start_remote_access(ok, msg))
@@ -271,7 +271,7 @@ class RemoteAccessTab(ctk.CTkFrame):
         self._refresh_status()
 
     def _on_stop_remote_access(self):
-        self.tailscale.disable_serve()
+        self.tailscale.disable_app_serve("music")
         self.web_server.stop()
         self._refresh_status()
 
@@ -322,8 +322,9 @@ class RemoteAccessTab(ctk.CTkFrame):
             hostname = status.get("hostname") or "this-device"
             self.ra_status_label.configure(
                 text=(
-                    f"🟢 On — open https://{hostname}/ on your phone (must be signed into "
-                    f"the same tailnet). Serving locally on 127.0.0.1:{port}."
+                    f"🟢 On — open https://{hostname}:8444/ on your phone (or just use "
+                    f"the Remote Hub page — https://{hostname}/ — if Security Vault or "
+                    f"YouTube Downloader are also live). Serving locally on 127.0.0.1:{port}."
                 ),
                 text_color=SUCCESS,
             )

@@ -1,31 +1,50 @@
 # Z's Multi Tool - dependencies
 # Generated with pipreqs (scans actual imports) + corrected against
 # `pip show` output for the packages pipreqs guessed instead of detecting locally.
+#
+# Minimum versions instead of exact pins so pip can resolve whatever
+# prebuilt wheel is actually available for a given Python version / OS
+# (exact "==" pins can fail to install entirely if that specific patch
+# release has no wheel for the recipient's Python version).
 
-cryptography==48.0.0
-customtkinter==6.0.0
-mutagen==1.47.0
-numpy==2.5.1
-packaging==26.0
-pillow==12.3.0
-psutil==7.2.2
-pygame==2.6.1
-pyperclip==1.11.0
-pypresence==4.6.1
-pystray==0.19.5
-python-nmap==0.7.1
-python-vlc==3.0.21203
-requests==2.34.2
-scapy==2.7.0
-sounddevice==0.5.5
-soundfile==0.14.0
-tkinterdnd2==0.6.2
-watchdog==6.0.0
-yt-dlp==2026.6.9
+cryptography>=48.0.0
+customtkinter>=6.0.0
+mutagen>=1.47.0
+numpy>=2.5.1
+packaging>=26.0
+pillow>=12.3.0
+psutil>=7.2.2
+pyperclip>=1.11.0
+pypresence>=4.6.1
+pystray>=0.19.5
+python-nmap>=0.7.1
+python-vlc>=3.0.21203
+requests>=2.34.2
+scapy>=2.7.0
+sounddevice>=0.5.5
+soundfile>=0.14.0
+tkinterdnd2>=0.6.2
+watchdog>=6.0.0
+yt-dlp>=2026.6.9
+
+# pygame is no longer required — music_player now runs on python-vlc
+# instead (see modules/music_player/player.py). It's still optionally used
+# by modules/file_viewer/editors.py for an audio preview, but that code
+# already checks pygame_available() and degrades gracefully if it's
+# missing, so it's left out here rather than reintroducing the Python
+# 3.14 compatibility problem this whole change was meant to fix. Anyone
+# who wants that specific preview feature and is on a Python version
+# pygame supports can add it manually: pip install pygame
+
+# Windows-only: powers "creation time" editing in the metadata_editor module
+# (core/services + modules already guard this with try/except ImportError,
+# so it's not fatal if missing, but installing it means that feature works
+# out of the box for recipients instead of silently disabling itself).
+pywin32>=312; sys_platform == "win32"
 
 # ---
 #
-# NOT on PyPI, required separately:
+# NOT on PyPI, required separately on the machine actually running the app:
 #   - VLC (media player itself — python-vlc just talks to a real VLC install
 #     or libvlc.dll + plugins folder sitting next to the app)
 #   - Npcap + Nmap (system tools required by scapy / python-nmap for the

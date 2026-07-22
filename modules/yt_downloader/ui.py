@@ -75,6 +75,11 @@ class YTDownloaderPage(ctk.CTkFrame):
         self._downloading = False
         self._remote_job_ids_seen = set()
 
+        # Shared with Music Player / Security Vault's Settings tabs — same
+        # tailnet connection, same TailscaleService instance either way.
+        self.tailscale = manager.container.tailscale_service
+        self._phone_poll_job = None
+
         # Shared with the browser extension: a loopback server that lets a
         # "Send to Downloader" button on a YouTube tab queue a download
         # here. Created once and stashed on the manager (same lazy pattern
@@ -95,6 +100,7 @@ class YTDownloaderPage(ctk.CTkFrame):
             self._start_remote_access()
 
         self._refresh_remote_status()
+        self._refresh_phone_status()
 
     # ── Build ──────────────────────────────────────────────────────────────────
 
@@ -104,6 +110,7 @@ class YTDownloaderPage(ctk.CTkFrame):
         self._build_options_row()
         self._build_paths_row()
         self._build_remote_row()
+        self._build_phone_row()
         self._build_log()
 
     def _build_header(self):
@@ -274,6 +281,129 @@ class YTDownloaderPage(ctk.CTkFrame):
             text_color=MUTED, font=("Segoe UI", 11), anchor="w", justify="left", wraplength=760,
         ).pack(fill="x", padx=10, pady=(0, 10))
 
+    def _build_phone_row(self):
+        panel = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
+        panel.pack(fill="x", padx=12, pady=(0, 4))
+
+        top = ctk.CTkFrame(panel, fg_color="transparent")
+        top.pack(fill="x", padx=10, pady=(10, 4))
+
+        ctk.CTkLabel(top, text="📱  Phone access (Tailscale)",
+                     font=("Segoe UI", 13, "bold"), text_color=TEXT).pack(side="left")
+
+        self._phone_status_lbl = ctk.CTkLabel(top, text="⚪ Off", text_color=MUTED)
+        self._phone_status_lbl.pack(side="right")
+
+        row = ctk.CTkFrame(panel, fg_color="transparent")
+        row.pack(fill="x", padx=10, pady=(0, 6))
+
+        self._phone_start_btn = _make_btn(row, "▶ Start Phone Access", self._start_phone_access,
+                                           **_BTN_ACCENT, width=170)
+        self._phone_start_btn.pack(side="left")
+
+        self._phone_stop_btn = _make_btn(row, "■ Stop", self._stop_phone_access,
+                                          **_BTN_DANGER, width=90)
+        self._phone_stop_btn.pack(side="left", padx=(8, 0))
+
+        ctk.CTkLabel(row, text="Access code (optional)", text_color=MUTED,
+                     font=("Segoe UI", 12)).pack(side="left", padx=(20, 6))
+        self._access_code_entry = ctk.CTkEntry(
+            row, width=110, show="•", fg_color=PANEL_2, text_color=TEXT,
+            border_color=PANEL_2, corner_radius=8)
+        self._access_code_entry.pack(side="left")
+
+        ctk.CTkLabel(
+            panel,
+            text="Exposes this same downloader to your phone over your own Tailscale "
+                 "network — reachable only from devices signed into your tailnet, never "
+                 "the open internet. Uses the same local port as the browser extension "
+                 "above; starting this will start that server too if it isn't already on. "
+                 "An access code is optional — if set, it's required to queue a download "
+                 "from the mobile page (and from the browser extension, since they share "
+                 "this same endpoint) but not to view download status.",
+            text_color=MUTED, font=("Segoe UI", 11), anchor="w", justify="left", wraplength=760,
+        ).pack(fill="x", padx=10, pady=(0, 10))
+
+    def _current_access_code(self):
+        code = self._access_code_entry.get().strip()
+        self.web_server.access_code = code
+        return code
+
+    def _start_phone_access(self):
+        self._current_access_code()
+        self._save_settings()
+
+        status = self.tailscale.get_status()
+        if not status["installed"]:
+            from tkinter import messagebox
+            messagebox.showwarning("Tailscale not installed", "Install Tailscale first "
+                                    "(see the Security Vault or Music Player Settings tab).")
+            return
+        if not status["running"]:
+            from tkinter import messagebox
+            if not messagebox.askyesno(
+                "Not connected",
+                "You're not connected to Tailscale yet. Connect now, then start phone access?",
+            ):
+                return
+            cfg = self.tailscale.load_config()
+            self.tailscale.connect(
+                hostname=cfg.get("hostname") or None,
+                auth_key=cfg.get("auth_key") or None,
+                accept_routes=cfg.get("accept_routes", True),
+            )
+
+        self._phone_start_btn.configure(state="disabled", text="Starting…")
+
+        def work():
+            port = self._current_remote_port()
+            ok, msg = (True, "already running") if self.web_server.is_running() else self.web_server.start(port)
+            if ok:
+                ok2, msg2 = self.tailscale.enable_app_serve("yt", port)
+                if not ok2:
+                    ok, msg = ok2, msg2
+            self.after(0, lambda: self._after_start_phone_access(ok, msg))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _after_start_phone_access(self, ok, msg):
+        self._phone_start_btn.configure(state="normal", text="▶ Start Phone Access")
+        if not ok:
+            from tkinter import messagebox
+            messagebox.showerror("Couldn't start phone access", msg)
+        self._refresh_phone_status()
+        self._refresh_remote_status()
+
+    def _stop_phone_access(self):
+        self.tailscale.disable_app_serve("yt")
+        self._refresh_phone_status()
+
+    def _refresh_phone_status(self):
+        if self._phone_poll_job:
+            try:
+                self.after_cancel(self._phone_poll_job)
+            except Exception:
+                pass
+
+        def work():
+            status = self.tailscale.get_status()
+            live = status["running"] and self.tailscale.is_app_serving("yt")
+            self.after(0, lambda: self._apply_phone_status(status, live))
+
+        threading.Thread(target=work, daemon=True).start()
+        self._phone_poll_job = self.after(4000, self._refresh_phone_status)
+
+    def _apply_phone_status(self, status, live):
+        if not self.winfo_exists():
+            return
+        if live:
+            hostname = status.get("hostname") or "this-device"
+            self._phone_status_lbl.configure(
+                text=f"🟢 https://{hostname}:8445/", text_color=SUCCESS
+            )
+        else:
+            self._phone_status_lbl.configure(text="⚪ Off", text_color=MUTED)
+
     def _build_log(self):
         panel = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
         panel.pack(fill="x", expand=False, padx=12, pady=(0, 12))
@@ -311,6 +441,8 @@ class YTDownloaderPage(ctk.CTkFrame):
                 self._quality_var.set(s.get("quality", "192"))
                 self._remote_port_entry.insert(0, str(s.get("remote_port", DEFAULT_REMOTE_PORT)))
                 self._autostart_var.set(bool(s.get("auto_start_remote", False)))
+                self._access_code_entry.insert(0, s.get("access_code", ""))
+                self.web_server.access_code = s.get("access_code", "")
             else:
                 self._set_entry(self._out_entry, os.path.expanduser("~"))
                 self._remote_port_entry.insert(0, str(DEFAULT_REMOTE_PORT))
@@ -330,6 +462,7 @@ class YTDownloaderPage(ctk.CTkFrame):
                     "quality":           self._quality_var.get(),
                     "remote_port":       self._current_remote_port(),
                     "auto_start_remote": bool(self._autostart_var.get()),
+                    "access_code":       self._access_code_entry.get().strip(),
                 }, f, indent=2)
         except Exception:
             pass

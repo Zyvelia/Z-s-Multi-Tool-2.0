@@ -2,7 +2,16 @@
 
 The Security Vault's Settings tab can expose a mobile-friendly view of your
 vault + authenticator codes to your phone, reachable only from devices on
-your own Tailscale network (tailnet). Setup:
+your own Tailscale network (tailnet). Music Player and YouTube Downloader
+each have the same kind of Settings/panel, and all three can now be live
+at the same time — Security Vault is always on port 8443, Music Player on
+8444, YouTube Downloader on 8445 (see APP_HTTPS_PORTS in
+core/services/tailscale_service.py). There's also a new **Remote Hub**
+module in the catalog: one page with a single "Go Live" button that brings
+all three up at once and gives you one URL — `https://<this-device>.<tailnet>/`
+— with buttons linking to whichever apps are currently live. That's the
+easiest way to use this from your phone day-to-day; the steps below are
+for setting each app up individually the first time. Setup:
 
 1. **Install Tailscale** on this device (Settings tab → "Install Tailscale…")
    and on your phone, and sign both into the same tailnet.
@@ -22,8 +31,9 @@ your own Tailscale network (tailnet). Setup:
    **Start Remote Access** under "Remote access (view on phone)."
 
 4. On your phone (signed into the same tailnet), open
-   `https://<this-device>.<tailnet>/` and log in with your vault's master
-   password.
+   `https://<this-device>.<tailnet>:8443/` — or just use the Remote Hub's
+   `https://<this-device>.<tailnet>/` if you've also set up the other
+   apps — and log in with your vault's master password.
 
 ## Troubleshooting
 
