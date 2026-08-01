@@ -78,12 +78,17 @@ class AudioTagsTab(ctk.CTkFrame):
         _make_btn(top, "Batch Edit...", self._open_batch_window, width=120).grid(
             row=0, column=2, padx=10, pady=10)
 
-        fields_panel = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
+        # Scrollable since the field list has grown well past what fits
+        # in a fixed-height panel on most screens.
+        fields_panel = ctk.CTkScrollableFrame(
+            self, fg_color=PANEL, corner_radius=10,
+            scrollbar_button_color=PANEL_2, scrollbar_button_hover_color=PANEL_HOVER,
+        )
         fields_panel.grid(row=1, column=0, sticky="nsew", padx=(2, 6), pady=2)
         fields_panel.grid_columnconfigure(1, weight=1)
 
         for i, (key, label) in enumerate(TAG_FIELDS):
-            ctk.CTkLabel(fields_panel, text=label, width=100, anchor="w", text_color=TEXT).grid(
+            ctk.CTkLabel(fields_panel, text=label, width=140, anchor="w", text_color=TEXT).grid(
                 row=i, column=0, padx=(14, 6), pady=8, sticky="w")
             var = ctk.StringVar()
             entry = ctk.CTkEntry(fields_panel, fg_color=PANEL_2, border_color=PANEL_2, textvariable=var)
