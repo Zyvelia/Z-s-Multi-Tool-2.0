@@ -46,19 +46,29 @@ try {
         Write-Host "[download_vlc] $zipName already cached, skipping download."
     }
 
+    # NOTE: the zip is named "vlc-X.Y.Z-win64.zip" but the folder INSIDE
+    # it is just "vlc-X.Y.Z" - no "-win64" suffix. Assuming the extracted
+    # folder name matches the zip filename (as this used to) silently
+    # looks in a path that doesn't exist. Instead, extract into its own
+    # per-zip subfolder (so re-runs can still skip a repeat extract) and
+    # search for libvlc.dll wherever VideoLAN actually put it - this
+    # keeps working even if they change the internal layout again.
     $extractRoot = Join-Path $Destination ([IO.Path]::GetFileNameWithoutExtension($zipName))
 
     if (-not (Test-Path $extractRoot)) {
         Write-Host "[download_vlc] Extracting..."
-        Expand-Archive -Path $zipPath -DestinationPath $Destination -Force
+        Expand-Archive -Path $zipPath -DestinationPath $extractRoot -Force
     }
 
-    # The zip contains one top-level folder (e.g. vlc-3.0.20\) with
-    # libvlc.dll, libvlccore.dll, and plugins\ directly inside it.
-    if (-not (Test-Path (Join-Path $extractRoot "libvlc.dll"))) {
-        Write-Host "[download_vlc] Extracted, but libvlc.dll wasn't where expected: $extractRoot"
+    $libvlc = Get-ChildItem -Path $extractRoot -Filter "libvlc.dll" -Recurse -File -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+
+    if (-not $libvlc) {
+        Write-Host "[download_vlc] Extracted, but couldn't find libvlc.dll anywhere under: $extractRoot"
         exit 1
     }
+
+    $extractRoot = $libvlc.DirectoryName
 
     Write-Host "[download_vlc] Ready at $extractRoot"
     # This is the line build.bat actually parses - keep it last and
