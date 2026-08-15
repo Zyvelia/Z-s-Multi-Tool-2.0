@@ -66,12 +66,14 @@ python -m PyInstaller ^
     --noconfirm ^
     --onefile ^
     --windowed ^
+    --uac-admin ^
     --name "Zs Multi Tool" ^
     --icon "assets\icon.ico" ^
     --collect-all customtkinter ^
     --collect-all mutagen ^
     --collect-all PIL ^
     --collect-all pystray ^
+    --collect-all qrcode ^
     --collect-data pypresence ^
     --hidden-import "PIL._tkinter_finder" ^
     --hidden-import "scapy.all" ^
@@ -121,6 +123,24 @@ REM if no install was found - lets the build still work on a machine with
 REM no VLC installed system-wide at all.
 if not defined VLC_DIR if exist "%~dp0libvlc.dll" if exist "%~dp0plugins" set "VLC_DIR=%~dp0."
 
+REM Last resort: auto-download the official VLC win64 portable build via
+REM download_vlc.ps1 (see that file for details) so a fresh checkout on a
+REM machine with no VLC installed can still produce a self-contained dist\.
+if not defined VLC_DIR (
+    echo [INFO] No local VLC install found - attempting to auto-download the VLC runtime...
+    set "VLC_DOWNLOAD_LINE="
+    for /f "usebackq delims=" %%L in (`powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0download_vlc.ps1" -Destination "%~dp0.vlc_cache" 2^>^&1`) do (
+        echo %%L
+        echo %%L | findstr /b "VLC_DIR=" >nul && set "VLC_DOWNLOAD_LINE=%%L"
+    )
+    if defined VLC_DOWNLOAD_LINE (
+        for /f "tokens=1* delims==" %%A in ("!VLC_DOWNLOAD_LINE!") do set "VLC_DIR=%%B"
+        echo [INFO] Auto-downloaded VLC runtime to "!VLC_DIR!"
+    ) else (
+        echo [WARN] Auto-download of VLC failed - see messages above.
+    )
+)
+
 if defined VLC_DIR (
     echo [INFO] Found VLC at "%VLC_DIR%" - copying libvlc.dll, libvlccore.dll, plugins\...
     copy /y "%VLC_DIR%\libvlc.dll" "dist\" >nul
@@ -129,8 +149,11 @@ if defined VLC_DIR (
     xcopy "%VLC_DIR%\plugins" "dist\plugins\" /e /i /q >nul
     echo [INFO] VLC runtime bundled into dist\.
 ) else (
-    echo [WARN] No VLC runtime found. media_center and music_player will
+    echo [WARN] No VLC runtime found and auto-download failed ^(check your
+    echo        internet connection^). media_center and music_player will
     echo        fail with "Could not find module libvlc.dll" until you either:
+    echo          - re-run this build with an internet connection so
+    echo            download_vlc.ps1 can fetch it automatically, or
     echo          - drop libvlc.dll, libvlccore.dll, and a plugins\ folder
     echo            straight into this project's root folder ^(next to
     echo            build.bat^) and re-run this build, or
@@ -157,6 +180,10 @@ echo    switched from pygame to VLC so it isn't blocked by pygame lagging
 echo    behind on new Python releases).
 echo  - scapy/nmap (network_auditor module) need Npcap and Nmap installed
 echo    on any machine that runs the exe, PyInstaller can't bundle those.
+echo    If you compile install.iss, the installer will now auto-download
+echo    both and launch their installers for you - but note neither one's
+echo    free edition supports silent installs, so you'll still click
+echo    through those two installer windows once.
 echo  - Minimizing the window sends it to the system tray (hidden icons
 echo    area). The X button still fully quits the app.
 echo.

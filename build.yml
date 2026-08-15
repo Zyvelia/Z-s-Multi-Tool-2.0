@@ -1,0 +1,94 @@
+name: Build
+
+# Builds the PyInstaller exe on every push/PR so a broken build gets caught
+# in CI instead of on your machine. On a version tag (e.g. "v3.5.0") it also
+# compiles the Inno Setup installer and attaches both to a GitHub Release.
+
+on:
+  push:
+    branches: ["main"]
+    tags: ["v*"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch: {}
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # build.bat is Windows-only (PyInstaller --uac-admin, VLC bundling,
+    # Inno Setup), so this has to run on a Windows runner.
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          # Match this to whatever Python version you build with locally.
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # build.bat installs PyInstaller itself if missing, refreshes
+      # requirements-lock.txt, runs PyInstaller, renames the exe, and
+      # auto-downloads a VLC runtime to bundle next to it.
+      #
+      # "< NUL" feeds an empty/closed stdin to the whole script so its
+      # `pause` calls (including the one at the very end on success)
+      # return immediately instead of hanging the job forever waiting
+      # for a keypress that a CI runner can never send.
+      - name: Run build.bat
+        shell: cmd
+        run: build.bat < NUL
+
+      - name: Verify exe was produced
+        shell: cmd
+        run: |
+          if not exist "dist\Z's Multi Tool.exe" (
+            echo Build did not produce dist\Z's Multi Tool.exe
+            exit /b 1
+          )
+
+      - name: Upload exe artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZsMultiTool-exe
+          path: dist/**
+          if-no-files-found: error
+
+      # ---- Installer + release (tags only) ----
+
+      - name: Install Inno Setup
+        if: startsWith(github.ref, 'refs/tags/')
+        run: choco install innosetup --no-progress -y
+
+      - name: Compile installer
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: cmd
+        run: '"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" install.iss'
+
+      - name: Upload installer artifact
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZsMultiTool-Installer
+          path: installer_output/*.exe
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            installer_output/*.exe
+          generate_release_notes: true

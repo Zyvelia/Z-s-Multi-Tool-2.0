@@ -359,6 +359,15 @@ class VLCMusicEngine:
         # matches the old engine's toggle-on-second-press behavior.
         self.player.pause()
 
+    def seek(self, seconds):
+        """Jumps to an absolute position (in seconds) in the current track.
+        Used by the mobile app's "Control PC" mode, where seeking has to
+        go through libVLC directly rather than a local player instance."""
+        try:
+            self.player.set_time(int(max(0, seconds) * 1000))
+        except Exception:
+            pass
+
     def stop(self):
         self.player.stop()
 

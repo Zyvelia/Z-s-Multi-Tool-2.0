@@ -3,11 +3,11 @@ news.py
 Headline fetching helper.
 
 Primary source: Google News RSS (https://news.google.com/rss) — real, live
-headlines, no API key required. This mirrors the "no key needed" approach
-used for weather.py (Open-Meteo).
+headlines, no API key required.
 
 Optional source: NewsAPI (https://newsapi.org) — used automatically instead
-of Google News RSS if a NEWSAPI_KEY environment variable is set.
+of Google News RSS if a key is available, either added through the API Keys
+tab (provider "newsapi") or set via a NEWSAPI_KEY environment variable.
 
 If both sources fail (e.g. no internet access), a small offline notice is
 returned instead of raising, so the UI always has something to display.
@@ -19,6 +19,8 @@ import xml.etree.ElementTree as ET
 from urllib.parse import quote
 
 import requests
+
+from . import crypto_store
 
 NEWSAPI_URL = "https://newsapi.org/v2/top-headlines"
 GOOGLE_NEWS_TOP_URL = "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en"
@@ -40,6 +42,11 @@ class NewsError(Exception):
 
 
 def _get_api_key():
+    stored = crypto_store.get_keys_for_provider("newsapi")
+    if stored:
+        value = crypto_store.get_raw_value(stored[0]["id"])
+        if value:
+            return value
     return os.environ.get("NEWSAPI_KEY", "").strip()
 
 

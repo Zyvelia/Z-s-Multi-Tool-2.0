@@ -36,6 +36,8 @@
 #     opened.
 
 import json
+import mimetypes
+import os
 import re
 import threading
 import time
@@ -56,6 +58,8 @@ MAX_JOBS_KEPT = 25
 _YOUTUBE_HOST_RE = re.compile(
     r"^(https?://)?(www\.|m\.|music\.)?(youtube\.com|youtu\.be)/", re.IGNORECASE
 )
+
+_JOB_FILE_RE = re.compile(r"^/api/jobs/([^/]+)/download/(\d+)$")
 
 
 def is_youtube_url(url: str) -> bool:
@@ -132,6 +136,62 @@ class _Handler(BaseHTTPRequestHandler):
         sent = (self.headers.get("X-Access-Code") or "").strip()
         return sent == required
 
+    def _serve_job_file(self, srv, job_id, index):
+        path = srv.get_job_file_path(job_id, index)
+        if path is None:
+            self._send_json(404, {"ok": False, "error": "file not found — job incomplete, index out of range, or the file has since moved"})
+            return
+
+        file_size = os.path.getsize(path)
+        content_type = mimetypes.guess_type(path)[0] or "application/octet-stream"
+        range_header = self.headers.get("Range")
+
+        start, end = 0, file_size - 1
+        status = 200
+        if range_header and range_header.startswith("bytes="):
+            # Supports the single-range case (bytes=START-END or
+            # bytes=START-), which covers Safari/iOS's download and
+            # scrub-preview requests — same pattern as the music server's
+            # streaming endpoint.
+            try:
+                range_spec = range_header.split("=", 1)[1]
+                start_str, _, end_str = range_spec.partition("-")
+                start = int(start_str) if start_str else 0
+                end = int(end_str) if end_str else file_size - 1
+                end = min(end, file_size - 1)
+                status = 206
+            except (ValueError, IndexError):
+                start, end = 0, file_size - 1
+                status = 200
+
+        length = end - start + 1
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(length))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header(
+            "Content-Disposition",
+            f'attachment; filename="{os.path.basename(path)}"',
+        )
+        if status == 206:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
+        self._cors_headers()
+        self.end_headers()
+
+        try:
+            with open(path, "rb") as f:
+                f.seek(start)
+                remaining = length
+                chunk_size = 256 * 1024
+                while remaining > 0:
+                    chunk = f.read(min(chunk_size, remaining))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # client cancelled/disconnected mid-transfer — not an error
+
     def do_GET(self):
         path = urlsplit(self.path).path
         srv = self._srv()
@@ -148,6 +208,9 @@ class _Handler(BaseHTTPRequestHandler):
             })
         elif path == "/api/jobs":
             self._send_json(200, {"ok": True, "jobs": srv.list_jobs()})
+        elif _JOB_FILE_RE.match(path):
+            m = _JOB_FILE_RE.match(path)
+            self._serve_job_file(srv, m.group(1), int(m.group(2)))
         elif path.startswith("/api/jobs/"):
             job_id = path[len("/api/jobs/"):]
             job = srv.get_job(job_id)
@@ -267,11 +330,36 @@ class YTWebServer:
 
     def list_jobs(self):
         with self._jobs_lock:
-            return [self._jobs[jid] for jid in self._job_order]
+            return [self._public_job(self._jobs[jid]) for jid in self._job_order]
 
     def get_job(self, job_id):
         with self._jobs_lock:
-            return self._jobs.get(job_id)
+            job = self._jobs.get(job_id)
+            return self._public_job(job) if job else None
+
+    @staticmethod
+    def _public_job(job):
+        # Strip local filesystem paths before this goes out over the API —
+        # the phone only needs a name/size to show and an index to request
+        # via GET /api/jobs/<id>/download/<index>.
+        j = dict(job)
+        if j.get("files"):
+            j["files"] = [{"name": f["name"], "size": f["size"]} for f in j["files"]]
+        return j
+
+    def get_job_file_path(self, job_id, index):
+        """Returns the absolute on-disk path for a completed job's file at
+        `index`, or None if the job/index is invalid or the file's gone
+        (e.g. moved/deleted since the download finished)."""
+        with self._jobs_lock:
+            job = self._jobs.get(job_id)
+            if job is None or job.get("status") != "done":
+                return None
+            files = job.get("files") or []
+            if index < 0 or index >= len(files):
+                return None
+            path = files[index]["path"]
+        return path if os.path.isfile(path) else None
 
     def queue_download(self, url, fmt, dl_type, quality):
         job_id = uuid.uuid4().hex[:12]
@@ -314,8 +402,6 @@ class YTWebServer:
         self._notify(job_copy)
 
     def _run_job(self, job_id):
-        import os
-
         with self._jobs_lock:
             job = self._jobs.get(job_id)
             if job is None:
@@ -341,6 +427,21 @@ class YTWebServer:
 
         self._update_job(job_id, status="downloading", message="Starting…")
 
+        result_paths = []
+
+        def postprocessor_hook(d):
+            # Fires after each postprocessor (audio extraction, video
+            # merge, etc.) finishes — d['info_dict']['filepath'] is the
+            # actual final file on disk, which differs from the initial
+            # download filename for mp3 (extension changes) and for
+            # merged mp4s. Accumulates one entry per file, so a playlist
+            # job ends up with every track/video it produced.
+            if d.get("status") == "finished":
+                info = d.get("info_dict") or {}
+                fp = info.get("filepath") or info.get("_filename")
+                if fp and fp not in result_paths:
+                    result_paths.append(fp)
+
         def progress_hook(d):
             if d.get("status") == "downloading":
                 pct_str = (d.get("_percent_str") or "").replace("\x1b[0K", "").strip()
@@ -360,7 +461,14 @@ class YTWebServer:
             outtmpl = os.path.join(output_dir, "%(title)s.%(ext)s")
 
         if cookie:
-            player_clients = ["web", "mweb", "tv"]
+            # "tv" used to be included here to dodge an older 403 issue,
+            # but YouTube is now running an experiment that serves
+            # DRM-only formats on the tv (TVHTML5) client for some
+            # accounts — yt-dlp raises "This video is DRM protected"
+            # even though the video itself is fine. See
+            # https://github.com/yt-dlp/yt-dlp/issues/12563. Dropping
+            # "tv" avoids it; "web" + "mweb" both support cookies.
+            player_clients = ["web", "mweb"]
         else:
             player_clients = ["default", "android", "ios"]
 
@@ -374,6 +482,7 @@ class YTWebServer:
             "fragment_retries": 10,
             "ignoreerrors": dl_type == "playlist",
             "progress_hooks": [progress_hook],
+            "postprocessor_hooks": [postprocessor_hook],
             "extractor_args": {"youtube": {"player_client": player_clients}},
         }
         if ffmpeg_dir:
@@ -408,7 +517,12 @@ class YTWebServer:
             if ret:
                 self._update_job(job_id, status="error", message="Finished with errors — see the app's download log.")
             else:
-                self._update_job(job_id, status="done", percent=1.0, message="Done")
+                files = [
+                    {"name": os.path.basename(p), "path": p, "size": os.path.getsize(p)}
+                    for p in result_paths
+                    if os.path.isfile(p)
+                ]
+                self._update_job(job_id, status="done", percent=1.0, message="Done", files=files)
         except Exception as e:
             self._update_job(job_id, status="error", message=str(e))
 

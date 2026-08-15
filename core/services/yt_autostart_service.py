@@ -53,6 +53,20 @@ class YTAutoStartService:
             # where the rest of the app already expects to find it —
             # YTDownloaderPage on first open, App.quit_app on shutdown.
             self.page_manager.yt_web_server = web_server
+
+            # See the matching comment in MusicAutoStartService — starting
+            # only the loopback server here doesn't guarantee the
+            # Tailscale HTTPS mapping for it is still in place. Re-apply
+            # it (idempotent) if Tailscale is already running; never
+            # calls tailscale.connect() itself.
+            tailscale = getattr(self.page_manager.container, "tailscale_service", None)
+            if tailscale is not None:
+                try:
+                    status = tailscale.get_status()
+                    if status.get("running"):
+                        tailscale.enable_app_serve("yt", port)
+                except Exception as e:
+                    print(f"[YTAutoStartService] Couldn't re-apply Tailscale serve mapping: {e}")
         except Exception as e:
             print(f"[YTAutoStartService] Couldn't auto-start YouTube Downloader server: {e}")
 

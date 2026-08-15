@@ -34,7 +34,6 @@ DEFAULT_DATA = {
         "country": "us",
         "page_size": 15,
         "refresh_interval_minutes": 0,   # 0 = manual refresh only
-        "temp_unit": "C",                # "C" or "F"
     },
 }
 

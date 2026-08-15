@@ -37,6 +37,14 @@ class TrayIcon:
         if self._icon is not None:
             return  # already showing
 
+        # Minimizing to tray is the "I'm walking away" signal — lock the
+        # vault immediately rather than relying on the idle timeout, so a
+        # restored window never comes back showing unlocked passwords.
+        try:
+            self.app.auth_service.lock()
+        except Exception:
+            pass
+
         self.app.withdraw()
 
         image = Image.open(paths.resource_path("assets", "icon.ico"))
@@ -84,3 +92,14 @@ class TrayIcon:
         self.app.lift()
         self.app.focus_force()
         self.app.attributes("-alpha", 1)
+
+        # Restoring just deiconifies the same window/page — it never goes
+        # back through page_manager.show_page(), so nothing would otherwise
+        # re-check auth state. Give whatever page is currently on screen a
+        # chance to re-validate itself (e.g. the vault re-locking).
+        current = getattr(self.app.page_manager, "current", None)
+        if current is not None and hasattr(current, "on_show"):
+            try:
+                current.on_show()
+            except Exception:
+                pass

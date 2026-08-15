@@ -19,6 +19,7 @@ pypresence>=4.6.1
 pystray>=0.19.5
 python-nmap>=0.7.1
 python-vlc>=3.0.21203
+qrcode>=8.2
 requests>=2.34.2
 scapy>=2.7.0
 sounddevice>=0.5.5

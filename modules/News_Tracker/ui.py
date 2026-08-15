@@ -1,16 +1,20 @@
 """
 ui.py
-CustomTkinter UI for the Weather & News Tracker plugin.
+CustomTkinter UI for the Game Stats & News plugin.
 
 Tabs:
-    Home       -> Weather panel (left) + top headlines (right), each
-                  headline can be "kept" (bookmarked) with one click.
+    Home       -> Top headlines, full width. Each headline can be
+                  "kept" (bookmarked) with one click.
     My Feeds   -> User-defined keyword/topic feeds (e.g. "AI", "F1",
                   "hometown team") that fetch their own headlines.
+    Game Stats -> Look up a player's stats using a stored API key —
+                  built-in support for Fortnite and Steam, plus a
+                  generic path for any other game's REST API.
+    API Keys   -> Add, view (masked), and remove API keys. Keys are
+                  encrypted at rest via crypto_store.py.
     Saved      -> Every headline the user has kept, across all feeds.
-    Settings   -> Manage custom feeds, temperature unit, country,
-                  headline count, auto-refresh interval, and stored data
-                  (all persisted to disk via storage.py).
+    Settings   -> Manage custom feeds, country, headline count,
+                  auto-refresh interval, and stored data.
 
 API calls run on background threads so the UI never freezes; results are
 marshalled back to the main thread via `after()`.
@@ -23,9 +27,10 @@ from datetime import datetime
 import customtkinter as ctk
 from tkinter import messagebox
 
-from . import weather
 from . import news
 from . import storage
+from . import crypto_store
+from . import game_providers
 from core import theme
 
 REFRESH_INTERVAL_OPTIONS = {
@@ -36,17 +41,40 @@ REFRESH_INTERVAL_OPTIONS = {
     "Every hour": 60,
 }
 
+# Providers offered in the "Add API Key" form. Includes everything in
+# game_providers.PROVIDERS (used for actual game-stat lookups) plus
+# "newsapi", which isn't a game but reuses the same encrypted-key UI so
+# there's one consistent place to manage every key this plugin uses.
+KEY_PROVIDER_ORDER = ["fortnite", "steam", "clash_of_clans", "clash_royale", "brawl_stars", "newsapi", "custom"]
+KEY_PROVIDER_INFO = dict(game_providers.PROVIDERS)
+KEY_PROVIDER_INFO["newsapi"] = {
+    "name": "News (NewsAPI.org)",
+    "icon": "📰",
+    "id_label": None,
+    "key_help": "Optional — without a key, headlines come from Google News RSS automatically, no key required.",
+    "key_url": "https://newsapi.org/register",
+    "needs_extra": False,
+}
+
+# Providers selectable for an actual stats lookup (excludes "newsapi",
+# which isn't a game).
+GAME_PROVIDER_ORDER = ["fortnite", "steam", "clash_of_clans", "clash_royale", "brawl_stars", "custom"]
+
 
 class WeatherNewsUI(ctk.CTkFrame):
     def __init__(self, master, manager=None):
         super().__init__(master, fg_color=theme.BG)
         self.manager = manager
 
-        self._weather_data = None
         self._home_news_data = None
         self._feed_news_data = None
         self._active_feed_name = None
         self._auto_refresh_job = None
+
+        self._gs_key_options = []       # [{"id", "label", "provider", ...}]
+        self._gs_selected_key_id = None
+        self._add_key_provider_id = "fortnite"
+        self._add_key_value_visible = False
 
         self.settings = storage.get_settings()
 
@@ -58,17 +86,23 @@ class WeatherNewsUI(ctk.CTkFrame):
 
         self.tab_home = self.tabview.add("Home")
         self.tab_feeds = self.tabview.add("My Feeds")
+        self.tab_game_stats = self.tabview.add("Game Stats")
+        self.tab_api_keys = self.tabview.add("API Keys")
         self.tab_saved = self.tabview.add("Saved")
         self.tab_settings = self.tabview.add("Settings")
 
         self._build_home_tab()
         self._build_feeds_tab()
+        self._build_game_stats_tab()
+        self._build_api_keys_tab()
         self._build_saved_tab()
         self._build_settings_tab()
 
         # Initial load
         self.refresh_home()
         self._render_saved_tab()
+        self._render_api_keys_list()
+        self._refresh_game_stats_key_menu()
         self._schedule_auto_refresh()
 
     # ------------------------------------------------------------------
@@ -77,16 +111,15 @@ class WeatherNewsUI(ctk.CTkFrame):
 
     def _build_home_tab(self):
         tab = self.tab_home
-        tab.grid_rowconfigure(1, weight=1)
+        tab.grid_rowconfigure(2, weight=1)
         tab.grid_columnconfigure(0, weight=1)
-        tab.grid_columnconfigure(1, weight=1)
 
         header = ctk.CTkFrame(tab, fg_color="transparent")
-        header.grid(row=0, column=0, columnspan=2, sticky="ew", padx=5, pady=(5, 0))
+        header.grid(row=0, column=0, sticky="ew", padx=5, pady=(5, 0))
         header.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(
-            header, text="🌦️  Weather & News Tracker",
+            header, text="📰  Top Headlines",
             font=ctk.CTkFont(size=20, weight="bold")
         ).grid(row=0, column=0, sticky="w")
 
@@ -96,56 +129,30 @@ class WeatherNewsUI(ctk.CTkFrame):
         )
         self.last_updated_label.grid(row=0, column=1, sticky="e")
 
-        # Weather panel
-        panel = ctk.CTkFrame(tab)
-        panel.grid(row=1, column=0, sticky="nsew", padx=(0, 5), pady=10)
-        panel.grid_rowconfigure(1, weight=1)
-        panel.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(
-            panel, text="Weather", font=ctk.CTkFont(size=16, weight="bold")
-        ).grid(row=0, column=0, sticky="w", padx=15, pady=(15, 5))
-
-        self.weather_scroll = ctk.CTkScrollableFrame(panel, label_text="")
-        self.weather_scroll.grid(row=1, column=0, sticky="nsew", padx=10, pady=5)
-        self.weather_scroll.grid_columnconfigure(0, weight=1)
-
-        self.weather_status_label = ctk.CTkLabel(
-            self.weather_scroll, text="Loading weather…", justify="left", anchor="w"
-        )
-        self.weather_status_label.grid(row=0, column=0, sticky="ew", pady=10)
-
-        self.weather_refresh_btn = ctk.CTkButton(
-            panel, text="🔄 Refresh Weather", command=self.refresh_weather
-        )
-        self.weather_refresh_btn.grid(row=2, column=0, sticky="ew", padx=15, pady=(5, 15))
-
-        # News panel
-        news_panel = ctk.CTkFrame(tab)
-        news_panel.grid(row=1, column=1, sticky="nsew", padx=(5, 0), pady=10)
-        news_panel.grid_rowconfigure(2, weight=1)
-        news_panel.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(
-            news_panel, text="Top Headlines", font=ctk.CTkFont(size=16, weight="bold")
-        ).grid(row=0, column=0, sticky="w", padx=15, pady=(15, 5))
-
-        search_row = ctk.CTkFrame(news_panel, fg_color="transparent")
-        search_row.grid(row=1, column=0, sticky="ew", padx=15, pady=(0, 5))
+        search_row = ctk.CTkFrame(tab, fg_color="transparent")
+        search_row.grid(row=1, column=0, sticky="ew", padx=5, pady=(10, 5))
         search_row.grid_columnconfigure(0, weight=1)
 
         self.news_search_entry = ctk.CTkEntry(
-            search_row, placeholder_text="Search headlines by keyword…"
+            search_row, placeholder_text="Search headlines by keyword…", height=36
         )
-        self.news_search_entry.grid(row=0, column=0, sticky="ew", padx=(0, 5))
+        self.news_search_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
         self.news_search_entry.bind("<Return>", lambda e: self.refresh_home())
 
         ctk.CTkButton(
-            search_row, text="Search", width=80, command=self.refresh_home
-        ).grid(row=0, column=1)
+            search_row, text="Search", width=90, height=36,
+            fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
+            command=self.refresh_home
+        ).grid(row=0, column=1, padx=(0, 8))
 
-        self.home_news_scroll = ctk.CTkScrollableFrame(news_panel, label_text="")
-        self.home_news_scroll.grid(row=2, column=0, sticky="nsew", padx=10, pady=5)
+        self.home_news_refresh_btn = ctk.CTkButton(
+            search_row, text="🔄 Refresh", width=100, height=36,
+            command=self.refresh_home
+        )
+        self.home_news_refresh_btn.grid(row=0, column=2)
+
+        self.home_news_scroll = ctk.CTkScrollableFrame(tab, label_text="", fg_color="transparent")
+        self.home_news_scroll.grid(row=2, column=0, sticky="nsew", padx=5, pady=(5, 5))
         self.home_news_scroll.grid_columnconfigure(0, weight=1)
 
         self.home_news_status_label = ctk.CTkLabel(
@@ -153,14 +160,7 @@ class WeatherNewsUI(ctk.CTkFrame):
         )
         self.home_news_status_label.grid(row=0, column=0, sticky="ew", pady=10)
 
-        self.home_news_refresh_btn = ctk.CTkButton(
-            news_panel, text="🔄 Refresh News", command=self.refresh_home
-        )
-        self.home_news_refresh_btn.grid(row=3, column=0, sticky="ew", padx=15, pady=(5, 15))
-
     def refresh_home(self):
-        """Refresh both weather and home headlines."""
-        self.refresh_weather()
         query = self.news_search_entry.get().strip() or None
         self._fetch_news_into(
             query=query,
@@ -169,89 +169,10 @@ class WeatherNewsUI(ctk.CTkFrame):
             on_loaded=self._on_home_news_loaded,
         )
 
-    def refresh_weather(self):
-        self.weather_refresh_btn.configure(state="disabled", text="Loading…")
-        self._clear_frame(self.weather_scroll)
-        ctk.CTkLabel(self.weather_scroll, text="Loading weather…").grid(row=0, column=0, pady=10)
-
-        unit = self.settings.get("temp_unit", "C")
-
-        def worker():
-            try:
-                data = weather.get_weather(unit=unit)
-                error = None
-            except weather.WeatherError as exc:
-                data = None
-                error = str(exc)
-            except Exception as exc:  # noqa: BLE001 - surface any unexpected error safely
-                data = None
-                error = f"Unexpected error: {exc}"
-            self.after(0, lambda: self._on_weather_loaded(data, error))
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _on_weather_loaded(self, data, error):
-        self.weather_refresh_btn.configure(state="normal", text="🔄 Refresh Weather")
-        self._clear_frame(self.weather_scroll)
-
-        if error or not data:
-            ctk.CTkLabel(
-                self.weather_scroll,
-                text=f"⚠️ Could not load weather.\n{error or 'Unknown error'}",
-                text_color="#e06c75", justify="left"
-            ).grid(row=0, column=0, sticky="w", pady=10)
-            self._touch_timestamp()
-            return
-
-        self._weather_data = data
-        unit_label = data.get("unit", "C")
-        row = 0
-
-        ctk.CTkLabel(
-            self.weather_scroll, text=f"📍 {data['location']}",
-            font=ctk.CTkFont(size=13, weight="bold"), anchor="w", justify="left"
-        ).grid(row=row, column=0, sticky="w", pady=(0, 8)); row += 1
-
-        ctk.CTkLabel(
-            self.weather_scroll,
-            text=f"{data['icon']}  {data['temperature']}°{unit_label} — {data['condition']}",
-            font=ctk.CTkFont(size=22, weight="bold"), anchor="w", justify="left"
-        ).grid(row=row, column=0, sticky="w", pady=(0, 4)); row += 1
-
-        wind_unit = "mph" if unit_label == "F" else "km/h"
-        ctk.CTkLabel(
-            self.weather_scroll, text=f"💨 Wind: {data['windspeed']} {wind_unit}",
-            anchor="w", justify="left"
-        ).grid(row=row, column=0, sticky="w", pady=(0, 12)); row += 1
-
-        if data.get("forecast"):
-            ctk.CTkLabel(
-                self.weather_scroll, text="Upcoming",
-                font=ctk.CTkFont(size=13, weight="bold"), anchor="w"
-            ).grid(row=row, column=0, sticky="w", pady=(0, 4)); row += 1
-
-            for item in data["forecast"]:
-                frame = ctk.CTkFrame(self.weather_scroll, fg_color=theme.PANEL_2)
-                frame.grid(row=row, column=0, sticky="ew", pady=3)
-                frame.grid_columnconfigure(1, weight=1)
-
-                ctk.CTkLabel(frame, text=item["time"], width=60, anchor="w").grid(
-                    row=0, column=0, padx=(10, 5), pady=6
-                )
-                ctk.CTkLabel(
-                    frame, text=f"{item['icon']} {item['condition']}", anchor="w"
-                ).grid(row=0, column=1, sticky="w", pady=6)
-                ctk.CTkLabel(frame, text=f"{item['temp']}°{unit_label}", anchor="e", width=50).grid(
-                    row=0, column=2, padx=(5, 10), pady=6
-                )
-                row += 1
-
-        self._touch_timestamp()
-
     def _on_home_news_loaded(self, data, error):
         self._home_news_data = data
         self._render_headline_list(
-            data, error, self.home_news_scroll, self.home_news_refresh_btn, "🔄 Refresh News"
+            data, error, self.home_news_scroll, self.home_news_refresh_btn, "🔄 Refresh"
         )
         self._touch_timestamp()
 
@@ -269,7 +190,7 @@ class WeatherNewsUI(ctk.CTkFrame):
         top.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(
-            top, text="My Custom Feeds", font=ctk.CTkFont(size=16, weight="bold")
+            top, text="📌  My Custom Feeds", font=ctk.CTkFont(size=20, weight="bold")
         ).grid(row=0, column=0, sticky="w")
 
         ctk.CTkLabel(
@@ -277,7 +198,7 @@ class WeatherNewsUI(ctk.CTkFrame):
             text="Track any topic — a company, a hobby, a hometown team. Add feeds in Settings, "
                  "then pick one below to see the latest headlines.",
             text_color=theme.MUTED, justify="left", wraplength=700, anchor="w"
-        ).grid(row=1, column=0, sticky="ew", padx=5, pady=(2, 10))
+        ).grid(row=1, column=0, sticky="ew", padx=5, pady=(4, 10))
 
         self.feeds_body = ctk.CTkFrame(tab, fg_color="transparent")
         self.feeds_body.grid(row=2, column=0, sticky="nsew", padx=5, pady=(0, 5))
@@ -318,7 +239,7 @@ class WeatherNewsUI(ctk.CTkFrame):
         )
         self.feed_refresh_btn.grid(row=0, column=1, padx=(10, 0))
 
-        self.feed_news_scroll = ctk.CTkScrollableFrame(self.feeds_body, label_text="")
+        self.feed_news_scroll = ctk.CTkScrollableFrame(self.feeds_body, label_text="", fg_color="transparent")
         self.feed_news_scroll.grid(row=1, column=0, sticky="nsew")
         self.feed_news_scroll.grid_columnconfigure(0, weight=1)
 
@@ -348,6 +269,369 @@ class WeatherNewsUI(ctk.CTkFrame):
         )
 
     # ------------------------------------------------------------------
+    # GAME STATS TAB
+    # ------------------------------------------------------------------
+
+    def _build_game_stats_tab(self):
+        tab = self.tab_game_stats
+        tab.grid_rowconfigure(2, weight=1)
+        tab.grid_columnconfigure(0, weight=1)
+
+        header = ctk.CTkFrame(tab, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew", padx=5, pady=(5, 0))
+        ctk.CTkLabel(
+            header, text="🕹️  Game Stats", font=ctk.CTkFont(size=20, weight="bold")
+        ).grid(row=0, column=0, sticky="w")
+
+        # -- lookup bar -----------------------------------------------
+        bar = ctk.CTkFrame(tab, fg_color=theme.PANEL_2, corner_radius=10)
+        bar.grid(row=1, column=0, sticky="ew", padx=5, pady=(12, 10))
+        bar.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(bar, text="Key").grid(row=0, column=0, padx=(15, 8), pady=15)
+
+        self.gs_key_menu = ctk.CTkOptionMenu(
+            bar, values=["No API keys yet"], command=self._on_gs_key_selected, width=220
+        )
+        self.gs_key_menu.grid(row=0, column=1, sticky="w", pady=15)
+
+        self.gs_identifier_entry = ctk.CTkEntry(bar, placeholder_text="Player identifier", width=200)
+        self.gs_identifier_entry.grid(row=0, column=2, padx=(10, 10), pady=15)
+        self.gs_identifier_entry.bind("<Return>", lambda e: self._on_game_stats_lookup())
+
+        self.gs_lookup_btn = ctk.CTkButton(
+            bar, text="Look Up", width=100, fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
+            command=self._on_game_stats_lookup
+        )
+        self.gs_lookup_btn.grid(row=0, column=3, padx=(0, 15), pady=15)
+
+        # -- results ----------------------------------------------------
+        self.gs_results_scroll = ctk.CTkScrollableFrame(tab, label_text="", fg_color="transparent")
+        self.gs_results_scroll.grid(row=2, column=0, sticky="nsew", padx=5, pady=(0, 5))
+        self.gs_results_scroll.grid_columnconfigure(0, weight=1)
+
+        self._render_gs_placeholder(
+            "No API keys added yet. Head to the API Keys tab to add one — "
+            "Fortnite and Steam work out of the box, or add a custom API for any other game."
+        )
+
+    def _render_gs_placeholder(self, text):
+        self._clear_frame(self.gs_results_scroll)
+        ctk.CTkLabel(
+            self.gs_results_scroll, text=text, text_color=theme.MUTED,
+            justify="left", wraplength=700, anchor="w"
+        ).grid(row=0, column=0, sticky="ew", pady=20, padx=5)
+
+    def _refresh_game_stats_key_menu(self):
+        keys = [k for k in crypto_store.list_keys() if k["provider"] in GAME_PROVIDER_ORDER]
+        self._gs_key_options = keys
+
+        if not keys:
+            self.gs_key_menu.configure(values=["No API keys yet"], state="disabled")
+            self.gs_key_menu.set("No API keys yet")
+            self.gs_identifier_entry.configure(state="disabled")
+            self.gs_lookup_btn.configure(state="disabled")
+            self._gs_selected_key_id = None
+            return
+
+        labels = []
+        for k in keys:
+            info = game_providers.PROVIDERS.get(k["provider"], {})
+            icon = info.get("icon", "🔑")
+            name = info.get("name", k["provider"])
+            labels.append(f"{icon} {name} — {k['label']}")
+
+        self.gs_key_menu.configure(values=labels, state="normal")
+        self.gs_key_menu.set(labels[0])
+        self.gs_identifier_entry.configure(state="normal")
+        self.gs_lookup_btn.configure(state="normal")
+        self._gs_selected_key_id = keys[0]["id"]
+        self._update_gs_identifier_placeholder(keys[0]["provider"])
+
+    def _on_gs_key_selected(self, label):
+        for i, k in enumerate(self._gs_key_options):
+            info = game_providers.PROVIDERS.get(k["provider"], {})
+            candidate = f"{info.get('icon', '🔑')} {info.get('name', k['provider'])} — {k['label']}"
+            if candidate == label:
+                self._gs_selected_key_id = k["id"]
+                self._update_gs_identifier_placeholder(k["provider"])
+                return
+
+    def _update_gs_identifier_placeholder(self, provider):
+        info = game_providers.PROVIDERS.get(provider, {})
+        self.gs_identifier_entry.configure(placeholder_text=info.get("id_label", "Player identifier"))
+
+    def _on_game_stats_lookup(self):
+        if not self._gs_selected_key_id:
+            return
+        identifier = self.gs_identifier_entry.get().strip()
+
+        entry = crypto_store.get_entry(self._gs_selected_key_id)
+        if not entry or not entry.get("token"):
+            self._render_gs_placeholder("⚠️ Couldn't read that key — try removing and re-adding it in API Keys.")
+            return
+
+        self.gs_lookup_btn.configure(state="disabled", text="Looking up…")
+        self._render_gs_placeholder("Looking up player…")
+
+        provider = entry["provider"]
+        token = entry["token"]
+        extra = entry.get("extra", {})
+
+        def worker():
+            try:
+                result = game_providers.fetch_stats(provider, identifier, token, extra)
+                error = None
+            except game_providers.GameStatsError as exc:
+                result = None
+                error = str(exc)
+            except Exception as exc:  # noqa: BLE001
+                result = None
+                error = f"Unexpected error: {exc}"
+            self.after(0, lambda: self._on_gs_result(result, error))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_gs_result(self, result, error):
+        self.gs_lookup_btn.configure(state="normal", text="Look Up")
+
+        if error or not result:
+            self._render_gs_placeholder(f"⚠️ {error or 'No result.'}")
+            return
+
+        self._clear_frame(self.gs_results_scroll)
+
+        card = ctk.CTkFrame(self.gs_results_scroll, fg_color=theme.PANEL_2, corner_radius=10)
+        card.grid(row=0, column=0, sticky="ew", pady=5, padx=5)
+        card.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            card, text=result.get("player", "—"),
+            font=ctk.CTkFont(size=17, weight="bold"), anchor="w"
+        ).grid(row=0, column=0, sticky="w", padx=18, pady=(16, 10))
+
+        rows = result.get("rows", [])
+        for i, (label, value) in enumerate(rows):
+            row_frame = ctk.CTkFrame(card, fg_color="transparent")
+            row_frame.grid(row=i + 1, column=0, sticky="ew", padx=18, pady=4)
+            row_frame.grid_columnconfigure(1, weight=1)
+
+            ctk.CTkLabel(row_frame, text=str(label), text_color=theme.MUTED, anchor="w", width=160).grid(
+                row=0, column=0, sticky="w"
+            )
+            ctk.CTkLabel(row_frame, text=str(value), anchor="w", font=ctk.CTkFont(weight="bold")).grid(
+                row=0, column=1, sticky="w"
+            )
+
+        ctk.CTkFrame(card, fg_color="transparent", height=10).grid(row=len(rows) + 1, column=0)
+
+    # ------------------------------------------------------------------
+    # API KEYS TAB
+    # ------------------------------------------------------------------
+
+    def _build_api_keys_tab(self):
+        tab = self.tab_api_keys
+        tab.grid_columnconfigure(0, weight=1)
+        tab.grid_rowconfigure(0, weight=1)
+
+        scroll = ctk.CTkScrollableFrame(tab, label_text="", fg_color="transparent")
+        scroll.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+        scroll.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            scroll, text="🔑  API Keys", font=ctk.CTkFont(size=20, weight="bold")
+        ).grid(row=0, column=0, sticky="w", pady=(0, 4))
+
+        ctk.CTkLabel(
+            scroll,
+            text="Keys are encrypted before they're written to disk, and decrypted only in memory "
+                 "right before a request goes out. (They can't be hashed instead — a hashed key "
+                 "can't be sent back to the API to authenticate, since hashing can't be reversed.)",
+            text_color=theme.MUTED, justify="left", wraplength=760, anchor="w"
+        ).grid(row=1, column=0, sticky="ew", pady=(0, 15))
+
+        # -- existing keys ----------------------------------------------
+        self.keys_list_frame = ctk.CTkFrame(scroll, fg_color="transparent")
+        self.keys_list_frame.grid(row=2, column=0, sticky="ew", pady=(0, 20))
+        self.keys_list_frame.grid_columnconfigure(0, weight=1)
+
+        # -- add-key form -------------------------------------------------
+        form = ctk.CTkFrame(scroll, fg_color=theme.PANEL_2, corner_radius=10)
+        form.grid(row=3, column=0, sticky="ew")
+        form.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            form, text="Add a Key", font=ctk.CTkFont(size=15, weight="bold")
+        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=18, pady=(16, 10))
+
+        ctk.CTkLabel(form, text="Provider").grid(row=1, column=0, sticky="w", padx=18, pady=6)
+        provider_labels = [
+            f"{KEY_PROVIDER_INFO[p]['icon']} {KEY_PROVIDER_INFO[p]['name']}" for p in KEY_PROVIDER_ORDER
+        ]
+        self.add_key_provider_menu = ctk.CTkOptionMenu(
+            form, values=provider_labels, command=self._on_add_key_provider_changed, width=220
+        )
+        self.add_key_provider_menu.set(provider_labels[0])
+        self.add_key_provider_menu.grid(row=1, column=1, sticky="w", padx=18, pady=6)
+
+        self.add_key_hint_label = ctk.CTkLabel(
+            form, text="", text_color=theme.MUTED, justify="left", wraplength=650, anchor="w"
+        )
+        self.add_key_hint_label.grid(row=2, column=0, columnspan=2, sticky="ew", padx=18, pady=(0, 8))
+
+        ctk.CTkLabel(form, text="Label").grid(row=3, column=0, sticky="w", padx=18, pady=6)
+        self.add_key_label_entry = ctk.CTkEntry(
+            form, placeholder_text="e.g. my main account (optional)", width=300
+        )
+        self.add_key_label_entry.grid(row=3, column=1, sticky="w", padx=18, pady=6)
+
+        ctk.CTkLabel(form, text="Key").grid(row=4, column=0, sticky="w", padx=18, pady=6)
+        key_value_row = ctk.CTkFrame(form, fg_color="transparent")
+        key_value_row.grid(row=4, column=1, sticky="w", padx=18, pady=6)
+
+        self.add_key_value_entry = ctk.CTkEntry(key_value_row, width=300, show="•")
+        self.add_key_value_entry.grid(row=0, column=0, padx=(0, 6))
+
+        self.add_key_show_btn = ctk.CTkButton(
+            key_value_row, text="👁", width=32, command=self._toggle_add_key_visibility
+        )
+        self.add_key_show_btn.grid(row=0, column=1)
+
+        # -- custom-provider-only extra fields ---------------------------
+        self.add_key_custom_frame = ctk.CTkFrame(form, fg_color="transparent")
+        self.add_key_custom_frame.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(self.add_key_custom_frame, text="Base URL").grid(row=0, column=0, sticky="w", pady=4)
+        self.custom_base_url_entry = ctk.CTkEntry(
+            self.add_key_custom_frame,
+            placeholder_text="https://api.example.com/stats/{id}  (or ?name= is added automatically)",
+            width=420
+        )
+        self.custom_base_url_entry.grid(row=0, column=1, sticky="ew", padx=(10, 0), pady=4)
+
+        ctk.CTkLabel(self.add_key_custom_frame, text="Auth header").grid(row=1, column=0, sticky="w", pady=4)
+        header_row = ctk.CTkFrame(self.add_key_custom_frame, fg_color="transparent")
+        header_row.grid(row=1, column=1, sticky="w", padx=(10, 0), pady=4)
+        self.custom_header_name_entry = ctk.CTkEntry(header_row, placeholder_text="Header name (e.g. Authorization)", width=220)
+        self.custom_header_name_entry.grid(row=0, column=0, padx=(0, 6))
+        self.custom_header_prefix_entry = ctk.CTkEntry(header_row, placeholder_text="Prefix (e.g. \"Bearer \")", width=140)
+        self.custom_header_prefix_entry.grid(row=0, column=1)
+
+        ctk.CTkLabel(self.add_key_custom_frame, text="ID query param").grid(row=2, column=0, sticky="w", pady=4)
+        self.custom_id_param_entry = ctk.CTkEntry(
+            self.add_key_custom_frame, placeholder_text="name  (only used if the URL has no {id})", width=220
+        )
+        self.custom_id_param_entry.grid(row=2, column=1, sticky="w", padx=(10, 0), pady=4)
+
+        ctk.CTkButton(
+            form, text="Save Key", fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
+            command=self._on_save_key
+        ).grid(row=6, column=0, columnspan=2, sticky="w", padx=18, pady=(14, 18))
+
+        self._on_add_key_provider_changed(provider_labels[0])
+
+    def _provider_id_from_label(self, label):
+        for p in KEY_PROVIDER_ORDER:
+            if f"{KEY_PROVIDER_INFO[p]['icon']} {KEY_PROVIDER_INFO[p]['name']}" == label:
+                return p
+        return KEY_PROVIDER_ORDER[0]
+
+    def _on_add_key_provider_changed(self, label):
+        provider = self._provider_id_from_label(label)
+        self._add_key_provider_id = provider
+        info = KEY_PROVIDER_INFO[provider]
+
+        hint = info.get("key_help", "")
+        if info.get("key_url"):
+            hint += f"  ({info['key_url']})"
+        self.add_key_hint_label.configure(text=hint)
+
+        if info.get("needs_extra"):
+            self.add_key_custom_frame.grid(row=5, column=0, columnspan=2, sticky="ew", padx=18, pady=(4, 4))
+        else:
+            self.add_key_custom_frame.grid_forget()
+
+    def _toggle_add_key_visibility(self):
+        self._add_key_value_visible = not self._add_key_value_visible
+        self.add_key_value_entry.configure(show="" if self._add_key_value_visible else "•")
+        self.add_key_show_btn.configure(text="🙈" if self._add_key_value_visible else "👁")
+
+    def _on_save_key(self):
+        provider = self._add_key_provider_id
+        label = self.add_key_label_entry.get().strip()
+        value = self.add_key_value_entry.get().strip()
+
+        extra = {}
+        if KEY_PROVIDER_INFO[provider].get("needs_extra"):
+            base_url = self.custom_base_url_entry.get().strip()
+            if not base_url:
+                messagebox.showwarning("Add API Key", "Custom providers need a base URL.")
+                return
+            extra = {
+                "base_url": base_url,
+                "header_name": self.custom_header_name_entry.get().strip(),
+                "header_prefix": self.custom_header_prefix_entry.get().strip(),
+                "id_param": self.custom_id_param_entry.get().strip(),
+            }
+
+        try:
+            crypto_store.add_key(provider, label, value, extra=extra)
+        except ValueError as exc:
+            messagebox.showwarning("Add API Key", str(exc))
+            return
+
+        self.add_key_label_entry.delete(0, "end")
+        self.add_key_value_entry.delete(0, "end")
+        self.custom_base_url_entry.delete(0, "end")
+        self.custom_header_name_entry.delete(0, "end")
+        self.custom_header_prefix_entry.delete(0, "end")
+        self.custom_id_param_entry.delete(0, "end")
+
+        self._render_api_keys_list()
+        self._refresh_game_stats_key_menu()
+
+    def _render_api_keys_list(self):
+        self._clear_frame(self.keys_list_frame)
+        keys = crypto_store.list_keys()
+
+        if not keys:
+            ctk.CTkLabel(
+                self.keys_list_frame, text="No keys added yet.", text_color=theme.MUTED
+            ).grid(row=0, column=0, sticky="w")
+            return
+
+        for i, k in enumerate(keys):
+            info = KEY_PROVIDER_INFO.get(k["provider"], {"icon": "🔑", "name": k["provider"]})
+            row = ctk.CTkFrame(self.keys_list_frame, fg_color=theme.PANEL_2, corner_radius=8)
+            row.grid(row=i, column=0, sticky="ew", pady=3)
+            row.grid_columnconfigure(1, weight=1)
+
+            ctk.CTkLabel(row, text=info["icon"], font=ctk.CTkFont(size=18)).grid(
+                row=0, column=0, rowspan=2, padx=(15, 10), pady=10
+            )
+
+            ctk.CTkLabel(
+                row, text=f"{info['name']}  —  {k['label']}", anchor="w",
+                font=ctk.CTkFont(weight="bold")
+            ).grid(row=0, column=1, sticky="w", pady=(10, 0))
+
+            ctk.CTkLabel(
+                row, text=k["preview"], anchor="w", text_color=theme.MUTED,
+                font=ctk.CTkFont(family="Consolas", size=12)
+            ).grid(row=1, column=1, sticky="w", pady=(0, 10))
+
+            ctk.CTkButton(
+                row, text="Remove", width=80, fg_color=theme.DANGER_BG,
+                hover_color=theme.DANGER_HOVER, text_color=theme.DANGER,
+                command=lambda kid=k["id"]: self._remove_key(kid)
+            ).grid(row=0, column=2, rowspan=2, padx=15, pady=10)
+
+    def _remove_key(self, key_id):
+        crypto_store.remove_key(key_id)
+        self._render_api_keys_list()
+        self._refresh_game_stats_key_menu()
+
+    # ------------------------------------------------------------------
     # SAVED TAB
     # ------------------------------------------------------------------
 
@@ -361,7 +645,7 @@ class WeatherNewsUI(ctk.CTkFrame):
         top.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(
-            top, text="Saved Articles", font=ctk.CTkFont(size=16, weight="bold")
+            top, text="⭐  Saved Articles", font=ctk.CTkFont(size=20, weight="bold")
         ).grid(row=0, column=0, sticky="w")
 
         ctk.CTkButton(
@@ -369,7 +653,7 @@ class WeatherNewsUI(ctk.CTkFrame):
             command=self._clear_saved_confirm
         ).grid(row=0, column=1, sticky="e")
 
-        self.saved_scroll = ctk.CTkScrollableFrame(tab, label_text="")
+        self.saved_scroll = ctk.CTkScrollableFrame(tab, label_text="", fg_color="transparent")
         self.saved_scroll.grid(row=1, column=0, sticky="nsew", padx=5, pady=(0, 5))
         self.saved_scroll.grid_columnconfigure(0, weight=1)
 
@@ -386,7 +670,7 @@ class WeatherNewsUI(ctk.CTkFrame):
             return
 
         for i, item in enumerate(saved):
-            row_frame = ctk.CTkFrame(self.saved_scroll, fg_color=theme.PANEL_2)
+            row_frame = ctk.CTkFrame(self.saved_scroll, fg_color=theme.PANEL_2, corner_radius=8)
             row_frame.grid(row=i, column=0, sticky="ew", pady=3)
             row_frame.grid_columnconfigure(0, weight=1)
 
@@ -433,12 +717,12 @@ class WeatherNewsUI(ctk.CTkFrame):
         tab.grid_columnconfigure(0, weight=1)
         tab.grid_rowconfigure(0, weight=1)
 
-        scroll = ctk.CTkScrollableFrame(tab, label_text="")
+        scroll = ctk.CTkScrollableFrame(tab, label_text="", fg_color="transparent")
         scroll.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
         scroll.grid_columnconfigure(0, weight=1)
 
         # --- Custom feeds management ---------------------------------
-        feeds_section = ctk.CTkFrame(scroll)
+        feeds_section = ctk.CTkFrame(scroll, fg_color=theme.PANEL_2, corner_radius=10)
         feeds_section.grid(row=0, column=0, sticky="ew", pady=(0, 15))
         feeds_section.grid_columnconfigure(0, weight=1)
 
@@ -469,7 +753,7 @@ class WeatherNewsUI(ctk.CTkFrame):
         self._render_settings_feed_list()
 
         # --- Preferences -----------------------------------------------
-        prefs_section = ctk.CTkFrame(scroll)
+        prefs_section = ctk.CTkFrame(scroll, fg_color=theme.PANEL_2, corner_radius=10)
         prefs_section.grid(row=1, column=0, sticky="ew", pady=(0, 15))
         prefs_section.grid_columnconfigure(1, weight=1)
 
@@ -477,35 +761,26 @@ class WeatherNewsUI(ctk.CTkFrame):
             prefs_section, text="Preferences", font=ctk.CTkFont(size=15, weight="bold")
         ).grid(row=0, column=0, sticky="w", padx=15, pady=(15, 10), columnspan=2)
 
-        ctk.CTkLabel(prefs_section, text="Temperature unit").grid(
-            row=1, column=0, sticky="w", padx=15, pady=6
-        )
-        self.unit_switch = ctk.CTkSegmentedButton(
-            prefs_section, values=["C", "F"], command=self._on_unit_changed
-        )
-        self.unit_switch.set(self.settings.get("temp_unit", "C"))
-        self.unit_switch.grid(row=1, column=1, sticky="w", padx=15, pady=6)
-
         ctk.CTkLabel(prefs_section, text="Headline country code").grid(
-            row=2, column=0, sticky="w", padx=15, pady=6
+            row=1, column=0, sticky="w", padx=15, pady=6
         )
         self.country_entry = ctk.CTkEntry(prefs_section, width=100)
         self.country_entry.insert(0, self.settings.get("country", "us"))
-        self.country_entry.grid(row=2, column=1, sticky="w", padx=15, pady=6)
+        self.country_entry.grid(row=1, column=1, sticky="w", padx=15, pady=6)
         self.country_entry.bind("<FocusOut>", lambda e: self._on_country_changed())
         self.country_entry.bind("<Return>", lambda e: self._on_country_changed())
 
         ctk.CTkLabel(prefs_section, text="Headlines per feed").grid(
-            row=3, column=0, sticky="w", padx=15, pady=6
+            row=2, column=0, sticky="w", padx=15, pady=6
         )
         self.page_size_entry = ctk.CTkEntry(prefs_section, width=100)
         self.page_size_entry.insert(0, str(self.settings.get("page_size", 15)))
-        self.page_size_entry.grid(row=3, column=1, sticky="w", padx=15, pady=6)
+        self.page_size_entry.grid(row=2, column=1, sticky="w", padx=15, pady=6)
         self.page_size_entry.bind("<FocusOut>", lambda e: self._on_page_size_changed())
         self.page_size_entry.bind("<Return>", lambda e: self._on_page_size_changed())
 
         ctk.CTkLabel(prefs_section, text="Auto-refresh").grid(
-            row=4, column=0, sticky="w", padx=15, pady=(6, 15)
+            row=3, column=0, sticky="w", padx=15, pady=(6, 15)
         )
         current_minutes = self.settings.get("refresh_interval_minutes", 0)
         current_label = next(
@@ -517,10 +792,10 @@ class WeatherNewsUI(ctk.CTkFrame):
             command=self._on_refresh_interval_changed
         )
         self.refresh_interval_menu.set(current_label)
-        self.refresh_interval_menu.grid(row=4, column=1, sticky="w", padx=15, pady=(6, 15))
+        self.refresh_interval_menu.grid(row=3, column=1, sticky="w", padx=15, pady=(6, 15))
 
         # --- Data management --------------------------------------------
-        data_section = ctk.CTkFrame(scroll)
+        data_section = ctk.CTkFrame(scroll, fg_color=theme.PANEL_2, corner_radius=10)
         data_section.grid(row=2, column=0, sticky="ew")
         data_section.grid_columnconfigure(0, weight=1)
 
@@ -530,7 +805,8 @@ class WeatherNewsUI(ctk.CTkFrame):
 
         ctk.CTkLabel(
             data_section,
-            text=f"Feeds, saved articles, and preferences are stored locally at:\n{storage.storage_path()}",
+            text=f"Feeds, saved articles, and preferences:\n{storage.storage_path()}\n\n"
+                 f"Encrypted API keys:\n{crypto_store.storage_path()}",
             text_color=theme.MUTED, justify="left", wraplength=700, anchor="w"
         ).grid(row=1, column=0, sticky="w", padx=15, pady=(0, 10))
 
@@ -594,10 +870,6 @@ class WeatherNewsUI(ctk.CTkFrame):
 
     # -- Preference callbacks --
 
-    def _on_unit_changed(self, value):
-        self.settings = storage.update_setting("temp_unit", value)
-        self.refresh_weather()
-
     def _on_country_changed(self):
         value = self.country_entry.get().strip().lower() or "us"
         self.settings = storage.update_setting("country", value)
@@ -620,7 +892,8 @@ class WeatherNewsUI(ctk.CTkFrame):
     def _reset_all_confirm(self):
         if messagebox.askyesno(
             "Reset all data",
-            "This will remove all custom feeds, saved articles, and preferences. Continue?"
+            "This will remove all custom feeds, saved articles, and preferences "
+            "(API keys are stored separately and are not affected). Continue?"
         ):
             storage.clear_all_data()
             self.settings = storage.get_settings()
@@ -628,13 +901,11 @@ class WeatherNewsUI(ctk.CTkFrame):
             self._render_settings_feed_list()
             self._render_feeds_tab()
             self._render_saved_tab()
-            self.unit_switch.set(self.settings.get("temp_unit", "C"))
             self.country_entry.delete(0, "end")
             self.country_entry.insert(0, self.settings.get("country", "us"))
             self.page_size_entry.delete(0, "end")
             self.page_size_entry.insert(0, str(self.settings.get("page_size", 15)))
             self.refresh_interval_menu.set("Off")
-            self.refresh_weather()
 
     # ------------------------------------------------------------------
     # Auto-refresh
@@ -703,7 +974,7 @@ class WeatherNewsUI(ctk.CTkFrame):
             self._build_headline_row(scroll_frame, i, item)
 
     def _build_headline_row(self, parent, row_index, item):
-        row_frame = ctk.CTkFrame(parent, fg_color=theme.PANEL_2)
+        row_frame = ctk.CTkFrame(parent, fg_color=theme.PANEL_2, corner_radius=8)
         row_frame.grid(row=row_index, column=0, sticky="ew", pady=3)
         row_frame.grid_columnconfigure(0, weight=1)
 
@@ -743,7 +1014,7 @@ class WeatherNewsUI(ctk.CTkFrame):
         if self._home_news_data is not None:
             self._render_headline_list(
                 self._home_news_data, None, self.home_news_scroll,
-                self.home_news_refresh_btn, "🔄 Refresh News"
+                self.home_news_refresh_btn, "🔄 Refresh"
             )
         if self._feed_news_data is not None and hasattr(self, "feed_news_scroll"):
             self._render_headline_list(

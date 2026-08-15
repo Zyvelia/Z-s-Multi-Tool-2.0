@@ -23,6 +23,10 @@ APPS = [
     ("vault", "Security Vault", "🔒", "Passwords + authenticator codes"),
     ("music", "Music Player", "🎵", "Stream your library"),
     ("yt", "YouTube Downloader", "⬇️", "Send a link, get a download"),
+    ("notes", "Notes", "📝", "Read and edit your notes"),
+    ("games", "Gaming Hub", "🎮", "Launch a game on this PC"),
+    ("soundboard", "Soundboard", "🔊", "Play a sound out loud"),
+    ("send", "Quick Send", "📤", "Send files to/from this PC"),
 ]
 
 

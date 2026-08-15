@@ -245,6 +245,8 @@ class _Handler(BaseHTTPRequestHandler):
             engine.prev()
         elif action == "set_volume":
             engine.set_volume(body.get("value", 0.5))
+        elif action == "seek":
+            engine.seek(body.get("value", 0))
         elif action == "toggle_shuffle":
             engine.shuffle = not engine.shuffle
         elif action == "cycle_repeat":

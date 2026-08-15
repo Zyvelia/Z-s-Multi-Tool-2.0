@@ -229,6 +229,24 @@ class App(ctk.CTk):
         except Exception:
             pass
         try:
+            # Gaming Hub's remote-access server — lazily created on the
+            # page_manager the first time that page is opened.
+            gaming_hub_web_server = getattr(self.page_manager, "gaming_hub_web_server", None)
+            if gaming_hub_web_server and gaming_hub_web_server.is_running():
+                self.tailscale_service.disable_app_serve("games")
+                gaming_hub_web_server.stop()
+        except Exception:
+            pass
+        try:
+            # Soundboard's remote-access server — lazily created on the
+            # page_manager the first time that page is opened.
+            soundboard_web_server = getattr(self.page_manager, "soundboard_web_server", None)
+            if soundboard_web_server and soundboard_web_server.is_running():
+                self.tailscale_service.disable_app_serve("soundboard")
+                soundboard_web_server.stop()
+        except Exception:
+            pass
+        try:
             self.quit()
         finally:
             self.destroy()

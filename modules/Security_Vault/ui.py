@@ -2,6 +2,7 @@ import customtkinter as ctk
 import random
 import string
 import datetime
+import tkinter as tk
 from tkinter import filedialog
 
 try:
@@ -34,7 +35,7 @@ DANGER = theme.DANGER
 
 STRENGTH_COLORS = [DANGER, "#e0803f", "#e0c53f", "#8bd15a", SUCCESS]
 
-CATEGORIES = ["General", "Email", "Gaming", "Work", "Banking", "Social"]
+DEFAULT_CATEGORIES = ["General", "Email", "Gaming", "Work", "Banking", "Social", "Alt Accounts"]
 
 
 class PasswordVaultPage(ctk.CTkFrame):
@@ -44,8 +45,10 @@ class PasswordVaultPage(ctk.CTkFrame):
 
         self.manager = manager
         self.vault = manager.container.vault_service
+        self.auth = manager.container.auth_service
 
         self.visible_passwords = set()
+        self._lock_overlay_visible = False
 
         self.configure(fg_color=BG)
 
@@ -64,6 +67,43 @@ class PasswordVaultPage(ctk.CTkFrame):
 
         self.build_ui()
         self.render()
+
+        # Idle-based auto-lock: the master password shouldn't stay "good"
+        # forever just because the window is sitting open. This ticks
+        # while the vault tab is the one on screen and pops the lock
+        # overlay if AuthService's inactivity timeout has elapsed.
+        self.after(15000, self._auto_lock_tick)
+
+    def _auto_lock_tick(self):
+        try:
+            if self.manager.current is self and not self._lock_overlay_visible:
+                if self.auth.is_locked():
+                    self._show_lock_overlay()
+        except Exception:
+            pass
+        self.after(15000, self._auto_lock_tick)
+
+    def on_show(self):
+        """
+        Called by PageManager.show_page() whenever this page is navigated
+        to, and by the tray icon on window restore (see core/tray.py) —
+        both are moments where the vault could have gone stale (idle
+        timeout, or minimized-to-tray while unlocked) without anything
+        else re-checking auth state in between.
+        """
+        if self.auth.is_locked():
+            self._show_lock_overlay()
+        else:
+            self._hide_lock_overlay()
+            self.render()
+
+    def _touch(self, _event=None):
+        """Bound (globally, via bind_all) so the idle timer only counts
+        actual inactivity — but only touches while the vault tab is the
+        one actually on screen, so clicking around in some other tool
+        doesn't quietly keep the vault's lock timer from ever firing."""
+        if self.manager.current is self:
+            self.auth.touch()
 
     # =====================================================
     # UI
@@ -168,7 +208,7 @@ class PasswordVaultPage(ctk.CTkFrame):
         self.search.bind("<KeyRelease>", lambda e: self.render())
 
         self.filter_category = ctk.CTkOptionMenu(
-            search_frame, values=["All"] + CATEGORIES, command=lambda x: self.render(),
+            search_frame, values=["All"] + self._all_categories(), command=lambda x: self.render(),
             width=140, height=36, fg_color=CARD, button_color=CARD,
             button_hover_color=CARD_HOVER, corner_radius=theme.RADIUS_SM
         )
@@ -179,6 +219,103 @@ class PasswordVaultPage(ctk.CTkFrame):
 
         self.cards = ctk.CTkScrollableFrame(passwords_tab, fg_color=PANEL, corner_radius=theme.RADIUS)
         self.cards.grid(row=2, column=0, sticky="nsew")
+
+        # Any click/key inside the vault counts as activity, resetting
+        # the idle-lock clock. bind_all with add="+" so we don't clobber
+        # CTk's own internal bindings on these widget classes.
+        #
+        # NOTE: newer CustomTkinter versions override bind_all() on all
+        # their widgets to just raise AttributeError("'bind_all' is not
+        # allowed..."), so self.bind_all(...) blows up here. We still
+        # want the real Tk-level bind_all behavior (global, app-wide),
+        # so call tkinter.Misc's original implementation directly,
+        # bypassing CTk's override.
+        tk.Misc.bind_all(self, "<Button-1>", self._touch, add="+")
+        tk.Misc.bind_all(self, "<Key>", self._touch, add="+")
+
+        # ---------------- LOCK OVERLAY ----------------
+        # Covers the whole page (header + tabs) when the vault is locked
+        # (idle timeout, or restored from tray after being minimized —
+        # see core/tray.py). Sits on top via grid in the same cells as
+        # everything above, then lift()'d above it.
+
+        self.lock_overlay = ctk.CTkFrame(self, fg_color=BG)
+        self.lock_overlay.grid_rowconfigure(0, weight=1)
+        self.lock_overlay.grid_columnconfigure(0, weight=1)
+
+        overlay_card = ctk.CTkFrame(
+            self.lock_overlay, fg_color=PANEL, corner_radius=theme.RADIUS,
+            border_width=1, border_color=BORDER
+        )
+        overlay_card.grid(row=0, column=0)
+
+        inner = ctk.CTkFrame(overlay_card, fg_color="transparent")
+        inner.pack(padx=40, pady=32)
+
+        ctk.CTkLabel(inner, text="🔒", font=theme.font(30)).pack(pady=(0, 8))
+        ctk.CTkLabel(
+            inner, text="Vault Locked", font=theme.font(19, "bold"), text_color=TEXT
+        ).pack()
+        ctk.CTkLabel(
+            inner, text="Re-enter your master password to continue.",
+            font=theme.font(12), text_color=MUTED
+        ).pack(pady=(4, 18))
+
+        self.relock_entry = ctk.CTkEntry(
+            inner, show="•", height=38, width=280,
+            fg_color=CARD, border_color=BORDER, corner_radius=theme.RADIUS_SM,
+            placeholder_text="Master password"
+        )
+        self.relock_entry.pack(pady=(0, 10))
+
+        self.relock_error = ctk.CTkLabel(inner, text="", font=theme.font(11), text_color=ERROR)
+        self.relock_error.pack()
+
+        def do_unlock():
+            password = self.relock_entry.get()
+            if self.auth.verify_master_password(password):
+                self.relock_entry.delete(0, "end")
+                self.relock_error.configure(text="")
+                self._hide_lock_overlay()
+                self.render()
+            else:
+                self.relock_error.configure(text="Incorrect password.")
+                self.relock_entry.delete(0, "end")
+                self.relock_entry.focus_set()
+
+        self.relock_entry.bind("<Return>", lambda e: do_unlock())
+
+        ctk.CTkButton(
+            inner, text="Unlock", height=38, width=280,
+            command=do_unlock, **theme.primary_button_style()
+        ).pack(pady=(6, 0))
+
+    def _show_lock_overlay(self):
+        if self._lock_overlay_visible:
+            return
+        self._lock_overlay_visible = True
+        # Nothing sensitive should stay "revealed" behind the overlay.
+        self.visible_passwords = set()
+        self.lock_overlay.grid(row=0, column=0, rowspan=2, sticky="nsew")
+        self.lock_overlay.lift()
+        self.relock_entry.focus_set()
+
+    def _hide_lock_overlay(self):
+        self._lock_overlay_visible = False
+        self.lock_overlay.grid_remove()
+
+    def _all_categories(self):
+        """Default categories plus any custom ones already used in the
+        vault (e.g. a typed-in 'Alt Accounts'), deduped and sorted."""
+        return sorted(set(DEFAULT_CATEGORIES) | set(self.vault.get_categories()))
+
+    def _refresh_category_filter(self):
+        """Keep the filter dropdown in sync after entries are added/edited/
+        imported, without losing the currently selected filter."""
+        current = self.filter_category.get()
+        values = ["All"] + self._all_categories()
+        self.filter_category.configure(values=values)
+        self.filter_category.set(current if current in values else "All")
 
     def _stat_pill(self, parent, label, value, col):
         pill = ctk.CTkFrame(parent, fg_color=PANEL, corner_radius=theme.RADIUS)
@@ -255,9 +392,10 @@ class PasswordVaultPage(ctk.CTkFrame):
         user_entry.pack(fill="x", padx=24, pady=(0, 12))
 
         field_label("Category")
-        category_menu = ctk.CTkOptionMenu(
-            dialog, values=CATEGORIES, height=38, fg_color=CARD,
-            button_color=CARD, button_hover_color=CARD_HOVER, corner_radius=theme.RADIUS_SM
+        category_menu = ctk.CTkComboBox(
+            dialog, values=self._all_categories(), height=38, fg_color=CARD,
+            border_color=BORDER, button_color=CARD, button_hover_color=CARD_HOVER,
+            corner_radius=theme.RADIUS_SM
         )
         category_menu.set("General")
         category_menu.pack(fill="x", padx=24, pady=(0, 16))
@@ -362,7 +500,7 @@ class PasswordVaultPage(ctk.CTkFrame):
             site = site_entry.get().strip()
             user = user_entry.get().strip()
             password = pass_entry.get().strip()
-            category = category_menu.get()
+            category = category_menu.get().strip() or "General"
 
             if not site or not password:
                 status_label.configure(text="Site and password are required.")
@@ -370,6 +508,7 @@ class PasswordVaultPage(ctk.CTkFrame):
 
             self.vault.add_entry(site, user, password, category)
             dialog.destroy()
+            self._refresh_category_filter()
             self.render()
 
         site_entry.bind("<Return>", lambda e: user_entry.focus_set())
@@ -453,9 +592,10 @@ class PasswordVaultPage(ctk.CTkFrame):
         edit_pass_entry.pack(fill="x", padx=24, pady=(0, 12))
 
         field_label("Category")
-        edit_category_menu = ctk.CTkOptionMenu(
-            dialog, values=CATEGORIES, height=38, fg_color=CARD,
-            button_color=CARD, button_hover_color=CARD_HOVER, corner_radius=theme.RADIUS_SM
+        edit_category_menu = ctk.CTkComboBox(
+            dialog, values=self._all_categories(), height=38, fg_color=CARD,
+            border_color=BORDER, button_color=CARD, button_hover_color=CARD_HOVER,
+            corner_radius=theme.RADIUS_SM
         )
         edit_category_menu.set(entry["category"])
         edit_category_menu.pack(fill="x", padx=24, pady=(0, 20))
@@ -464,13 +604,14 @@ class PasswordVaultPage(ctk.CTkFrame):
             new_site = edit_site_entry.get().strip()
             new_user = edit_user_entry.get().strip()
             new_password = edit_pass_entry.get().strip()
-            new_category = edit_category_menu.get()
+            new_category = edit_category_menu.get().strip() or "General"
 
             if not new_site or not new_password:
                 return
 
             self.vault.update_entry(entry_id, new_site, new_user, new_password, new_category)
             dialog.destroy()
+            self._refresh_category_filter()
             self.render()
 
         ctk.CTkButton(
@@ -605,6 +746,7 @@ class PasswordVaultPage(ctk.CTkFrame):
         )
         if path:
             self.vault.import_json(path)
+            self._refresh_category_filter()
             self.render()
 
     # =====================================================

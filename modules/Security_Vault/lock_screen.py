@@ -350,6 +350,10 @@ class PasswordVaultLockScreen(ctk.CTkFrame):
 
     def create_master_password(self):
 
+        # Clear any stale message from a previous attempt so this click
+        # always reflects the *current* state, not a leftover error.
+        self.error_label.configure(text="")
+
         password = self.password_entry.get()
         confirm = self.confirm_entry.get()
 
@@ -365,7 +369,18 @@ class PasswordVaultLockScreen(ctk.CTkFrame):
             )
             return
 
-        self.auth.create_master_password(password)
+        try:
+            self.auth.create_master_password(password)
+        except Exception as e:
+            # Previously an exception here (e.g. failing to write
+            # vault_settings.json) was swallowed by Tkinter's callback
+            # handler, leaving whatever error text was already on screen
+            # — which looked like the length/match check kept failing
+            # even with a valid password. Surface the real reason now.
+            self.error_label.configure(
+                text=f"Couldn't create vault: {e}"
+            )
+            return
 
         self.open_vault()
 

@@ -17,24 +17,7 @@ import psutil
 try:
     from core import theme
 except ImportError:  # pragma: no cover - fallback for standalone use/testing
-    class theme:  # type: ignore
-        BG = "#0f1115"
-        PANEL = "#151922"
-        PANEL_2 = "#1b2030"
-        ACCENT = "#4ea1ff"
-        DANGER = "#ff5c5c"
-        OK = "#3ddc84"
-        MUTED = "#7d8494"
-        FAINT = "#565d6e"
-        TEXT = "#e8edf5"
-
-        @staticmethod
-        def font(size, weight="normal"):
-            return ctk.CTkFont(size=size, weight=weight)
-
-        @staticmethod
-        def mono(size):
-            return ctk.CTkFont(family="Consolas", size=size)
+    from . import _theme as theme
 
 
 REFRESH_MS = 1000
@@ -67,8 +50,13 @@ class Sparkline(tk.Canvas):
     def __init__(self, parent, width=220, height=32, color=None):
         super().__init__(parent, width=width, height=height,
                           bg=theme.PANEL_2, highlightthickness=0)
-        self._w = width
-        self._h = height
+        # NOTE: don't name these self._w / self._h — Tkinter's Widget base
+        # class already uses self._w internally to store the widget's own
+        # Tcl pathname. Overwriting it corrupts every future .grid()/.pack()
+        # call on this widget with a TclError like:
+        #   TclError: bad argument "220": must be name of window
+        self._sw = width
+        self._sh = height
         self._color = color or theme.ACCENT
         self._history: deque[float] = deque([0.0] * HISTORY_LEN, maxlen=HISTORY_LEN)
         self._line_id = None
@@ -83,8 +71,8 @@ class Sparkline(tk.Canvas):
         pts = []
         n = len(self._history)
         for i, v in enumerate(self._history):
-            x = (i / max(n - 1, 1)) * self._w
-            y = self._h - (min(v, 100) / 100) * self._h
+            x = (i / max(n - 1, 1)) * self._sw
+            y = self._sh - (min(v, 100) / 100) * self._sh
             pts.extend((x, y))
         if len(pts) >= 4:
             color = _usage_color(self._history[-1])

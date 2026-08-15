@@ -31,6 +31,7 @@ from tkinter import messagebox
 
 from core import theme
 from core.services import hub_service
+from core.services.tailscale_service import APP_HTTPS_PORTS
 
 BG = theme.BG
 PANEL = theme.PANEL
@@ -50,6 +51,10 @@ APPS = [
     ("vault", "🔒 Security Vault"),
     ("music", "🎵 Music Player"),
     ("yt", "⬇️ YouTube Downloader"),
+    ("notes", "📝 Notes"),
+    ("games", "🎮 Gaming Hub"),
+    ("soundboard", "🔊 Soundboard"),
+    ("send", "📤 Quick Send"),
 ]
 
 
@@ -192,6 +197,49 @@ class RemoteHubPage(ctk.CTkFrame):
         self.manager.yt_web_server = server
         return server
 
+    def _get_notes_web_server(self):
+        existing = getattr(self.manager, "notes_web_server", None)
+        if existing:
+            return existing
+        from modules.notes.web_server import NotesWebServer
+        server = NotesWebServer()
+        self.manager.notes_web_server = server
+        return server
+
+    def _get_quick_send_web_server(self):
+        existing = getattr(self.manager, "quick_send_web_server", None)
+        if existing:
+            return existing
+        from modules.quick_send.web_server import QuickSendWebServer
+        server = QuickSendWebServer()
+        self.manager.quick_send_web_server = server
+        return server
+
+    def _get_games_web_server(self):
+        # Same lazy-create-and-stash pattern Gaming Hub's own page uses
+        # (modules/gaming_hub/ui.py) — sharing the "gaming_hub_web_server"
+        # attribute name on the manager means whichever page opens first
+        # (this one or Gaming Hub itself) creates it, and the other reuses it.
+        existing = getattr(self.manager, "gaming_hub_web_server", None)
+        if existing:
+            return existing
+        from modules.gaming_hub.web_server import GamingHubWebServer
+        server = GamingHubWebServer()
+        self.manager.gaming_hub_web_server = server
+        return server
+
+    def _get_soundboard_web_server(self):
+        # Same lazy-create-and-stash pattern as Gaming Hub above — mirrors
+        # modules/soundboard/ui.py's own RemoteAccessPanel wiring, sharing
+        # the "soundboard_web_server" attribute name on the manager.
+        existing = getattr(self.manager, "soundboard_web_server", None)
+        if existing:
+            return existing
+        from modules.soundboard.web_server import SoundboardWebServer
+        server = SoundboardWebServer()
+        self.manager.soundboard_web_server = server
+        return server
+
     def _ports(self):
         vault_cfg = self.tailscale.load_config()
         from modules.media_player import db as music_db
@@ -211,6 +259,18 @@ class RemoteHubPage(ctk.CTkFrame):
             "vault": int(vault_cfg.get("web_port", 8765) or 8765),
             "music": music_port,
             "yt": yt_port,
+            "notes": 8768,  # no Settings tab yet for Notes, so this is fixed
+            "send": 8769,  # no Settings tab yet for Quick Send either, so this is fixed;
+            # this is just the local loopback port — enable_app_serve() below maps
+            # it to the fixed public port in APP_HTTPS_PORTS["send"] (8449), which
+            # is what the mobile app's ModulePorts.send expects
+            # Gaming Hub's own page (modules/gaming_hub/ui.py) always starts
+            # its loopback server on APP_HTTPS_PORTS["games"] via
+            # RemoteAccessPanel — matching that here means whichever page
+            # starts it first, the other one finds it already running.
+            "games": APP_HTTPS_PORTS["games"],
+            # Same deal for Soundboard (modules/soundboard/ui.py).
+            "soundboard": APP_HTTPS_PORTS["soundboard"],
         }
 
     # =====================================================
@@ -272,7 +332,47 @@ class RemoteHubPage(ctk.CTkFrame):
                 if not ok:
                     errors.append(f"YouTube Downloader Tailscale: {msg}")
 
-            live_apps = [key for key in ("vault", "music", "yt") if self.tailscale.is_app_serving(key)]
+            notes_srv = self._get_notes_web_server()
+            if not notes_srv.is_running():
+                ok, msg = notes_srv.start(ports["notes"])
+                if not ok:
+                    errors.append(f"Notes server: {msg}")
+            if notes_srv.is_running():
+                ok, msg = self.tailscale.enable_app_serve("notes", ports["notes"])
+                if not ok:
+                    errors.append(f"Notes Tailscale: {msg}")
+
+            quick_send_srv = self._get_quick_send_web_server()
+            if not quick_send_srv.is_running():
+                ok, msg = quick_send_srv.start(ports["send"])
+                if not ok:
+                    errors.append(f"Quick Send server: {msg}")
+            if quick_send_srv.is_running():
+                ok, msg = self.tailscale.enable_app_serve("send", ports["send"])
+                if not ok:
+                    errors.append(f"Quick Send Tailscale: {msg}")
+
+            games_srv = self._get_games_web_server()
+            if not games_srv.is_running():
+                ok, msg = games_srv.start(ports["games"])
+                if not ok:
+                    errors.append(f"Gaming Hub server: {msg}")
+            if games_srv.is_running():
+                ok, msg = self.tailscale.enable_app_serve("games", ports["games"])
+                if not ok:
+                    errors.append(f"Gaming Hub Tailscale: {msg}")
+
+            soundboard_srv = self._get_soundboard_web_server()
+            if not soundboard_srv.is_running():
+                ok, msg = soundboard_srv.start(ports["soundboard"])
+                if not ok:
+                    errors.append(f"Soundboard server: {msg}")
+            if soundboard_srv.is_running():
+                ok, msg = self.tailscale.enable_app_serve("soundboard", ports["soundboard"])
+                if not ok:
+                    errors.append(f"Soundboard Tailscale: {msg}")
+
+            live_apps = [key for key in ("vault", "music", "yt", "notes", "games", "soundboard", "send") if self.tailscale.is_app_serving(key)]
             hostname = status.get("hostname") or "this-device"
             hub_path = hub_service.write_hub_html(hostname, live_apps)
             ok, msg = self.tailscale.enable_hub_page(hub_path)

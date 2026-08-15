@@ -41,6 +41,10 @@ APP_HTTPS_PORTS = {
     "vault": 8443,
     "music": 8444,
     "yt": 8445,
+    "games": 8446,
+    "soundboard": 8447,
+    "notes": 8448,
+    "send": 8449,
 }
 HUB_HTTPS_PORT = 443
 

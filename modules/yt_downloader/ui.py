@@ -6,6 +6,8 @@ import sys
 import subprocess
 import urllib.request
 import threading
+import shutil
+import glob
 
 try:
     import yt_dlp as youtube_dl
@@ -38,9 +40,70 @@ SETTINGS_FILE = paths.migrate_legacy_file(
     "modules", "yt_downloader", "downloader_settings.json"
 )
 
+# yt-dlp's browser-cookie extractor only officially recognizes:
+# brave, chrome, chromium, edge, firefox, opera, safari, vivaldi, whale.
+# Opera GX isn't in that list, but it's Chromium under the hood, so we
+# extract it as "chrome" pointed at GX's own profile folder instead.
+_COOKIE_BROWSERS = {
+    "opera_gx": None,   # handled specially — see _resolve_cookie_browser()
+    "chrome": "chrome",
+    "edge": "edge",
+    "firefox": "firefox",
+    "brave": "brave",
+    "opera": "opera",
+    "vivaldi": "vivaldi",
+}
+
+
+def _opera_gx_profile_dir():
+    """Best-effort default profile path for Opera GX per OS. Returns None
+    if it can't find a plausible location."""
+    if sys.platform.startswith("win"):
+        base = os.path.join(os.environ.get("APPDATA", ""), "Opera Software", "Opera GX Stable")
+    elif sys.platform == "darwin":
+        base = os.path.expanduser("~/Library/Application Support/com.operasoftware.OperaGX")
+    else:
+        base = os.path.expanduser("~/.config/opera-gx")  # unofficial Linux builds
+    profile = os.path.join(base, "Default")
+    if os.path.isdir(profile):
+        return profile
+    return base if os.path.isdir(base) else None
+
+
+def _resolve_cookie_browser(browser_key):
+    """Returns (browser_name, profile_path_or_None) for extract_cookies_from_browser."""
+    if browser_key == "opera_gx":
+        profile = _opera_gx_profile_dir()
+        if profile is None:
+            raise FileNotFoundError(
+                "Couldn't find Opera GX's profile folder in the usual location. "
+                "If it's installed somewhere custom, use Browse to pick an "
+                "existing cookies.txt exported another way instead."
+            )
+        return "chrome", profile
+    return _COOKIE_BROWSERS.get(browser_key, browser_key), None
+
 # Music defaults to 8766, Security Vault to 8765 — kept distinct so all
 # three can run at once without a port clash.
 DEFAULT_REMOTE_PORT = 8767
+
+
+def _read_setting(key, default=""):
+    """Reads a single value straight from downloader_settings.json,
+    independent of any Tkinter widget's live state. Used by the
+    (long-lived) YTWebServer instance instead of reaching into a page's
+    Entry widgets, since those get destroyed and recreated whenever the
+    YouTube Downloader tab is rebuilt, while the web server itself is
+    reused across rebuilds — reading a destroyed widget silently returns
+    "" and produces a false "no valid output folder" error even when the
+    setting is saved correctly on disk."""
+    try:
+        if os.path.exists(SETTINGS_FILE):
+            with open(SETTINGS_FILE) as f:
+                return json.load(f).get(key, default)
+    except Exception:
+        pass
+    return default
 
 
 def _make_btn(parent, text, cmd, **ov):
@@ -64,6 +127,45 @@ def _find_ffmpeg() -> str:
     return None       # still let yt-dlp try
 
 
+def _find_deno() -> str | None:
+    """
+    Find the deno executable, needed by yt-dlp to solve YouTube's "n"
+    signature challenge. Checked in order:
+      1. PATH (covers both user- and system-PATH installs; also covers
+         scoop, since its shims live on PATH).
+      2. The official installer's default install location
+         (%USERPROFILE%\\.deno\\bin\\deno.exe).
+      3. The WinGet package folder. WinGet nests it under a
+         hash-suffixed directory that can change on reinstall/update,
+         so this is globbed rather than hardcoded.
+    Returns None (and lets yt-dlp try PATH resolution itself) if
+    nothing is found.
+    """
+    found = shutil.which("deno")
+    if found:
+        return found
+
+    userprofile = os.environ.get("USERPROFILE", os.path.expanduser("~"))
+    direct = os.path.join(userprofile, ".deno", "bin", "deno.exe")
+    if os.path.isfile(direct):
+        return direct
+
+    localappdata = os.environ.get(
+        "LOCALAPPDATA", os.path.join(userprofile, "AppData", "Local")
+    )
+    winget_glob = os.path.join(
+        localappdata,
+        "Microsoft", "WinGet", "Packages",
+        "DenoLand.Deno_Microsoft.Winget.Source_*",
+        "deno.exe",
+    )
+    matches = glob.glob(winget_glob)
+    if matches:
+        return matches[0]
+
+    return None
+
+
 # ── Main page ─────────────────────────────────────────────────────────────────
 
 class YTDownloaderPage(ctk.CTkFrame):
@@ -85,8 +187,8 @@ class YTDownloaderPage(ctk.CTkFrame):
         # here. Created once and stashed on the manager (same lazy pattern
         # Music Player uses) so it survives navigating away from this page.
         self.web_server = getattr(manager, "yt_web_server", None) or YTWebServer(
-            get_output_dir=lambda: self._out_entry.get().strip(),
-            get_cookie_file=lambda: self._cookie_entry.get().strip(),
+            get_output_dir=lambda: _read_setting("output_dir", os.path.expanduser("~")),
+            get_cookie_file=lambda: _read_setting("cookie_file", ""),
             get_ffmpeg_dir=lambda: self.ffmpeg_dir,
         )
         manager.yt_web_server = self.web_server
@@ -234,6 +336,47 @@ class YTDownloaderPage(ctk.CTkFrame):
 
         _make_btn(cookie_row, "Browse", self._browse_cookie, width=80).pack(side="left")
         _make_btn(cookie_row, "✕", self._clear_cookie, width=36).pack(side="left", padx=(4, 0))
+
+        cookie_refresh_row = ctk.CTkFrame(cookie_col, fg_color="transparent")
+        cookie_refresh_row.pack(fill="x", pady=(4, 0))
+
+        self._cookie_browser_var = ctk.StringVar(value="opera_gx")
+        self._cookie_browser_menu = ctk.CTkOptionMenu(
+            cookie_refresh_row, values=list(_COOKIE_BROWSERS.keys()),
+            variable=self._cookie_browser_var, fg_color=PANEL_2, button_color=PANEL_2,
+            button_hover_color=ACCENT, text_color=TEXT, width=110)
+        self._cookie_browser_menu.pack(side="left", padx=(0, 6))
+
+        _make_btn(cookie_refresh_row, "Refresh from Browser",
+                  self._refresh_cookie_from_browser).pack(side="left", fill="x", expand=True)
+
+    def _refresh_cookie_from_browser(self):
+        """Regenerates cookies.txt straight from the selected browser's own
+        local cookie store via yt-dlp's built-in extractor, then points the
+        Cookie File field at it. Saves having to run yt-dlp by hand any time
+        the session cookie goes stale."""
+        if youtube_dl is None:
+            self._log_msg("❌ yt-dlp not installed. Run: pip install yt-dlp")
+            return
+
+        browser_key = self._cookie_browser_var.get()
+        out_path = os.path.join(os.path.dirname(SETTINGS_FILE), "cookies.txt")
+
+        def _do():
+            try:
+                browser_name, profile = _resolve_cookie_browser(browser_key)
+                os.makedirs(os.path.dirname(out_path), exist_ok=True)
+                jar = youtube_dl.cookies.extract_cookies_from_browser(browser_name, profile)
+                jar.filename = out_path
+                jar.save(ignore_discard=True, ignore_expires=True)
+                count = len(jar)
+                self._log_msg(f"🍪 Pulled {count} cookie(s) from {browser_key} → {out_path}")
+                self.after(0, lambda: (self._set_entry(self._cookie_entry, out_path), self._save_settings()))
+            except Exception as e:
+                self._log_msg(f"❌ Couldn't read cookies from {browser_key}: {e}")
+                self._log_msg("   Tip: close the browser fully first — it locks its cookie DB while running.")
+
+        threading.Thread(target=_do, daemon=True).start()
 
     def _build_remote_row(self):
         panel = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
@@ -762,10 +905,15 @@ class YTDownloaderPage(ctk.CTkFrame):
 
             # android/ios/web_safari don't support cookies and get silently
             # skipped when a cookiefile is set, which was leaving only the
-            # "tv" client in play (the one hitting 403s). Pick clients that
-            # actually get used for the auth mode in play.
+            # "tv" client in play. "tv" used to be kept around to dodge an
+            # older 403 issue, but YouTube is now running an experiment
+            # that serves DRM-only formats on the tv (TVHTML5) client for
+            # some accounts — yt-dlp raises "This video is DRM protected"
+            # even though the video itself is fine. See
+            # https://github.com/yt-dlp/yt-dlp/issues/12563. Dropping "tv"
+            # avoids it; "web" + "mweb" both support cookies.
             if cookie:
-                player_clients = ["web", "mweb", "tv"]
+                player_clients = ["web", "mweb"]
             else:
                 player_clients = ["default", "android", "ios"]
 
@@ -789,6 +937,7 @@ class YTDownloaderPage(ctk.CTkFrame):
                         "player_client": player_clients,
                     }
                 },
+                "remote_components": ["ejs:github"],
             }
 
             if self.ffmpeg_dir:
@@ -797,15 +946,23 @@ class YTDownloaderPage(ctk.CTkFrame):
             if cookie:
                 opts["cookiefile"] = os.path.abspath(cookie)
 
+            deno_path = _find_deno()
+            opts["js_runtimes"] = {"deno": {"path": deno_path}} if deno_path else {"deno": {}}
+
             if fmt == "mp3":
-                opts["format"] = "bestaudio/best"
+                opts["format"] = "bestaudio*/bestaudio/best"
                 opts["postprocessors"] = [{
                     "key":              "FFmpegExtractAudio",
                     "preferredcodec":   "mp3",
                     "preferredquality": quality,
                 }]
             else:
-                opts["format"] = "bestvideo+bestaudio/best"
+                # The "*" variants include formats where yt-dlp couldn't
+                # resolve codec info (common with the android/ios player
+                # clients) — without it, "bestvideo" alone can filter out
+                # every available format and raise "Requested format is
+                # not available" on some videos.
+                opts["format"] = "bestvideo*+bestaudio/bestvideo+bestaudio/best"
                 opts["merge_output_format"] = "mp4"
 
             if cookie:
@@ -825,7 +982,8 @@ class YTDownloaderPage(ctk.CTkFrame):
                 # streams for some videos while the combined "progressive"
                 # format (itag 18) still works. Retry once with that before
                 # giving up.
-                if "403" in str(e) and opts.get("format") != "18/best":
+                if (("403" in str(e) or "Requested format is not available" in str(e))
+                        and opts.get("format") != "18/best"):
                     self._log_msg(
                         "⚠ Adaptive stream blocked (403) — retrying with a "
                         "combined format (18)…"
@@ -864,4 +1022,4 @@ class YTDownloaderPage(ctk.CTkFrame):
 
         finally:
             self._downloading = False
-            self.after(0, lambda: self._dl_btn.configure(state="normal", text="⬇  Download"))
+            self.after(0, lambda: self._dl_btn.configure(state="normal", text="⬇  Download"))

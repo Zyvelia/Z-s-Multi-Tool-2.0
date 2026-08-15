@@ -8,8 +8,11 @@ import datetime
 from .game_scanner import GameScanner
 from .launcher import GameLauncher
 from .save_manager import SaveManager
+from .web_server import GamingHubWebServer
 from core import theme
 from core import paths
+from core.remote_access_panel import RemoteAccessPanel
+from core.services.tailscale_service import APP_HTTPS_PORTS
 
 # ── Palette (shared app theme) ──────────────────────────────
 BG          = theme.BG           # base background
@@ -57,6 +60,14 @@ class GamingHubUI(ctk.CTkFrame):
         self.filtered_games = []
         self.drive_checkboxes = {}
         self.hub_settings = self.load_hub_settings()
+
+        # Lazily created + stashed on the manager (same pattern as Music
+        # Player / YouTube Downloader) so it survives navigating away
+        # from this page and phone requests can still launch games.
+        self.web_server = getattr(manager, "gaming_hub_web_server", None) \
+            or GamingHubWebServer()
+        manager.gaming_hub_web_server = self.web_server
+
         self.build_ui()
 
         # Show last-known results instantly from cache (no scanning),
@@ -114,6 +125,11 @@ class GamingHubUI(ctk.CTkFrame):
 
     def build_ui(self):
         self._build_header()
+        self.remote_panel = RemoteAccessPanel(
+            self, manager=self.manager, app_key="games",
+            web_server=self.web_server, port=APP_HTTPS_PORTS["games"],
+        )
+        self.remote_panel.pack(fill="x", padx=18, pady=(12, 0))
         self._build_tabs()
 
     def _build_header(self):
@@ -587,6 +603,10 @@ class GamingHubUI(ctk.CTkFrame):
 
     def display_games(self, games):
         self.games = games
+        # Scanner.scan() already wrote games_cache.json — refresh the
+        # remote web server's in-memory copy so a phone request right
+        # after a scan sees the new list without needing a restart.
+        self.web_server.refresh_from_cache()
         count = len(games)
         self.game_count.configure(
             text=f"{count} {'game' if count == 1 else 'games'} found"

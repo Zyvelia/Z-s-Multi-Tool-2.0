@@ -72,7 +72,10 @@ def migrate_legacy_path(new_path: str, legacy_absolute_path: str) -> str:
     if os.path.exists(legacy_absolute_path):
         try:
             os.makedirs(os.path.dirname(new_path), exist_ok=True)
-            shutil.copy2(legacy_absolute_path, new_path)
+            # move (not copy): consumes the legacy file so it can't be
+            # silently restored again later if new_path is ever deleted
+            # on purpose (e.g. resetting a master password).
+            shutil.move(legacy_absolute_path, new_path)
             print(f"[paths] Migrated {legacy_absolute_path} -> {new_path}")
         except Exception as e:
             print(f"[paths] Migration failed for {legacy_absolute_path}: {e}")
@@ -99,7 +102,11 @@ def migrate_legacy_file(new_path: str, *legacy_relparts) -> str:
     if os.path.exists(legacy_path):
         try:
             os.makedirs(os.path.dirname(new_path), exist_ok=True)
-            shutil.copy2(legacy_path, new_path)
+            # move (not copy): consumes the legacy file so a later
+            # intentional delete of new_path (e.g. resetting a master
+            # password) isn't undone by this migration re-copying the
+            # old file back in on the next launch.
+            shutil.move(legacy_path, new_path)
             print(f"[paths] Migrated {legacy_path} -> {new_path}")
         except Exception as e:
             print(f"[paths] Migration failed for {legacy_path}: {e}")

@@ -7,7 +7,10 @@
 import customtkinter as ctk
 import psutil
 
-from core import theme
+try:
+    from core import theme
+except ImportError:  # pragma: no cover - fallback for standalone use/testing
+    from . import _theme as theme
 
 REFRESH_MS = 1500
 

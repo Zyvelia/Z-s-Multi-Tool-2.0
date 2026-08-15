@@ -1,7 +1,7 @@
 from .ui import WeatherNewsUI
 
 
-def open_weather_news(manager):
+def open_game_stats_news(manager):
     return WeatherNewsUI(
         manager.container,
         manager
@@ -11,10 +11,10 @@ def open_weather_news(manager):
 def register(plugin_manager):
     plugin_manager.register(
         {
-            "name": "Weather & News",
+            "name": "Game Stats & News",
             "category": "Info",
-            "desc": "Live weather + custom news feeds, saved articles, and settings",
-            "icon": "🌦️",
-            "open": open_weather_news,
+            "desc": "Live game stats via your own API keys (Fortnite, Steam, or any custom API), plus custom news feeds and saved articles",
+            "icon": "🕹️",
+            "open": open_game_stats_news,
         }
     )

@@ -5,6 +5,9 @@ import threading
 import numpy as np
 
 from core import theme
+from core.remote_access_panel import RemoteAccessPanel
+from core.services.tailscale_service import APP_HTTPS_PORTS
+from .web_server import SoundboardWebServer
 
 # ── Colours (shared app theme) ────────────────────────────────────────────
 BG      = theme.BG
@@ -158,6 +161,16 @@ class SoundboardPage(ctk.CTkFrame):
 
         self._all_devices: list[dict] = []
 
+        # Lazily created + stashed on the manager (same pattern as Music
+        # Player / YouTube Downloader / Gaming Hub) so it survives
+        # navigating away from this page. Its "folder" + "device_indices"
+        # settings are kept in sync with whatever's picked below, so a
+        # phone request works off the same sound library and output
+        # device(s) — e.g. a Bluetooth speaker paired to this PC.
+        self.web_server = getattr(manager, "soundboard_web_server", None) \
+            or SoundboardWebServer()
+        manager.soundboard_web_server = self.web_server
+
         self._build_ui()
         self._refresh_devices()
 
@@ -165,6 +178,11 @@ class SoundboardPage(ctk.CTkFrame):
 
     def _build_ui(self):
         self._build_header()
+        self.remote_panel = RemoteAccessPanel(
+            self, manager=self.manager, app_key="soundboard",
+            web_server=self.web_server, port=APP_HTTPS_PORTS["soundboard"],
+        )
+        self.remote_panel.pack(fill="x", padx=12, pady=(0, 4))
         self._build_toolbar()
         self._build_device_bar()
         self._build_board()
@@ -289,6 +307,8 @@ class SoundboardPage(ctk.CTkFrame):
                 break
 
         self.status.configure(text=f"Found {len(self._all_devices)} output devices")
+        self.web_server.update_settings(
+            {"device_indices": self._active_device_indices()})
 
     def _on_device_pick(self, slot: str, name: str):
         idx = None
@@ -301,6 +321,8 @@ class SoundboardPage(ctk.CTkFrame):
             self._device_a = idx
         else:
             self._device_b = idx
+        self.web_server.update_settings(
+            {"device_indices": self._active_device_indices()})
 
     def _active_device_indices(self) -> list[int]:
         """Return list of device indices to play to. Deduped, None = default (0)."""
@@ -328,6 +350,10 @@ class SoundboardPage(ctk.CTkFrame):
         folder = filedialog.askdirectory()
         if not folder:
             return
+        # Remembered so the remote web server (phone access) has a
+        # folder to serve even when this page isn't open — see
+        # modules/soundboard/web_server.py.
+        self.web_server.update_settings({"folder": folder})
         existing = {s.path for s in self.slots}
         new_paths = sorted(
             os.path.join(root, f)
