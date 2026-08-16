@@ -7,12 +7,21 @@
 # core/services/vault_web_server.py.
 #
 # Security model:
-#   - Binds to 127.0.0.1 ONLY. It is never reachable except through the
+#   - Binds to 127.0.0.1 ONLY. By default it's reachable only through the
 #     Tailscale HTTPS proxy running on the same machine, which only
-#     accepts connections from other devices on your own tailnet.
-#   - There's no separate login here (unlike the vault) — being on your
-#     tailnet already means it's one of your own signed-in devices, and
-#     a music library is not sensitive the way passwords are.
+#     accepts connections from other devices on your own tailnet — and in
+#     that mode no login is required, being on your tailnet already means
+#     it's one of your own signed-in devices.
+#   - If an API key is set (Settings tab in the Music Player page, or
+#     directly on `MusicWebServer.api_key`), it's required on every
+#     endpoint that touches the library or playback — /api/songs,
+#     /api/stream/<id>, /api/now-playing, /api/control — via an
+#     `X-Api-Key` header. /api/status stays open unauthenticated so a
+#     client can always tell "reachable" from "reachable but need a key"
+#     without guessing. Set a key before pointing anything other than
+#     your own tailnet at this server (e.g. a reverse proxy/tunnel that
+#     makes it reachable from the public internet) — without one, anyone
+#     who can reach the port can browse and stream the whole library.
 #
 # Playback model:
 #   - The phone is its own player. It streams audio straight from your
@@ -79,6 +88,12 @@ def _song_json(row):
         "artist": row.get("artist") or "",
         "album": row.get("album") or "",
         "duration": row.get("duration") or 0,
+        # Bytes on disk, from the songs table's `size` column (populated by
+        # the library scan). Lets the mobile app show download sizes and
+        # size a progress bar before the stream response's real
+        # Content-Length is known. 0 for rows scanned before this column
+        # existed — harmless, just means "unknown" client-side.
+        "size": row.get("size") or 0,
     }
 
 
@@ -108,9 +123,33 @@ class _Handler(BaseHTTPRequestHandler):
         # to fetch() this API.
         origin = self.headers.get("Origin")
         self.send_header("Access-Control-Allow-Origin", origin if origin else "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Api-Key")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Vary", "Origin")
+
+    def _api_key(self):
+        ws = getattr(self.server, "web_server", None)
+        return (getattr(ws, "api_key", "") or "").strip() if ws else ""
+
+    def _key_ok(self):
+        """True if no key is configured (open access, e.g. Tailscale-only
+        use) or the caller sent a matching key. Accepts the key either as
+        an X-Api-Key header (used by the mobile app / any real API
+        client) or a `?key=` query parameter — the query param exists
+        specifically because a plain HTML <audio> element (used by the
+        built-in mobile page below) can't set custom headers on the
+        request it makes for its src URL."""
+        required = self._api_key()
+        if not required:
+            return True
+        sent = (self.headers.get("X-Api-Key") or "").strip()
+        if sent == required:
+            return True
+        qs = parse_qs(urlsplit(self.path).query)
+        return (qs.get("key") or [""])[0].strip() == required
+
+    def _reject_key(self):
+        self._send_json(401, {"error": "missing or invalid API key"})
 
     def do_OPTIONS(self):
         self.send_response(204)
@@ -146,14 +185,30 @@ class _Handler(BaseHTTPRequestHandler):
         qs = parse_qs(parts.query)
 
         if path in ("/", "/index.html"):
-            self._send_html(200, _PAGE_SHELL)
+            self._send_html(200, _page_shell(bool(self._api_key())))
         elif path == "/api/status":
-            self._send_json(200, {"ok": True, "count": self._lib().count()})
+            # Deliberately unauthenticated — a client needs to be able to
+            # tell "server unreachable" from "reachable, need a key"
+            # before it has a key to send. Doesn't leak library contents.
+            self._send_json(200, {
+                "ok": True,
+                "count": self._lib().count(),
+                "auth_required": bool(self._api_key()),
+            })
         elif path == "/api/now-playing":
+            if not self._key_ok():
+                self._reject_key()
+                return
             self._handle_now_playing()
         elif path == "/api/songs":
+            if not self._key_ok():
+                self._reject_key()
+                return
             self._handle_songs(qs)
         elif path.startswith("/api/stream/"):
+            if not self._key_ok():
+                self._reject_key()
+                return
             self._handle_stream(path[len("/api/stream/"):], send_body=True)
         else:
             self._send_json(404, {"error": "not found"})
@@ -161,6 +216,9 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         parts = urlsplit(self.path)
         if parts.path == "/api/control":
+            if not self._key_ok():
+                self._reject_key()
+                return
             self._handle_control()
         else:
             self._send_json(404, {"error": "not found"})
@@ -169,6 +227,10 @@ class _Handler(BaseHTTPRequestHandler):
         parts = urlsplit(self.path)
         path = parts.path
         if path.startswith("/api/stream/"):
+            if not self._key_ok():
+                self.send_response(401)
+                self.end_headers()
+                return
             self._handle_stream(path[len("/api/stream/"):], send_body=False)
         else:
             self.send_response(404)
@@ -386,6 +448,12 @@ class MusicWebServer:
         self._httpd = None
         self._thread = None
         self.port = None
+        # Optional — blank means no gate (fine for Tailscale-only use,
+        # since the tailnet itself is the access control). Set this
+        # before exposing the server any other way. Checked live on every
+        # request via httpd.web_server, so it can be changed while the
+        # server is running (no restart needed).
+        self.api_key = ""
 
     def is_running(self):
         return self._httpd is not None
@@ -427,7 +495,11 @@ class MusicWebServer:
 # MOBILE PAGE (single file, no build step, no external requests)
 # =====================================================
 
-_PAGE_SHELL = """<!doctype html>
+def _page_shell(needs_key):
+    return _PAGE_SHELL_TEMPLATE.replace("__NEEDS_KEY__", "true" if needs_key else "false")
+
+
+_PAGE_SHELL_TEMPLATE = """<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -624,8 +696,34 @@ const LIMIT = 100;
 let total = 0;
 let seeking = false;
 
+const NEEDS_KEY = __NEEDS_KEY__;
+let apiKey = NEEDS_KEY ? (sessionStorage.getItem('music_api_key') || '') : '';
+
+function ensureKey() {
+  if (!NEEDS_KEY || apiKey) return true;
+  const entered = prompt('API key required:');
+  if (!entered) return false;
+  apiKey = entered.trim();
+  sessionStorage.setItem('music_api_key', apiKey);
+  return true;
+}
+
+// Appends ?key=... for plain <audio src="..."> requests, which can't
+// carry the X-Api-Key header the way fetch() below can.
+function withKey(path) {
+  if (!apiKey) return path;
+  return path + (path.includes('?') ? '&' : '?') + 'key=' + encodeURIComponent(apiKey);
+}
+
 async function api(path) {
-  const res = await fetch(path);
+  if (!ensureKey()) throw new Error('API key required');
+  const headers = apiKey ? { 'X-Api-Key': apiKey } : {};
+  const res = await fetch(path, { headers });
+  if (res.status === 401) {
+    apiKey = '';
+    sessionStorage.removeItem('music_api_key');
+    throw new Error('invalid API key');
+  }
   if (!res.ok) throw new Error('request failed (' + res.status + ')');
   return await res.json();
 }
@@ -711,9 +809,10 @@ clearBtn.onclick = () => { searchInput.value = ''; query = ''; clearBtn.style.di
 
 function playIndex(i) {
   if (i < 0 || i >= queue.length) return;
+  if (!ensureKey()) return;
   currentIndex = i;
   const song = queue[i];
-  audio.src = `/api/stream/${song.id}`;
+  audio.src = withKey(`/api/stream/${song.id}`);
   audio.play().catch(() => {});
   playerBar.classList.add('show');
   npTitle.textContent = song.title;
