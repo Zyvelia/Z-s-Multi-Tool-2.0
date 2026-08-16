@@ -1,0 +1,33 @@
+{
+  "categories": {
+    "Browsers": [
+      { "name": "Google Chrome", "id": "Google.Chrome", "desc": "Web browser by Google" },
+      { "name": "Mozilla Firefox", "id": "Mozilla.Firefox", "desc": "Open-source web browser" },
+      { "name": "Brave", "id": "Brave.Brave", "desc": "Privacy-focused browser" }
+    ],
+    "Dev Tools": [
+      { "name": "Visual Studio Code", "id": "Microsoft.VisualStudioCode", "desc": "Code editor" },
+      { "name": "Git", "id": "Git.Git", "desc": "Version control system" },
+      { "name": "Python 3", "id": "Python.Python.3.12", "desc": "Python interpreter" },
+      { "name": "Node.js LTS", "id": "OpenJS.NodeJS.LTS", "desc": "JavaScript runtime" },
+      { "name": "Windows Terminal", "id": "Microsoft.WindowsTerminal", "desc": "Modern terminal app" },
+      { "name": "Docker Desktop", "id": "Docker.DockerDesktop", "desc": "Container platform" }
+    ],
+    "Utilities": [
+      { "name": "7-Zip", "id": "7zip.7zip", "desc": "File archiver" },
+      { "name": "Everything", "id": "voidtools.Everything", "desc": "Instant file search" },
+      { "name": "PowerToys", "id": "Microsoft.PowerToys", "desc": "Windows productivity utilities" },
+      { "name": "Notepad++", "id": "Notepad++.Notepad++", "desc": "Lightweight text editor" }
+    ],
+    "Media": [
+      { "name": "VLC Media Player", "id": "VideoLAN.VLC", "desc": "Plays almost any media format" },
+      { "name": "Spotify", "id": "Spotify.Spotify", "desc": "Music streaming" },
+      { "name": "OBS Studio", "id": "OBSProject.OBSStudio", "desc": "Screen recording / streaming" }
+    ],
+    "Communication": [
+      { "name": "Discord", "id": "Discord.Discord", "desc": "Chat & voice for communities" },
+      { "name": "Zoom", "id": "Zoom.Zoom", "desc": "Video conferencing" },
+      { "name": "Slack", "id": "SlackTechnologies.Slack", "desc": "Team messaging" }
+    ]
+  }
+}

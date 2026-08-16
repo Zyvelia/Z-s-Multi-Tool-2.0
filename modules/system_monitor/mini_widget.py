@@ -8,9 +8,10 @@ import customtkinter as ctk
 import psutil
 
 try:
-    from core import theme
+    from .style import theme, METRIC_COLORS
 except ImportError:  # pragma: no cover - fallback for standalone use/testing
     from . import _theme as theme
+    METRIC_COLORS = theme.METRIC_COLORS
 
 REFRESH_MS = 1500
 
@@ -24,12 +25,12 @@ class SystemMonitorMiniWidget(ctk.CTkFrame):
         self.grid_columnconfigure(1, weight=1)
         self.grid_columnconfigure(2, weight=0)
 
-        self._cpu_bar = self._build_row(0, "CPU")
-        self._ram_bar = self._build_row(1, "RAM")
+        self._cpu_bar = self._build_row(0, "CPU", METRIC_COLORS["cpu"])
+        self._ram_bar = self._build_row(1, "RAM", METRIC_COLORS["ram"])
 
         self._tick()
 
-    def _build_row(self, row, label):
+    def _build_row(self, row, label, color):
         ctk.CTkLabel(
             self,
             text=label,
@@ -44,10 +45,11 @@ class SystemMonitorMiniWidget(ctk.CTkFrame):
             height=8,
             corner_radius=4,
             fg_color=theme.PANEL_2,
-            progress_color=theme.ACCENT
+            progress_color=color
         )
         bar.set(0)
         bar.grid(row=row, column=1, sticky="ew", padx=8, pady=2)
+        bar.base_color = color
 
         pct_label = ctk.CTkLabel(
             self,
@@ -84,7 +86,7 @@ class SystemMonitorMiniWidget(ctk.CTkFrame):
 
             for bar, val in ((self._cpu_bar, cpu), (self._ram_bar, ram)):
                 bar.configure(
-                    progress_color=theme.DANGER if val >= 85 else theme.ACCENT
+                    progress_color=theme.DANGER if val >= 85 else bar.base_color
                 )
         except Exception:
             pass

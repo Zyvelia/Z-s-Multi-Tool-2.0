@@ -63,7 +63,7 @@ def open_metadata_editor(manager):
 def register(manager):
     manager.register({
         "name": "Metadata Editor",
-        "category": "Utilities",
+        "category": "Tools",
         "desc": "Edit audio tags, image EXIF fields, and file timestamps",
         "icon": "🏷️",
         "open": open_metadata_editor,

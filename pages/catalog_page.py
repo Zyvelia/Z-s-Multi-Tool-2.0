@@ -122,48 +122,103 @@ class CatalogPage(ctk.CTkFrame):
     # =====================================================
 
     def _build_filters(self):
-        frame = ctk.CTkFrame(self, fg_color="transparent")
-        frame.grid(row=1, column=0, sticky="ew", padx=theme.PAD_LG, pady=(0, theme.PAD))
+        outer = ctk.CTkFrame(self, **theme.panel_style())
+        outer.grid(row=1, column=0, sticky="ew", padx=theme.PAD_LG, pady=(0, theme.PAD))
+        outer.grid_columnconfigure(0, weight=1)
 
-        self.filter_frame = frame
+        ctk.CTkLabel(
+            outer,
+            text="CATEGORY",
+            font=theme.font(10, "bold"),
+            text_color=theme.FAINT,
+            anchor="w",
+        ).grid(row=0, column=0, sticky="w", padx=theme.PAD_LG, pady=(theme.PAD, 2))
 
-        categories = {"All"}  # Start with "All" category
+        # A plain ctk.CTkFrame doesn't grow to fit children placed with
+        # .place() (only pack/grid do that), so _reflow_filters() sets its
+        # height explicitly once it knows how many rows the pills wrapped
+        # into — that's what lets this wrap to a second row instead of
+        # ever running off the edge of the window.
+        self.filter_frame = ctk.CTkFrame(outer, fg_color="transparent")
+        self.filter_frame.grid(
+            row=1, column=0, sticky="ew", padx=theme.PAD, pady=(0, theme.PAD)
+        )
 
-        # Dynamically collect categories from available tools
-        for tool in self.plugin_manager.get_tools():
-            categories.add(
-                tool.get("category", "Other")  # Default to "Other" if category is missing
-            )
+        # Counts (and the category list itself) are computed once here,
+        # same as before — matches the existing tradeoff elsewhere in this
+        # page of keeping widgets persistent rather than rebuilding on
+        # every render() (e.g. every search keystroke). Hiding a tool
+        # won't live-update its category's count until the page is
+        # rebuilt, which was already true of the category list itself.
+        hidden = set(self.settings.get("hidden_tools") or [])
+        visible = [
+            t for t in self.plugin_manager.get_tools() if t.get("name") not in hidden
+        ]
 
-        # Create buttons for each category, sorted alphabetically ("All" first)
-        ordered = ["All"] + sorted(categories - {"All"})
+        counts = {}
+        for t in visible:
+            counts[t.get("category", "Other")] = counts.get(t.get("category", "Other"), 0) + 1
 
+        ordered = ["All"] + sorted(set(counts) - {"All"})
+
+        self._category_widths = {}
         for cat in ordered:
+            count = len(visible) if cat == "All" else counts.get(cat, 0)
+            label = f"{cat}  ·  {count}"
+            # Sized to the label instead of a fixed width — a short name
+            # like "All" no longer sits in an oversized pill, and a long
+            # category name no longer gets clipped. +30px covers going
+            # bold on selection without the text touching the edges.
+            width = max(92, min(220, 30 + 8 * len(label)))
+            self._category_widths[cat] = width
+
             btn = ctk.CTkButton(
-                frame,
-                text=cat,
-                width=110,
+                self.filter_frame,
+                text=label,
+                width=width,
                 height=32,
-                corner_radius=theme.RADIUS_SM,
-                command=lambda c=cat: self.set_category(c)
+                corner_radius=16,
+                font=theme.font(12),
+                command=lambda c=cat: self.set_category(c),
             )
-
-            btn.pack(
-                side="left",
-                padx=(0, 8),
-                pady=5
-            )
-
             self.category_buttons[cat] = btn
 
         self._refresh_filter_styles()
+        self.filter_frame.bind("<Configure>", lambda e: self._reflow_filters())
+        self._reflow_filters()
+
+    def _reflow_filters(self):
+        """Lay the category pills out left-to-right, wrapping to a new row
+        whenever the next pill wouldn't fit — so the filter bar adapts to
+        the window width instead of overflowing it."""
+        frame = self.filter_frame
+        available = frame.winfo_width()
+        if available <= 1:
+            available = self.winfo_width() or 900
+
+        gap = 8
+        row_height = 32 + gap
+        x = y = 0
+
+        for cat, btn in self.category_buttons.items():
+            width = self._category_widths[cat]
+            if x > 0 and x + width > available:
+                x = 0
+                y += row_height
+            btn.place(x=x, y=y)
+            x += width + gap
+
+        frame.configure(height=y + 32)
 
     def _refresh_filter_styles(self):
         for cat, btn in self.category_buttons.items():
-            if cat == self.category:
-                btn.configure(fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER, text_color="#0b0d10")
-            else:
-                btn.configure(fg_color=theme.PANEL_2, hover_color=theme.PANEL_HOVER, text_color=theme.TEXT)
+            active = cat == self.category
+            btn.configure(
+                fg_color=theme.ACCENT if active else theme.PANEL_2,
+                hover_color=theme.ACCENT_HOVER if active else theme.PANEL_HOVER,
+                text_color="#0b0d10" if active else theme.TEXT,
+                font=theme.font(12, "bold" if active else "normal"),
+            )
 
     def set_category(self, category):
         self.category = category
@@ -262,6 +317,7 @@ class CatalogPage(ctk.CTkFrame):
     def _build_card(self, tool):
 
         accent = _stable_color(tool.get("name", ""))
+        icon = tool.get("icon", "🧩")
 
         card = ctk.CTkFrame(
             self.grid_frame,
@@ -271,13 +327,6 @@ class CatalogPage(ctk.CTkFrame):
             border_color=theme.BORDER
         )
         card.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkFrame(
-            card,
-            height=4,
-            fg_color=accent,
-            corner_radius=0
-        ).grid(row=0, column=0, sticky="ew")
 
         hide_btn = ctk.CTkButton(
             card,
@@ -293,15 +342,13 @@ class CatalogPage(ctk.CTkFrame):
         )
         hide_btn.place(relx=1.0, x=-10, y=14, anchor="ne")
 
-        icon = tool.get("icon", "🧩")
-
         ctk.CTkLabel(
             card,
             text=f"{icon}  {tool['name']}",
-            font=theme.font(17, "bold"),
+            font=theme.font(16, "bold"),
             text_color=theme.TEXT,
             anchor="w"
-        ).grid(row=1, column=0, sticky="ew", padx=16, pady=(14, 4))
+        ).grid(row=0, column=0, sticky="ew", padx=16, pady=(16, 4))
 
         ctk.CTkLabel(
             card,
@@ -311,9 +358,9 @@ class CatalogPage(ctk.CTkFrame):
             justify="left",
             anchor="w",
             wraplength=240
-        ).grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 10))
+        ).grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 10))
 
-        next_row = 3
+        next_row = 2
 
         widget_builder = tool.get("widget")
         if widget_builder:
@@ -333,17 +380,25 @@ class CatalogPage(ctk.CTkFrame):
         ).grid(row=next_row, column=0, sticky="ew", padx=16, pady=(0, 12))
         next_row += 1
 
+        # Open button gets its own fixed color (a calm sky blue) instead
+        # of theme.primary_button_style()'s ACCENT purple, so it reads
+        # as "the button" on every card regardless of that card's own
+        # accent-tinted hover border.
         ctk.CTkButton(
             card,
             text="Open",
             height=34,
             command=lambda t=tool: self.open_tool(t),
-            **theme.primary_button_style()
+            fg_color="#4ea1ff",
+            hover_color="#7dbaff",
+            text_color="#0b0d10",
+            corner_radius=theme.RADIUS_SM,
+            font=theme.font(13, "bold"),
         ).grid(row=next_row, column=0, sticky="ew", padx=16, pady=(0, 16))
 
         # subtle hover highlight, tinted with this card's own accent
-        # color instead of the fixed app accent, so it matches the
-        # top bar rather than fighting it
+        # color instead of the fixed app accent — the only place that
+        # color still shows up on the card now
         def on_enter(_e):
             card.configure(border_color=accent)
 

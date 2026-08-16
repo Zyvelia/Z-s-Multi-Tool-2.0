@@ -15,9 +15,11 @@ import customtkinter as ctk
 import psutil
 
 try:
-    from core import theme
+    from .style import theme, METRIC_COLORS, core_color
 except ImportError:  # pragma: no cover - fallback for standalone use/testing
     from . import _theme as theme
+    METRIC_COLORS = theme.METRIC_COLORS
+    core_color = theme.core_color
 
 
 REFRESH_MS = 1000
@@ -26,8 +28,11 @@ WARN_THRESHOLD = 80       # usage % at which a bar/gauge turns danger-colored
 TOP_PROCESS_COUNT = 8
 
 
-def _usage_color(pct: float) -> str:
-    return theme.DANGER if pct >= WARN_THRESHOLD else theme.ACCENT
+def _usage_color(pct: float, base: str = None) -> str:
+    """Danger-red past the warning threshold, otherwise `base` (each
+    metric card / core bar passes its own base color instead of every
+    bar sharing the one shared ACCENT)."""
+    return theme.DANGER if pct >= WARN_THRESHOLD else (base or theme.ACCENT)
 
 
 def _bytes_to_human(n: float) -> str:
@@ -57,7 +62,7 @@ class Sparkline(tk.Canvas):
         #   TclError: bad argument "220": must be name of window
         self._sw = width
         self._sh = height
-        self._color = color or theme.ACCENT
+        self._base_color = color or theme.ACCENT
         self._history: deque[float] = deque([0.0] * HISTORY_LEN, maxlen=HISTORY_LEN)
         self._line_id = None
 
@@ -75,7 +80,7 @@ class Sparkline(tk.Canvas):
             y = self._sh - (min(v, 100) / 100) * self._sh
             pts.extend((x, y))
         if len(pts) >= 4:
-            color = _usage_color(self._history[-1])
+            color = _usage_color(self._history[-1], self._base_color)
             self._line_id = self.create_line(*pts, fill=color, width=1.6, smooth=True)
 
 
@@ -85,9 +90,10 @@ class MetricCard(ctk.CTkFrame):
     """A single stat: label, big percentage, progress bar, and a sparkline
     showing recent history."""
 
-    def __init__(self, parent, label: str):
+    def __init__(self, parent, label: str, color: str = None):
         super().__init__(parent, fg_color=theme.PANEL, corner_radius=10)
         self.grid_columnconfigure(0, weight=1)
+        self._color = color or theme.ACCENT
 
         top = ctk.CTkFrame(self, fg_color="transparent")
         top.grid(row=0, column=0, sticky="ew", padx=14, pady=(12, 4))
@@ -98,18 +104,18 @@ class MetricCard(ctk.CTkFrame):
         ).grid(row=0, column=0, sticky="w")
 
         self.pct_label = ctk.CTkLabel(
-            top, text="0%", font=theme.font(20, "bold"), text_color=theme.ACCENT,
+            top, text="0%", font=theme.font(20, "bold"), text_color=self._color,
         )
         self.pct_label.grid(row=0, column=1, sticky="e")
 
         self.bar = ctk.CTkProgressBar(
             self, height=8, corner_radius=4,
-            fg_color=theme.PANEL_2, progress_color=theme.ACCENT,
+            fg_color=theme.PANEL_2, progress_color=self._color,
         )
         self.bar.set(0)
         self.bar.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 8))
 
-        self.sparkline = Sparkline(self, width=220, height=28)
+        self.sparkline = Sparkline(self, width=220, height=28, color=self._color)
         self.sparkline.grid(row=2, column=0, sticky="ew", padx=14, pady=(0, 12))
 
         self.detail_label = ctk.CTkLabel(
@@ -118,7 +124,7 @@ class MetricCard(ctk.CTkFrame):
         self.detail_label.grid(row=3, column=0, sticky="w", padx=14, pady=(0, 12))
 
     def set_value(self, pct: float, detail: str = "") -> None:
-        color = _usage_color(pct)
+        color = _usage_color(pct, self._color)
         self.pct_label.configure(text=f"{pct:.0f}%", text_color=color)
         self.bar.set(pct / 100)
         self.bar.configure(progress_color=color)
@@ -172,16 +178,16 @@ class SystemMonitorPage(ctk.CTkFrame):
         for i in range(4):
             cards_row.grid_columnconfigure(i, weight=1, uniform="cards")
 
-        self.cpu_card = MetricCard(cards_row, "CPU")
+        self.cpu_card = MetricCard(cards_row, "CPU", color=METRIC_COLORS["cpu"])
         self.cpu_card.grid(row=0, column=0, padx=(0, 8), pady=(0, 12), sticky="nsew")
 
-        self.ram_card = MetricCard(cards_row, "MEMORY")
+        self.ram_card = MetricCard(cards_row, "MEMORY", color=METRIC_COLORS["ram"])
         self.ram_card.grid(row=0, column=1, padx=8, pady=(0, 12), sticky="nsew")
 
-        self.disk_card = MetricCard(cards_row, "DISK (C:)")
+        self.disk_card = MetricCard(cards_row, "DISK (C:)", color=METRIC_COLORS["disk"])
         self.disk_card.grid(row=0, column=2, padx=8, pady=(0, 12), sticky="nsew")
 
-        self.swap_card = MetricCard(cards_row, "SWAP")
+        self.swap_card = MetricCard(cards_row, "SWAP", color=METRIC_COLORS["swap"])
         self.swap_card.grid(row=0, column=3, padx=(8, 0), pady=(0, 12), sticky="nsew")
 
         # ---- per-core CPU row ----
@@ -264,7 +270,7 @@ class SystemMonitorPage(ctk.CTkFrame):
 
             bar = ctk.CTkProgressBar(
                 cell, height=6, corner_radius=3,
-                fg_color=theme.PANEL_2, progress_color=theme.ACCENT,
+                fg_color=theme.PANEL_2, progress_color=core_color(i),
             )
             bar.set(0)
             bar.grid(row=1, column=0, sticky="ew")
@@ -340,7 +346,7 @@ class SystemMonitorPage(ctk.CTkFrame):
         for i, pct in enumerate(per_core):
             if i < len(self._core_bars):
                 self._core_bars[i].set(pct / 100)
-                self._core_bars[i].configure(progress_color=_usage_color(pct))
+                self._core_bars[i].configure(progress_color=_usage_color(pct, core_color(i)))
 
         # -- system info --
         self._os_val.configure(text=f"{platform.system()} {platform.release()}")

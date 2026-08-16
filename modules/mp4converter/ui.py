@@ -32,7 +32,11 @@ VIDEO_TYPES = [
 
 def _load_settings() -> dict:
     import json
-    defaults = {"fps": 15, "width": 480, "loop": True, "dither": "bayer", "last_dir": "", "output_dir": ""}
+    defaults = {
+        "fps": 15, "width": 480, "loop": True, "dither": "bayer", "last_dir": "", "output_dir": "",
+        "fit_box": False, "max_height": 320,
+        "compress": False, "target_size_mb": 10,
+    }
     try:
         if os.path.isfile(SETTINGS_FILE):
             with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
@@ -205,59 +209,139 @@ class Mp4ToGifPage(ctk.CTkFrame):
         self._build_trim_panel(row)
 
     def _build_quality_panel(self, parent):
-        panel = ctk.CTkFrame(parent, **theme.panel_style())
+        panel = ctk.CTkScrollableFrame(parent, height=260, **theme.panel_style())
         panel.grid(row=0, column=0, sticky="nsew", padx=(0, theme.PAD // 2))
         panel.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(
             panel, text="QUALITY", font=theme.font(11, "bold"), text_color=theme.FAINT, anchor="w"
-        ).grid(row=0, column=0, sticky="ew", padx=theme.PAD_LG, pady=(theme.PAD_LG, theme.PAD))
+        ).grid(row=0, column=0, sticky="ew", padx=theme.PAD, pady=(theme.PAD, 6))
 
         # ---- FPS ----
         fps_row = ctk.CTkFrame(panel, fg_color="transparent")
-        fps_row.grid(row=1, column=0, sticky="ew", padx=theme.PAD_LG)
+        fps_row.grid(row=1, column=0, sticky="ew", padx=theme.PAD)
         fps_row.grid_columnconfigure(0, weight=1)
 
-        self.fps_value_label = ctk.CTkLabel(fps_row, text="", font=theme.font(12), text_color=theme.TEXT)
+        self.fps_value_label = ctk.CTkLabel(fps_row, text="", font=theme.font(11), text_color=theme.TEXT)
         self.fps_value_label.grid(row=0, column=1, sticky="e")
-        ctk.CTkLabel(fps_row, text="Frame rate", font=theme.font(12), text_color=theme.MUTED).grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(fps_row, text="Frame rate", font=theme.font(11), text_color=theme.MUTED).grid(row=0, column=0, sticky="w")
 
         self.fps_slider = ctk.CTkSlider(
-            panel, from_=5, to=30, number_of_steps=25, command=self._on_fps_change
+            panel, from_=5, to=30, number_of_steps=25, height=14, command=self._on_fps_change
         )
         self.fps_slider.set(self.settings.get("fps", 15))
-        self.fps_slider.grid(row=2, column=0, sticky="ew", padx=theme.PAD_LG, pady=(4, theme.PAD))
+        self.fps_slider.grid(row=2, column=0, sticky="ew", padx=theme.PAD, pady=(3, 6))
         self._on_fps_change(self.fps_slider.get())
 
         # ---- Width ----
         width_row = ctk.CTkFrame(panel, fg_color="transparent")
-        width_row.grid(row=3, column=0, sticky="ew", padx=theme.PAD_LG)
+        width_row.grid(row=3, column=0, sticky="ew", padx=theme.PAD)
         width_row.grid_columnconfigure(0, weight=1)
 
-        self.width_value_label = ctk.CTkLabel(width_row, text="", font=theme.font(12), text_color=theme.TEXT)
+        self.width_value_label = ctk.CTkLabel(width_row, text="", font=theme.font(11), text_color=theme.TEXT)
         self.width_value_label.grid(row=0, column=1, sticky="e")
-        ctk.CTkLabel(width_row, text="Output width", font=theme.font(12), text_color=theme.MUTED).grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(width_row, text="Output width", font=theme.font(11), text_color=theme.MUTED).grid(row=0, column=0, sticky="w")
 
         self.width_slider = ctk.CTkSlider(
-            panel, from_=120, to=1080, number_of_steps=96, command=self._on_width_change
+            panel, from_=120, to=1080, number_of_steps=96, height=14, command=self._on_width_change
         )
         self.width_slider.set(self.settings.get("width", 480))
-        self.width_slider.grid(row=4, column=0, sticky="ew", padx=theme.PAD_LG, pady=(4, theme.PAD))
+        self.width_slider.grid(row=4, column=0, sticky="ew", padx=theme.PAD, pady=(3, 6))
         self._on_width_change(self.width_slider.get())
 
         # ---- Loop / dither ----
         opt_row = ctk.CTkFrame(panel, fg_color="transparent")
-        opt_row.grid(row=5, column=0, sticky="ew", padx=theme.PAD_LG, pady=(0, theme.PAD_LG))
+        opt_row.grid(row=5, column=0, sticky="ew", padx=theme.PAD, pady=(0, 8))
 
         self.loop_var = ctk.BooleanVar(value=self.settings.get("loop", True))
         ctk.CTkCheckBox(
             opt_row, text="Loop forever", variable=self.loop_var,
-            font=theme.font(12), text_color=theme.TEXT,
+            font=theme.font(11), text_color=theme.TEXT, checkbox_width=16, checkbox_height=16,
             fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER
         ).pack(side="left")
 
         ctk.CTkLabel(opt_row, text="  Smaller width and lower FPS = smaller file size.",
-                     font=theme.font(10), text_color=theme.FAINT).pack(side="left", padx=(10, 0))
+                     font=theme.font(9), text_color=theme.FAINT).pack(side="left", padx=(8, 0))
+
+        self._build_compress_controls(panel)
+
+    def _build_compress_controls(self, panel):
+        """
+        Two independent extras layered onto the basic width/fps controls:
+          - "Fit inside a box" — constrains output to width x max-height
+            (e.g. 320x320) instead of a fixed width with auto height.
+          - "Compress to a target size" — after converting, if the GIF
+            is over the limit, automatically retries at lower quality
+            (see converter.convert_within_size) until it fits or the
+            attempt budget runs out.
+        Both are opt-in checkboxes so the simple case (just move the
+        sliders) still behaves exactly as before.
+        """
+        sep = ctk.CTkFrame(panel, height=1, fg_color=theme.BORDER)
+        sep.grid(row=6, column=0, sticky="ew", padx=theme.PAD, pady=(0, 8))
+
+        # ---- Fit inside a box (max height) ----
+        box_row = ctk.CTkFrame(panel, fg_color="transparent")
+        box_row.grid(row=7, column=0, sticky="ew", padx=theme.PAD)
+        box_row.grid_columnconfigure(1, weight=1)
+
+        self.fit_box_var = ctk.BooleanVar(value=self.settings.get("fit_box", False))
+        ctk.CTkCheckBox(
+            box_row, text="Fit inside a box (max height)", variable=self.fit_box_var,
+            font=theme.font(11), text_color=theme.TEXT, checkbox_width=16, checkbox_height=16,
+            fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
+            command=self._on_fit_box_toggle,
+        ).grid(row=0, column=0, sticky="w")
+
+        self.max_height_entry = ctk.CTkEntry(box_row, width=52, height=22, font=theme.font(11))
+        self.max_height_entry.insert(0, str(self.settings.get("max_height", 320)))
+        self.max_height_entry.grid(row=0, column=2, sticky="e")
+        ctk.CTkLabel(box_row, text="max height px", font=theme.font(10), text_color=theme.MUTED).grid(
+            row=0, column=1, sticky="e", padx=(0, 6)
+        )
+
+        ctk.CTkLabel(
+            box_row,
+            text="Output width above becomes the box's max width too — e.g. 320 + 320 keeps everything within 320×320.",
+            font=theme.font(9), text_color=theme.FAINT, wraplength=280, justify="left"
+        ).grid(row=1, column=0, columnspan=3, sticky="ew", pady=(2, 8))
+
+        # ---- Compress to a target size ----
+        size_row = ctk.CTkFrame(panel, fg_color="transparent")
+        size_row.grid(row=8, column=0, sticky="ew", padx=theme.PAD, pady=(0, theme.PAD))
+        size_row.grid_columnconfigure(1, weight=1)
+
+        self.compress_var = ctk.BooleanVar(value=self.settings.get("compress", False))
+        ctk.CTkCheckBox(
+            size_row, text="Compress to under", variable=self.compress_var,
+            font=theme.font(11), text_color=theme.TEXT, checkbox_width=16, checkbox_height=16,
+            fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
+            command=self._on_compress_toggle,
+        ).grid(row=0, column=0, sticky="w")
+
+        self.target_size_entry = ctk.CTkEntry(size_row, width=52, height=22, font=theme.font(11))
+        self.target_size_entry.insert(0, str(self.settings.get("target_size_mb", 10)))
+        self.target_size_entry.grid(row=0, column=2, sticky="e")
+        ctk.CTkLabel(size_row, text="MB", font=theme.font(10), text_color=theme.MUTED).grid(
+            row=0, column=1, sticky="e", padx=(0, 6)
+        )
+
+        ctk.CTkLabel(
+            size_row,
+            text="Automatically lowers width/fps/colors and re-converts until it fits, up to a few tries.",
+            font=theme.font(9), text_color=theme.FAINT, wraplength=280, justify="left"
+        ).grid(row=1, column=0, columnspan=3, sticky="ew", pady=(2, 0))
+
+        self._on_fit_box_toggle()
+        self._on_compress_toggle()
+
+    def _on_fit_box_toggle(self):
+        state = "normal" if self.fit_box_var.get() else "disabled"
+        self.max_height_entry.configure(state=state)
+
+    def _on_compress_toggle(self):
+        state = "normal" if self.compress_var.get() else "disabled"
+        self.target_size_entry.configure(state=state)
 
     def _on_fps_change(self, value):
         self.fps_value_label.configure(text=f"{int(value)} fps")
@@ -266,44 +350,44 @@ class Mp4ToGifPage(ctk.CTkFrame):
         self.width_value_label.configure(text=f"{int(value)} px")
 
     def _build_trim_panel(self, parent):
-        panel = ctk.CTkFrame(parent, **theme.panel_style())
+        panel = ctk.CTkScrollableFrame(parent, height=260, **theme.panel_style())
         panel.grid(row=0, column=1, sticky="nsew", padx=(theme.PAD // 2, 0))
         panel.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(
             panel, text="TRIM (OPTIONAL)", font=theme.font(11, "bold"), text_color=theme.FAINT, anchor="w"
-        ).grid(row=0, column=0, sticky="ew", padx=theme.PAD_LG, pady=(theme.PAD_LG, theme.PAD))
+        ).grid(row=0, column=0, sticky="ew", padx=theme.PAD, pady=(theme.PAD, 6))
 
         start_row = ctk.CTkFrame(panel, fg_color="transparent")
-        start_row.grid(row=1, column=0, sticky="ew", padx=theme.PAD_LG)
+        start_row.grid(row=1, column=0, sticky="ew", padx=theme.PAD)
         start_row.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(start_row, text="Start", font=theme.font(12), text_color=theme.MUTED).grid(row=0, column=0, sticky="w")
-        self.trim_start_label = ctk.CTkLabel(start_row, text="0:00", font=theme.font(12), text_color=theme.TEXT)
+        ctk.CTkLabel(start_row, text="Start", font=theme.font(11), text_color=theme.MUTED).grid(row=0, column=0, sticky="w")
+        self.trim_start_label = ctk.CTkLabel(start_row, text="0:00", font=theme.font(11), text_color=theme.TEXT)
         self.trim_start_label.grid(row=0, column=1, sticky="e")
 
         self.trim_start_slider = ctk.CTkSlider(
-            panel, from_=0, to=1, number_of_steps=200, command=lambda v: self._update_trim_labels()
+            panel, from_=0, to=1, number_of_steps=200, height=14, command=lambda v: self._update_trim_labels()
         )
         self.trim_start_slider.set(0)
-        self.trim_start_slider.grid(row=2, column=0, sticky="ew", padx=theme.PAD_LG, pady=(4, theme.PAD))
+        self.trim_start_slider.grid(row=2, column=0, sticky="ew", padx=theme.PAD, pady=(3, 6))
 
         end_row = ctk.CTkFrame(panel, fg_color="transparent")
-        end_row.grid(row=3, column=0, sticky="ew", padx=theme.PAD_LG)
+        end_row.grid(row=3, column=0, sticky="ew", padx=theme.PAD)
         end_row.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(end_row, text="End", font=theme.font(12), text_color=theme.MUTED).grid(row=0, column=0, sticky="w")
-        self.trim_end_label = ctk.CTkLabel(end_row, text="0:00", font=theme.font(12), text_color=theme.TEXT)
+        ctk.CTkLabel(end_row, text="End", font=theme.font(11), text_color=theme.MUTED).grid(row=0, column=0, sticky="w")
+        self.trim_end_label = ctk.CTkLabel(end_row, text="0:00", font=theme.font(11), text_color=theme.TEXT)
         self.trim_end_label.grid(row=0, column=1, sticky="e")
 
         self.trim_end_slider = ctk.CTkSlider(
-            panel, from_=0, to=1, number_of_steps=200, command=lambda v: self._update_trim_labels()
+            panel, from_=0, to=1, number_of_steps=200, height=14, command=lambda v: self._update_trim_labels()
         )
         self.trim_end_slider.set(1)
-        self.trim_end_slider.grid(row=4, column=0, sticky="ew", padx=theme.PAD_LG, pady=(4, theme.PAD))
+        self.trim_end_slider.grid(row=4, column=0, sticky="ew", padx=theme.PAD, pady=(3, 6))
 
         ctk.CTkLabel(
             panel, text="Select a video to enable trimming — full length converts by default.",
-            font=theme.font(10), text_color=theme.FAINT, wraplength=320, justify="left"
-        ).grid(row=5, column=0, sticky="ew", padx=theme.PAD_LG, pady=(0, theme.PAD_LG))
+            font=theme.font(9), text_color=theme.FAINT, wraplength=280, justify="left"
+        ).grid(row=5, column=0, sticky="ew", padx=theme.PAD, pady=(0, theme.PAD))
 
     def _update_trim_labels(self):
         start = self.trim_start_slider.get()
@@ -487,6 +571,26 @@ class Mp4ToGifPage(ctk.CTkFrame):
         width = int(self.width_slider.get())
         loop = self.loop_var.get()
 
+        fit_box = self.fit_box_var.get()
+        max_height = None
+        if fit_box:
+            try:
+                max_height = max(16, int(float(self.max_height_entry.get())))
+            except ValueError:
+                messagebox.showwarning("Invalid max height", "Max height must be a number, e.g. 320.")
+                return
+
+        compress = self.compress_var.get()
+        target_size_mb = None
+        if compress:
+            try:
+                target_size_mb = float(self.target_size_entry.get())
+                if target_size_mb <= 0:
+                    raise ValueError
+            except ValueError:
+                messagebox.showwarning("Invalid target size", "Target size must be a number of MB, e.g. 10.")
+                return
+
         start = end = None
         if self.duration:
             start = self.trim_start_slider.get()
@@ -505,7 +609,11 @@ class Mp4ToGifPage(ctk.CTkFrame):
         default_name = os.path.splitext(os.path.basename(self.input_path))[0] + ".gif"
         output_path = self._unique_path(os.path.join(out_dir, default_name))
 
-        self.settings.update({"fps": fps, "width": width, "loop": loop})
+        self.settings.update({
+            "fps": fps, "width": width, "loop": loop,
+            "fit_box": fit_box, "max_height": max_height or self.settings.get("max_height", 320),
+            "compress": compress, "target_size_mb": target_size_mb or self.settings.get("target_size_mb", 10),
+        })
         _save_settings(self.settings)
 
         self.converting = True
@@ -518,21 +626,35 @@ class Mp4ToGifPage(ctk.CTkFrame):
 
         threading.Thread(
             target=self._convert_worker,
-            args=(self.input_path, output_path, fps, width, start, end, loop),
+            args=(self.input_path, output_path, fps, width, max_height, target_size_mb, start, end, loop),
             daemon=True,
         ).start()
 
-    def _convert_worker(self, input_path, output_path, fps, width, start, end, loop):
+    def _convert_worker(self, input_path, output_path, fps, width, max_height, target_size_mb, start, end, loop):
         def on_progress(frac):
             self.after(0, lambda: self._on_progress(frac))
 
+        def on_attempt(attempt, attempt_fps, attempt_width, attempt_colors):
+            self.after(0, lambda: self._on_attempt(attempt, attempt_fps, attempt_width, attempt_colors))
+
         try:
-            converter.convert(
-                input_path, output_path,
-                fps=fps, width=width, start=start, end=end, loop=loop,
-                on_progress=on_progress, cancel_event=self.cancel_event,
-            )
-            self.after(0, lambda: self._on_done(output_path))
+            if target_size_mb:
+                _, size, attempts, met_target = converter.convert_within_size(
+                    input_path, output_path,
+                    max_size_mb=target_size_mb,
+                    fps=fps, width=width, max_height=max_height,
+                    start=start, end=end, loop=loop,
+                    on_progress=on_progress, on_attempt=on_attempt, cancel_event=self.cancel_event,
+                )
+                self.after(0, lambda: self._on_done(output_path, attempts=attempts, met_target=met_target,
+                                                      target_size_mb=target_size_mb))
+            else:
+                converter.convert(
+                    input_path, output_path,
+                    fps=fps, width=width, max_height=max_height, start=start, end=end, loop=loop,
+                    on_progress=on_progress, cancel_event=self.cancel_event,
+                )
+                self.after(0, lambda: self._on_done(output_path))
 
         except converter.ConversionCancelled:
             self.after(0, self._on_cancelled)
@@ -546,17 +668,41 @@ class Mp4ToGifPage(ctk.CTkFrame):
     def _on_progress(self, frac):
         self.progress_bar.set(frac)
         stage = "building palette" if frac < 0.45 else "encoding gif"
-        self.status_label.configure(text=f"Converting…  ({stage}, {int(frac * 100)}%)")
+        prefix = getattr(self, "_attempt_prefix", "Converting…")
+        self.status_label.configure(text=f"{prefix}  ({stage}, {int(frac * 100)}%)")
 
-    def _on_done(self, output_path):
+    def _on_attempt(self, attempt, fps, width, colors):
+        suffix = "" if attempt == 1 else f", attempt {attempt}"
+        self._attempt_prefix = f"Compressing…  ({width}px, {fps}fps{suffix})"
+        self.status_label.configure(text=self._attempt_prefix)
+
+    def _on_done(self, output_path, attempts=None, met_target=None, target_size_mb=None):
         self.converting = False
         self.last_output_path = output_path
         self.convert_btn.configure(state="normal")
         self.cancel_btn.configure(state="disabled")
         self.open_output_btn.configure(state="normal")
         self.progress_bar.set(1)
+        self._attempt_prefix = "Converting…"
 
         size_mb = os.path.getsize(output_path) / (1024 * 1024) if os.path.isfile(output_path) else 0
+
+        if attempts is not None:
+            if met_target:
+                extra = "" if attempts == 1 else f" after {attempts} attempts"
+                self.status_label.configure(
+                    text=f"✓ Done — {os.path.basename(output_path)} ({size_mb:.1f} MB, under {target_size_mb:g} MB{extra})",
+                    text_color=theme.SUCCESS,
+                )
+            else:
+                self.status_label.configure(
+                    text=(f"⚠ Done, but couldn't get under {target_size_mb:g} MB — smallest result was "
+                          f"{os.path.basename(output_path)} ({size_mb:.1f} MB) after {attempts} attempts. "
+                          f"Try a shorter trim or a smaller box."),
+                    text_color=theme.MUTED,
+                )
+            return
+
         self.status_label.configure(
             text=f"✓ Done — saved {os.path.basename(output_path)} ({size_mb:.1f} MB)",
             text_color=theme.SUCCESS,

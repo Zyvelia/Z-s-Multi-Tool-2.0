@@ -58,104 +58,27 @@ APPS = [
 ]
 
 
-class RemoteHubPage(ctk.CTkFrame):
+class HubController:
+    """
+    All the "actually talk to Tailscale and the per-app web servers"
+    logic, with no UI attached. Pulled out of RemoteHubPage so the
+    dashboard mini widget (mini_widget.py) can drive the exact same
+    Go Live / Go Offline behavior from a single button without needing
+    the full Remote Hub page to have been opened first.
 
-    def __init__(self, parent, manager):
-        super().__init__(parent, fg_color=BG)
+    Every method here is blocking — callers run them off the Tk main
+    thread (see RemoteHubPage._on_go_live / mini_widget.py for the
+    pattern) and hop back with .after(0, ...) to touch widgets.
+    """
+
+    def __init__(self, manager):
         self.manager = manager
         self.tailscale = manager.container.tailscale_service
 
-        self._poll_job = None
-
-        wrap = ctk.CTkScrollableFrame(self, fg_color="transparent")
-        wrap.pack(fill="both", expand=True, padx=12, pady=12)
-
-        self._build_header(wrap)
-        self._build_go_live_panel(wrap)
-        self._build_status_panel(wrap)
-
-        self._refresh_status()
-        self._start_polling()
-
-    def destroy(self):
-        if self._poll_job:
-            try:
-                self.after_cancel(self._poll_job)
-            except Exception:
-                pass
-        super().destroy()
-
-    # =====================================================
-    # UI
-    # =====================================================
-
-    def _build_header(self, parent):
-        ctk.CTkLabel(
-            parent, text="📡 Remote Hub", font=("Segoe UI", 22, "bold"), text_color=TEXT
-        ).pack(anchor="w", pady=(0, 4))
-        ctk.CTkLabel(
-            parent,
-            text="One address for your phone that links to whichever of your apps are live, "
-                 "instead of remembering three. Reachable only from devices on your own "
-                 "Tailscale network.",
-            font=("Segoe UI", 12), text_color=MUTED, anchor="w", justify="left", wraplength=760,
-        ).pack(anchor="w", pady=(0, 16))
-
-    def _build_go_live_panel(self, parent):
-        panel = ctk.CTkFrame(parent, fg_color=PANEL, corner_radius=10)
-        panel.pack(fill="x", pady=(0, 12))
-
-        self.hub_status_label = ctk.CTkLabel(
-            panel, text="Checking…", font=("Segoe UI", 14), text_color=MUTED,
-            anchor="w", justify="left", wraplength=700,
-        )
-        self.hub_status_label.pack(fill="x", padx=16, pady=(16, 10))
-
-        row = ctk.CTkFrame(panel, fg_color="transparent")
-        row.pack(fill="x", padx=16, pady=(0, 16))
-
-        self.go_live_btn = ctk.CTkButton(
-            row, text="🟢 Go Live", fg_color=SUCCESS, hover_color="#33b57d",
-            text_color="#0b0d10", height=42, font=("Segoe UI", 14, "bold"),
-            command=self._on_go_live,
-        )
-        self.go_live_btn.pack(side="left", fill="x", expand=True, padx=(0, 6))
-
-        self.go_offline_btn = ctk.CTkButton(
-            row, text="⚪ Go Offline", fg_color=DANGER_BG, hover_color=DANGER_HOVER,
-            text_color=DANGER, height=42, font=("Segoe UI", 14, "bold"),
-            command=self._on_go_offline,
-        )
-        self.go_offline_btn.pack(side="left", fill="x", expand=True, padx=(6, 0))
-
-    def _build_status_panel(self, parent):
-        panel = ctk.CTkFrame(parent, fg_color=PANEL, corner_radius=10)
-        panel.pack(fill="x")
-
-        ctk.CTkLabel(
-            panel, text="Per-app status", font=("Segoe UI", 14, "bold"), text_color=TEXT
-        ).pack(anchor="w", padx=16, pady=(14, 6))
-
-        self._app_labels = {}
-        for key, label in APPS:
-            row = ctk.CTkFrame(panel, fg_color="transparent")
-            row.pack(fill="x", padx=16, pady=4)
-            ctk.CTkLabel(row, text=label, font=("Segoe UI", 13), text_color=TEXT).pack(side="left")
-            lbl = ctk.CTkLabel(row, text="⚪ Off", font=("Segoe UI", 13), text_color=MUTED)
-            lbl.pack(side="right")
-            self._app_labels[key] = lbl
-
-        ctk.CTkLabel(
-            panel,
-            text="Fine-grained on/off for a single app still lives in that app's own "
-                 "Settings tab — this page is for the phone-facing address as a whole.",
-            font=("Segoe UI", 11), text_color=MUTED, anchor="w", justify="left", wraplength=700,
-        ).pack(fill="x", padx=16, pady=(10, 14))
-
     # =====================================================
     # LAZY SERVER ACCESS — mirrors core/app.py's own auto-start logic,
-    # for the case where you open Remote Hub before ever opening the
-    # Music Player or YouTube Downloader page this session.
+    # for the case where you go live before ever opening a given app's
+    # own page this session.
     # =====================================================
 
     def _get_vault_web_server(self):
@@ -274,112 +197,236 @@ class RemoteHubPage(ctk.CTkFrame):
         }
 
     # =====================================================
-    # GO LIVE / GO OFFLINE
+    # GO LIVE / GO OFFLINE / STATUS — blocking, call off-thread
+    # =====================================================
+
+    def go_live_sync(self):
+        """
+        Runs the full "Go Live" sequence. Returns (fatal, errors):
+          fatal  -- a message if we couldn't even attempt to go live
+                    (Tailscale missing, or couldn't connect), else None
+          errors -- per-app warnings collected along the way; only
+                    meaningful when fatal is None
+        """
+        errors = []
+
+        status = self.tailscale.get_status()
+        if not status["installed"]:
+            return "Tailscale isn't installed on this device.", []
+        if not status["running"]:
+            cfg = self.tailscale.load_config()
+            ok, msg = self.tailscale.connect(
+                hostname=cfg.get("hostname") or None,
+                auth_key=cfg.get("auth_key") or None,
+                accept_routes=cfg.get("accept_routes", True),
+            )
+            if not ok:
+                return f"Couldn't connect to Tailscale: {msg}", []
+            status = self.tailscale.get_status()
+
+        ports = self._ports()
+
+        vault_srv = self._get_vault_web_server()
+        if not vault_srv.is_running():
+            ok, msg = vault_srv.start(ports["vault"])
+            if not ok:
+                errors.append(f"Security Vault server: {msg}")
+        if vault_srv.is_running():
+            ok, msg = self.tailscale.enable_app_serve("vault", ports["vault"])
+            if not ok:
+                errors.append(f"Security Vault Tailscale: {msg}")
+
+        music_srv = self._get_music_web_server()
+        if not music_srv.is_running():
+            ok, msg = music_srv.start(ports["music"])
+            if not ok:
+                errors.append(f"Music Player server: {msg}")
+        if music_srv.is_running():
+            ok, msg = self.tailscale.enable_app_serve("music", ports["music"])
+            if not ok:
+                errors.append(f"Music Player Tailscale: {msg}")
+
+        yt_srv = self._get_yt_web_server()
+        if not yt_srv.is_running():
+            ok, msg = yt_srv.start(ports["yt"])
+            if not ok:
+                errors.append(f"YouTube Downloader server: {msg}")
+        if yt_srv.is_running():
+            ok, msg = self.tailscale.enable_app_serve("yt", ports["yt"])
+            if not ok:
+                errors.append(f"YouTube Downloader Tailscale: {msg}")
+
+        notes_srv = self._get_notes_web_server()
+        if not notes_srv.is_running():
+            ok, msg = notes_srv.start(ports["notes"])
+            if not ok:
+                errors.append(f"Notes server: {msg}")
+        if notes_srv.is_running():
+            ok, msg = self.tailscale.enable_app_serve("notes", ports["notes"])
+            if not ok:
+                errors.append(f"Notes Tailscale: {msg}")
+
+        quick_send_srv = self._get_quick_send_web_server()
+        if not quick_send_srv.is_running():
+            ok, msg = quick_send_srv.start(ports["send"])
+            if not ok:
+                errors.append(f"Quick Send server: {msg}")
+        if quick_send_srv.is_running():
+            ok, msg = self.tailscale.enable_app_serve("send", ports["send"])
+            if not ok:
+                errors.append(f"Quick Send Tailscale: {msg}")
+
+        games_srv = self._get_games_web_server()
+        if not games_srv.is_running():
+            ok, msg = games_srv.start(ports["games"])
+            if not ok:
+                errors.append(f"Gaming Hub server: {msg}")
+        if games_srv.is_running():
+            ok, msg = self.tailscale.enable_app_serve("games", ports["games"])
+            if not ok:
+                errors.append(f"Gaming Hub Tailscale: {msg}")
+
+        soundboard_srv = self._get_soundboard_web_server()
+        if not soundboard_srv.is_running():
+            ok, msg = soundboard_srv.start(ports["soundboard"])
+            if not ok:
+                errors.append(f"Soundboard server: {msg}")
+        if soundboard_srv.is_running():
+            ok, msg = self.tailscale.enable_app_serve("soundboard", ports["soundboard"])
+            if not ok:
+                errors.append(f"Soundboard Tailscale: {msg}")
+
+        live_apps = [key for key in ("vault", "music", "yt", "notes", "games", "soundboard", "send")
+                     if self.tailscale.is_app_serving(key)]
+        hostname = status.get("hostname") or "this-device"
+        hub_path = hub_service.write_hub_html(hostname, live_apps)
+        ok, msg = self.tailscale.enable_hub_page(hub_path)
+        if not ok:
+            errors.append(f"Hub landing page: {msg}")
+
+        return None, errors
+
+    def go_offline_sync(self):
+        self.tailscale.disable_hub_page()
+        for key, _ in APPS:
+            self.tailscale.disable_app_serve(key)
+
+    def get_status_sync(self):
+        status = self.tailscale.get_status()
+        live_apps = {key: self.tailscale.is_app_serving(key) for key, _ in APPS} \
+            if status["running"] else {key: False for key, _ in APPS}
+        return status, live_apps
+
+
+class RemoteHubPage(ctk.CTkFrame):
+
+    def __init__(self, parent, manager):
+        super().__init__(parent, fg_color=BG)
+        self.manager = manager
+        self.tailscale = manager.container.tailscale_service
+        self.controller = HubController(manager)
+
+        self._poll_job = None
+
+        wrap = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        wrap.pack(fill="both", expand=True, padx=12, pady=12)
+
+        self._build_header(wrap)
+        self._build_go_live_panel(wrap)
+        self._build_status_panel(wrap)
+
+        self._refresh_status()
+        self._start_polling()
+
+    def destroy(self):
+        if self._poll_job:
+            try:
+                self.after_cancel(self._poll_job)
+            except Exception:
+                pass
+        super().destroy()
+
+    # =====================================================
+    # UI
+    # =====================================================
+
+    def _build_header(self, parent):
+        ctk.CTkLabel(
+            parent, text="📡 Remote Hub", font=("Segoe UI", 22, "bold"), text_color=TEXT
+        ).pack(anchor="w", pady=(0, 4))
+        ctk.CTkLabel(
+            parent,
+            text="One address for your phone that links to whichever of your apps are live, "
+                 "instead of remembering three. Reachable only from devices on your own "
+                 "Tailscale network.",
+            font=("Segoe UI", 12), text_color=MUTED, anchor="w", justify="left", wraplength=760,
+        ).pack(anchor="w", pady=(0, 16))
+
+    def _build_go_live_panel(self, parent):
+        panel = ctk.CTkFrame(parent, fg_color=PANEL, corner_radius=10)
+        panel.pack(fill="x", pady=(0, 12))
+
+        self.hub_status_label = ctk.CTkLabel(
+            panel, text="Checking…", font=("Segoe UI", 14), text_color=MUTED,
+            anchor="w", justify="left", wraplength=700,
+        )
+        self.hub_status_label.pack(fill="x", padx=16, pady=(16, 10))
+
+        row = ctk.CTkFrame(panel, fg_color="transparent")
+        row.pack(fill="x", padx=16, pady=(0, 16))
+
+        self.go_live_btn = ctk.CTkButton(
+            row, text="🟢 Go Live", fg_color=SUCCESS, hover_color="#33b57d",
+            text_color="#0b0d10", height=42, font=("Segoe UI", 14, "bold"),
+            command=self._on_go_live,
+        )
+        self.go_live_btn.pack(side="left", fill="x", expand=True, padx=(0, 6))
+
+        self.go_offline_btn = ctk.CTkButton(
+            row, text="⚪ Go Offline", fg_color=DANGER_BG, hover_color=DANGER_HOVER,
+            text_color=DANGER, height=42, font=("Segoe UI", 14, "bold"),
+            command=self._on_go_offline,
+        )
+        self.go_offline_btn.pack(side="left", fill="x", expand=True, padx=(6, 0))
+
+    def _build_status_panel(self, parent):
+        panel = ctk.CTkFrame(parent, fg_color=PANEL, corner_radius=10)
+        panel.pack(fill="x")
+
+        ctk.CTkLabel(
+            panel, text="Per-app status", font=("Segoe UI", 14, "bold"), text_color=TEXT
+        ).pack(anchor="w", padx=16, pady=(14, 6))
+
+        self._app_labels = {}
+        for key, label in APPS:
+            row = ctk.CTkFrame(panel, fg_color="transparent")
+            row.pack(fill="x", padx=16, pady=4)
+            ctk.CTkLabel(row, text=label, font=("Segoe UI", 13), text_color=TEXT).pack(side="left")
+            lbl = ctk.CTkLabel(row, text="⚪ Off", font=("Segoe UI", 13), text_color=MUTED)
+            lbl.pack(side="right")
+            self._app_labels[key] = lbl
+
+        ctk.CTkLabel(
+            panel,
+            text="Fine-grained on/off for a single app still lives in that app's own "
+                 "Settings tab — this page is for the phone-facing address as a whole.",
+            font=("Segoe UI", 11), text_color=MUTED, anchor="w", justify="left", wraplength=700,
+        ).pack(fill="x", padx=16, pady=(10, 14))
+
+    # =====================================================
+    # GO LIVE / GO OFFLINE — delegates to HubController so the page and
+    # the dashboard mini widget do exactly the same thing.
     # =====================================================
 
     def _on_go_live(self):
         self.go_live_btn.configure(state="disabled", text="Starting…")
 
         def work():
-            errors = []
-
-            status = self.tailscale.get_status()
-            if not status["installed"]:
-                self.after(0, lambda: self._go_live_failed(
-                    "Tailscale isn't installed on this device."))
-                return
-            if not status["running"]:
-                cfg = self.tailscale.load_config()
-                ok, msg = self.tailscale.connect(
-                    hostname=cfg.get("hostname") or None,
-                    auth_key=cfg.get("auth_key") or None,
-                    accept_routes=cfg.get("accept_routes", True),
-                )
-                if not ok:
-                    self.after(0, lambda: self._go_live_failed(f"Couldn't connect to Tailscale: {msg}"))
-                    return
-                status = self.tailscale.get_status()
-
-            ports = self._ports()
-
-            vault_srv = self._get_vault_web_server()
-            if not vault_srv.is_running():
-                ok, msg = vault_srv.start(ports["vault"])
-                if not ok:
-                    errors.append(f"Security Vault server: {msg}")
-            if vault_srv.is_running():
-                ok, msg = self.tailscale.enable_app_serve("vault", ports["vault"])
-                if not ok:
-                    errors.append(f"Security Vault Tailscale: {msg}")
-
-            music_srv = self._get_music_web_server()
-            if not music_srv.is_running():
-                ok, msg = music_srv.start(ports["music"])
-                if not ok:
-                    errors.append(f"Music Player server: {msg}")
-            if music_srv.is_running():
-                ok, msg = self.tailscale.enable_app_serve("music", ports["music"])
-                if not ok:
-                    errors.append(f"Music Player Tailscale: {msg}")
-
-            yt_srv = self._get_yt_web_server()
-            if not yt_srv.is_running():
-                ok, msg = yt_srv.start(ports["yt"])
-                if not ok:
-                    errors.append(f"YouTube Downloader server: {msg}")
-            if yt_srv.is_running():
-                ok, msg = self.tailscale.enable_app_serve("yt", ports["yt"])
-                if not ok:
-                    errors.append(f"YouTube Downloader Tailscale: {msg}")
-
-            notes_srv = self._get_notes_web_server()
-            if not notes_srv.is_running():
-                ok, msg = notes_srv.start(ports["notes"])
-                if not ok:
-                    errors.append(f"Notes server: {msg}")
-            if notes_srv.is_running():
-                ok, msg = self.tailscale.enable_app_serve("notes", ports["notes"])
-                if not ok:
-                    errors.append(f"Notes Tailscale: {msg}")
-
-            quick_send_srv = self._get_quick_send_web_server()
-            if not quick_send_srv.is_running():
-                ok, msg = quick_send_srv.start(ports["send"])
-                if not ok:
-                    errors.append(f"Quick Send server: {msg}")
-            if quick_send_srv.is_running():
-                ok, msg = self.tailscale.enable_app_serve("send", ports["send"])
-                if not ok:
-                    errors.append(f"Quick Send Tailscale: {msg}")
-
-            games_srv = self._get_games_web_server()
-            if not games_srv.is_running():
-                ok, msg = games_srv.start(ports["games"])
-                if not ok:
-                    errors.append(f"Gaming Hub server: {msg}")
-            if games_srv.is_running():
-                ok, msg = self.tailscale.enable_app_serve("games", ports["games"])
-                if not ok:
-                    errors.append(f"Gaming Hub Tailscale: {msg}")
-
-            soundboard_srv = self._get_soundboard_web_server()
-            if not soundboard_srv.is_running():
-                ok, msg = soundboard_srv.start(ports["soundboard"])
-                if not ok:
-                    errors.append(f"Soundboard server: {msg}")
-            if soundboard_srv.is_running():
-                ok, msg = self.tailscale.enable_app_serve("soundboard", ports["soundboard"])
-                if not ok:
-                    errors.append(f"Soundboard Tailscale: {msg}")
-
-            live_apps = [key for key in ("vault", "music", "yt", "notes", "games", "soundboard", "send") if self.tailscale.is_app_serving(key)]
-            hostname = status.get("hostname") or "this-device"
-            hub_path = hub_service.write_hub_html(hostname, live_apps)
-            ok, msg = self.tailscale.enable_hub_page(hub_path)
-            if not ok:
-                errors.append(f"Hub landing page: {msg}")
-
-            self.after(0, lambda: self._go_live_done(errors))
+            fatal, errors = self.controller.go_live_sync()
+            if fatal:
+                self.after(0, lambda: self._go_live_failed(fatal))
+            else:
+                self.after(0, lambda: self._go_live_done(errors))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -401,9 +448,7 @@ class RemoteHubPage(ctk.CTkFrame):
         self.go_offline_btn.configure(state="disabled", text="Stopping…")
 
         def work():
-            self.tailscale.disable_hub_page()
-            for key, _ in APPS:
-                self.tailscale.disable_app_serve(key)
+            self.controller.go_offline_sync()
             self.after(0, self._go_offline_done)
 
         threading.Thread(target=work, daemon=True).start()
@@ -425,9 +470,7 @@ class RemoteHubPage(ctk.CTkFrame):
 
     def _refresh_status(self):
         def work():
-            status = self.tailscale.get_status()
-            live_apps = {key: self.tailscale.is_app_serving(key) for key, _ in APPS} \
-                if status["running"] else {key: False for key, _ in APPS}
+            status, live_apps = self.controller.get_status_sync()
             self.after(0, lambda: self._apply_status(status, live_apps))
 
         threading.Thread(target=work, daemon=True).start()

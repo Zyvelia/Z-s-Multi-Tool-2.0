@@ -149,11 +149,32 @@ def _run_with_progress(cmd, total_seconds, on_progress, stage_fraction, cancel_e
         raise ConversionError("".join(stderr_tail[-15:]) or "ffmpeg exited with an error")
 
 
+def _build_scale_filter(width, max_height):
+    """
+    width alone: scale to that width, height auto (-2) — aspect ratio
+    preserved, same as before.
+    width + max_height: fit inside a width x max_height box (e.g. the
+    320x320 "keep it inside this box" case), preserving aspect ratio
+    and never upscaling past the source. force_original_aspect_ratio
+    keeps the ratio; decrease means it only ever shrinks to fit.
+    """
+    if width and max_height:
+        return (
+            f"scale=w={width}:h={max_height}:"
+            f"force_original_aspect_ratio=decrease:flags=lanczos"
+        )
+    if width:
+        return f"scale={width}:-2:flags=lanczos"
+    return "scale=iw:-2:flags=lanczos"
+
+
 def convert(
     input_path: str,
     output_path: str,
     fps: int = 15,
     width: int = 480,
+    max_height: int = None,
+    colors: int = 256,
     start: float = None,
     end: float = None,
     loop: bool = True,
@@ -166,6 +187,15 @@ def convert(
     paletteuse two-pass method. Raises ConversionError or
     ConversionCancelled on failure. on_progress, if given, is called
     with a float 0..1 as the conversion advances across BOTH passes.
+
+    max_height, if given alongside width, fits the output inside a
+    width x max_height box instead of scaling to a fixed width — e.g.
+    width=320, max_height=320 keeps the whole frame within 320x320
+    without distorting it.
+
+    colors caps the palette size (palettegen's max_colors, 4-256).
+    Lower values shrink the file at some cost to color fidelity —
+    used by convert_within_size() when stepping quality down.
     """
     ffmpeg = find_ffmpeg()
     if not ffmpeg:
@@ -181,7 +211,8 @@ def convert(
     if start is not None and end is not None:
         duration = max(end - start, 0.01)
 
-    scale_filter = f"scale={width}:-2:flags=lanczos" if width else "scale=iw:-2:flags=lanczos"
+    colors = max(4, min(256, int(colors)))
+    scale_filter = _build_scale_filter(width, max_height)
 
     trim_args = []
     if start is not None:
@@ -199,7 +230,7 @@ def convert(
             ffmpeg, "-y", "-progress", "pipe:1", "-nostats",
             *trim_args,
             "-i", input_path,
-            "-vf", f"fps={fps},{scale_filter},palettegen=stats_mode=diff",
+            "-vf", f"fps={fps},{scale_filter},palettegen=stats_mode=diff:max_colors={colors}",
             palette_path,
         ]
         _run_with_progress(palette_cmd, duration, on_progress, (0.0, 0.45), cancel_event)
@@ -220,3 +251,66 @@ def convert(
         on_progress(1.0)
 
     return output_path
+
+
+def convert_within_size(
+    input_path: str,
+    output_path: str,
+    max_size_mb: float = 10.0,
+    fps: int = 15,
+    width: int = 480,
+    max_height: int = None,
+    start: float = None,
+    end: float = None,
+    loop: bool = True,
+    dither: str = "bayer",
+    on_progress=None,
+    on_attempt=None,
+    cancel_event=None,
+    max_attempts: int = 6,
+):
+    """
+    Converts, then — if the result is over max_size_mb — steps fps,
+    width, and palette size down and re-converts, repeating up to
+    max_attempts times. Stops as soon as a pass lands at or under the
+    target, or after the last attempt (keeping the smallest result it
+    produced, even if that still exceeds the target — a very long or
+    busy source may simply not fit).
+
+    on_attempt(attempt_number, fps, width, colors), if given, fires
+    right before each attempt so the UI can show what's being tried.
+    Returns (output_path, size_bytes, attempts_used, met_target: bool).
+    """
+    target_bytes = max_size_mb * 1024 * 1024
+    cur_fps, cur_width, cur_colors = fps, width, 256
+
+    for attempt in range(1, max_attempts + 1):
+        if cancel_event is not None and cancel_event.is_set():
+            raise ConversionCancelled()
+
+        if on_attempt:
+            on_attempt(attempt, cur_fps, cur_width, cur_colors)
+
+        convert(
+            input_path, output_path,
+            fps=cur_fps, width=cur_width, max_height=max_height,
+            colors=cur_colors,
+            start=start, end=end, loop=loop, dither=dither,
+            on_progress=on_progress, cancel_event=cancel_event,
+        )
+
+        size = os.path.getsize(output_path)
+        if size <= target_bytes:
+            return output_path, size, attempt, True
+        if attempt == max_attempts:
+            return output_path, size, attempt, False
+
+        # Step quality down for the next pass. Width does the most work
+        # for file size, so it shrinks fastest; fps and color count
+        # follow so motion and gradients don't fall apart too early.
+        cur_width = max(80, int(cur_width * 0.80))
+        cur_fps = max(6, cur_fps - 2)
+        cur_colors = max(32, cur_colors - 32)
+
+    # unreachable, but keeps type-checkers happy
+    return output_path, os.path.getsize(output_path), max_attempts, False

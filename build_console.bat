@@ -3,8 +3,14 @@ setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
 echo ============================================
-echo   Z's Multi Tool - Build Script
+echo   Z's Multi Tool - Build Script (CONSOLE / DEBUG BUILD)
 echo ============================================
+echo.
+echo This build keeps a visible console window attached, so any
+echo print() output and unhandled tracebacks (plugin load failures,
+echo errors when opening a tool, etc.) show up live instead of being
+echo silently swallowed like they are in the normal --windowed build.
+echo It is meant for debugging only - use build.bat for the real release.
 echo.
 
 REM ---- 1. Check Python is available ----
@@ -28,13 +34,13 @@ if errorlevel 1 (
 )
 
 REM ---- 3. Close any running instance (it may be sitting in the tray) ----
-REM PyInstaller can't overwrite an exe that's still running as a process —
+REM PyInstaller can't overwrite an exe that's still running as a process -
 REM easy to hit now that minimizing sends the app to the system tray
 REM instead of fully closing it. Kill both possible names: the final
 REM renamed exe (what's actually running from a previous build) and the
 REM intermediate build name (in case a build got interrupted before rename).
-taskkill /f /im "Z's Multi Tool.exe" >nul 2>nul
-taskkill /f /im "Zs Multi Tool.exe" >nul 2>nul
+taskkill /f /im "Z's Multi Tool (Console).exe" >nul 2>nul
+taskkill /f /im "Zs Multi Tool (Console).exe" >nul 2>nul
 timeout /t 1 /nobreak >nul
 
 REM ---- 4. Refresh the dependency lock file ----
@@ -45,7 +51,7 @@ REM ---- 5. Clean previous build artifacts ----
 echo [INFO] Cleaning previous build/dist folders...
 if exist "build" rmdir /s /q "build"
 if exist "dist" rmdir /s /q "dist"
-if exist "Zs Multi Tool.spec" del /q "Zs Multi Tool.spec"
+if exist "Zs Multi Tool (Console).spec" del /q "Zs Multi Tool (Console).spec"
 
 REM ---- 6. Run PyInstaller ----
 echo [INFO] Building exe with PyInstaller...
@@ -54,7 +60,12 @@ echo.
 REM NOTE: --name deliberately has NO apostrophe. PyInstaller writes the name
 REM straight into a single-quoted Python string inside the generated .spec
 REM file, so "Z's Multi Tool" breaks that string and crashes the build with
-REM a SyntaxError. We build as "Zs Multi Tool" and rename the exe after.
+REM a SyntaxError. We build as "Zs Multi Tool (Console)" and rename the exe
+REM after.
+REM NOTE: --console instead of --windowed is the only functional difference
+REM from build.bat - everything else (collected packages, hidden imports,
+REM bundled data) is identical so this build behaves the same, it just
+REM shows its console.
 REM NOTE: no --add-data for "data" here on purpose. CryptoService/
 REM VaultService/AuthService all resolve through core/paths.py straight to
 REM %APPDATA%\ZsMultiTool\... at runtime and only fall back to a local
@@ -65,16 +76,15 @@ REM exist, would ship your real vault.json + master.key inside the exe.
 python -m PyInstaller ^
     --noconfirm ^
     --onefile ^
-    --windowed ^
+    --console ^
     --uac-admin ^
-    --name "Zs Multi Tool" ^
+    --name "Zs Multi Tool (Console)" ^
     --icon "assets\icon.ico" ^
     --collect-all customtkinter ^
     --collect-all mutagen ^
     --collect-all PIL ^
     --collect-all pystray ^
     --collect-all qrcode ^
-    --collect-all openai ^
     --collect-data pypresence ^
     --hidden-import "PIL._tkinter_finder" ^
     --hidden-import "scapy.all" ^
@@ -88,7 +98,6 @@ python -m PyInstaller ^
     --hidden-import "psutil" ^
     --hidden-import "cryptography.fernet" ^
     --hidden-import "yt_dlp" ^
-    --hidden-import "openai" ^
     --add-data "modules;modules" ^
     --add-data "core;core" ^
     --add-data "pages;pages" ^
@@ -103,8 +112,8 @@ if errorlevel 1 (
 )
 
 REM ---- 7. Rename exe to the real name (apostrophe is fine on disk) ----
-if exist "dist\Zs Multi Tool.exe" (
-    ren "dist\Zs Multi Tool.exe" "Z's Multi Tool.exe"
+if exist "dist\Zs Multi Tool (Console).exe" (
+    ren "dist\Zs Multi Tool (Console).exe" "Z's Multi Tool (Console).exe"
 )
 
 REM ---- 8. Bundle the VLC runtime next to the exe ----
@@ -166,11 +175,16 @@ if defined VLC_DIR (
 
 echo.
 echo ============================================
-echo   Build complete!
+echo   Console debug build complete!
 echo   Your exe is in the "dist" folder.
 echo ============================================
 echo.
 echo NOTE:
+echo  - This exe opens WITH a console window attached. Run it from
+echo    Explorer or a terminal and watch that console for
+echo    [PluginManager]/[PageManager]/[App] print() lines and any
+echo    unhandled tracebacks - this is the fastest way to see exactly
+echo    why a module failed to load or errored on open.
 echo  - requirements-lock.txt was refreshed with your currently installed
 echo    package versions ^(pip freeze^) before this build ran.
 echo  - The exe bundles JSON/config files as they exist RIGHT NOW.
@@ -188,5 +202,10 @@ echo    free edition supports silent installs, so you'll still click
 echo    through those two installer windows once.
 echo  - Minimizing the window sends it to the system tray (hidden icons
 echo    area). The X button still fully quits the app.
+echo  - This console build and the normal build.bat build can coexist:
+echo    they use different --name values ("Zs Multi Tool (Console)" vs
+echo    "Zs Multi Tool"), so building one never overwrites the other's
+echo    exe in dist\ as long as you don't run both builds back to back
+echo    without moving the first exe out of dist\ first.
 echo.
 pause

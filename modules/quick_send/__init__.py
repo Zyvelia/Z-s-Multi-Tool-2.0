@@ -10,7 +10,7 @@ def open_quick_send(manager):
 def register(manager):
     manager.register({
         "name": "Quick Send",
-        "category": "Utilities",
+        "category": "Tools",
         "desc": "Send files between your phone and this PC",
         "icon": "📤",
         "open": open_quick_send

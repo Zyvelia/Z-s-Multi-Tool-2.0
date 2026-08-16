@@ -394,13 +394,9 @@ class YTDownloaderPage(ctk.CTkFrame):
         row = ctk.CTkFrame(panel, fg_color="transparent")
         row.pack(fill="x", padx=10, pady=(0, 6))
 
-        self._remote_start_btn = _make_btn(row, "▶ Start", self._start_remote_access,
-                                           **_BTN_ACCENT, width=90)
-        self._remote_start_btn.pack(side="left")
-
         self._remote_stop_btn = _make_btn(row, "■ Stop", self._stop_remote_access,
                                           **_BTN_DANGER, width=90)
-        self._remote_stop_btn.pack(side="left", padx=(8, 0))
+        self._remote_stop_btn.pack(side="left")
 
         ctk.CTkLabel(row, text="Local port", text_color=MUTED,
                      font=("Segoe UI", 12)).pack(side="left", padx=(20, 6))
@@ -417,10 +413,11 @@ class YTDownloaderPage(ctk.CTkFrame):
 
         ctk.CTkLabel(
             panel,
-            text="Turn this on, then use the \"Send to Downloader\" button in the Zs Multi Tool "
-                 "Companion browser extension on any YouTube tab. Downloads land in the output "
-                 "folder above, using the format/quality set here. Loopback only (127.0.0.1) — "
-                 "never reachable off this PC.",
+            text="Starts automatically with the app if \"Auto-start\" below is checked, or "
+                 "whenever Remote Hub goes live. Once it's on, use the \"Send to Downloader\" "
+                 "button in the Zs Multi Tool Companion browser extension on any YouTube tab. "
+                 "Downloads land in the output folder above, using the format/quality set "
+                 "here. Loopback only (127.0.0.1) — never reachable off this PC.",
             text_color=MUTED, font=("Segoe UI", 11), anchor="w", justify="left", wraplength=760,
         ).pack(fill="x", padx=10, pady=(0, 10))
 
@@ -440,13 +437,9 @@ class YTDownloaderPage(ctk.CTkFrame):
         row = ctk.CTkFrame(panel, fg_color="transparent")
         row.pack(fill="x", padx=10, pady=(0, 6))
 
-        self._phone_start_btn = _make_btn(row, "▶ Start Phone Access", self._start_phone_access,
-                                           **_BTN_ACCENT, width=170)
-        self._phone_start_btn.pack(side="left")
-
         self._phone_stop_btn = _make_btn(row, "■ Stop", self._stop_phone_access,
                                           **_BTN_DANGER, width=90)
-        self._phone_stop_btn.pack(side="left", padx=(8, 0))
+        self._phone_stop_btn.pack(side="left")
 
         ctk.CTkLabel(row, text="Access code (optional)", text_color=MUTED,
                      font=("Segoe UI", 12)).pack(side="left", padx=(20, 6))
@@ -454,68 +447,26 @@ class YTDownloaderPage(ctk.CTkFrame):
             row, width=110, show="•", fg_color=PANEL_2, text_color=TEXT,
             border_color=PANEL_2, corner_radius=8)
         self._access_code_entry.pack(side="left")
+        # No "Start" button to sync this on click anymore — Remote Hub can
+        # start the server at any time, so push edits to the shared
+        # web_server straight away instead of waiting for a click.
+        self._access_code_entry.bind("<KeyRelease>", self._on_access_code_changed)
 
         ctk.CTkLabel(
             panel,
-            text="Exposes this same downloader to your phone over your own Tailscale "
-                 "network — reachable only from devices signed into your tailnet, never "
+            text="Started from Remote Hub's Go Live button, alongside your other apps — "
+                 "exposes this same downloader to your phone over your own Tailscale "
+                 "network, reachable only from devices signed into your tailnet, never "
                  "the open internet. Uses the same local port as the browser extension "
-                 "above; starting this will start that server too if it isn't already on. "
-                 "An access code is optional — if set, it's required to queue a download "
-                 "from the mobile page (and from the browser extension, since they share "
-                 "this same endpoint) but not to view download status.",
+                 "above. An access code is optional — if set, it's required to queue a "
+                 "download from the mobile page (and from the browser extension, since "
+                 "they share this same endpoint) but not to view download status.",
             text_color=MUTED, font=("Segoe UI", 11), anchor="w", justify="left", wraplength=760,
         ).pack(fill="x", padx=10, pady=(0, 10))
 
-    def _current_access_code(self):
-        code = self._access_code_entry.get().strip()
-        self.web_server.access_code = code
-        return code
-
-    def _start_phone_access(self):
-        self._current_access_code()
+    def _on_access_code_changed(self, _event=None):
+        self.web_server.access_code = self._access_code_entry.get().strip()
         self._save_settings()
-
-        status = self.tailscale.get_status()
-        if not status["installed"]:
-            from tkinter import messagebox
-            messagebox.showwarning("Tailscale not installed", "Install Tailscale first "
-                                    "(see the Security Vault or Music Player Settings tab).")
-            return
-        if not status["running"]:
-            from tkinter import messagebox
-            if not messagebox.askyesno(
-                "Not connected",
-                "You're not connected to Tailscale yet. Connect now, then start phone access?",
-            ):
-                return
-            cfg = self.tailscale.load_config()
-            self.tailscale.connect(
-                hostname=cfg.get("hostname") or None,
-                auth_key=cfg.get("auth_key") or None,
-                accept_routes=cfg.get("accept_routes", True),
-            )
-
-        self._phone_start_btn.configure(state="disabled", text="Starting…")
-
-        def work():
-            port = self._current_remote_port()
-            ok, msg = (True, "already running") if self.web_server.is_running() else self.web_server.start(port)
-            if ok:
-                ok2, msg2 = self.tailscale.enable_app_serve("yt", port)
-                if not ok2:
-                    ok, msg = ok2, msg2
-            self.after(0, lambda: self._after_start_phone_access(ok, msg))
-
-        threading.Thread(target=work, daemon=True).start()
-
-    def _after_start_phone_access(self, ok, msg):
-        self._phone_start_btn.configure(state="normal", text="▶ Start Phone Access")
-        if not ok:
-            from tkinter import messagebox
-            messagebox.showerror("Couldn't start phone access", msg)
-        self._refresh_phone_status()
-        self._refresh_remote_status()
 
     def _stop_phone_access(self):
         self.tailscale.disable_app_serve("yt")
@@ -620,7 +571,6 @@ class YTDownloaderPage(ctk.CTkFrame):
 
     def _start_remote_access(self):
         port = self._current_remote_port()
-        self._remote_start_btn.configure(state="disabled", text="Starting…")
 
         def work():
             ok, msg = self.web_server.start(port)
@@ -629,7 +579,6 @@ class YTDownloaderPage(ctk.CTkFrame):
         threading.Thread(target=work, daemon=True).start()
 
     def _after_start_remote_access(self, ok, msg):
-        self._remote_start_btn.configure(state="normal", text="▶ Start")
         if not ok:
             self._log_msg(f"❌ Couldn't start browser-extension server: {msg}")
         else:
@@ -648,11 +597,9 @@ class YTDownloaderPage(ctk.CTkFrame):
         if self.web_server.is_running():
             self._remote_status_lbl.configure(
                 text=f"🟢 On — 127.0.0.1:{self.web_server.port}", text_color=SUCCESS)
-            self._remote_start_btn.configure(state="disabled")
             self._remote_stop_btn.configure(state="normal")
         else:
             self._remote_status_lbl.configure(text="⚪ Off", text_color=MUTED)
-            self._remote_start_btn.configure(state="normal")
             self._remote_stop_btn.configure(state="disabled")
 
     def _on_remote_job_update(self, job):

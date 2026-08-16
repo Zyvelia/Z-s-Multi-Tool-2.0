@@ -10,7 +10,7 @@ def open_mp4_to_gif(manager):
 def register(manager):
     manager.register({
         "name": "MP4 to GIF",
-        "category": "Media",
+        "category": "Tools",
         "desc": "Convert video files to optimized GIFs — no command line.",
         "icon": "🎞",
         "open": open_mp4_to_gif,
