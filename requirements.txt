@@ -44,6 +44,14 @@ yt-dlp>=2026.6.9
 # out of the box for recipients instead of silently disabling itself).
 pywin32>=312; sys_platform == "win32"
 
+# Windows-only: powers the notification_mirror module's capture of Windows
+# notifications via the UserNotificationListener WinRT API (modules/
+# notification_mirror/listener.py). Also guarded with try/except so the
+# module degrades to an "unavailable" status instead of crashing if missing.
+winrt-Windows.UI.Notifications.Management>=3.2.1; sys_platform == "win32"
+winrt-Windows.UI.Notifications>=3.2.1; sys_platform == "win32"
+winrt-Windows.Foundation>=3.2.1; sys_platform == "win32"
+
 # ---
 #
 # NOT on PyPI, required separately on the machine actually running the app:

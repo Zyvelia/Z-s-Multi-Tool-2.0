@@ -12,7 +12,7 @@
 ; ============================================================
 
 #define MyAppName "Z's Multi Tool"
-#define MyAppVersion "3.5.0"
+#define MyAppVersion "4.0.0"
 #define MyAppPublisher "Z"
 #define MyAppExeName "Z's Multi Tool.exe"
 #define MyAppIcon "assets\icon.ico"
@@ -88,8 +88,8 @@ Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName} now"; Flags
 ; Neither installer's free edition supports a silent switch, so these
 ; still open their own installer windows - Check: only launches one if
 ; the download actually succeeded and it wasn't already installed.
-Filename: "{tmp}\npcap-setup.exe"; StatusMsg: "Launching the Npcap installer (a few clicks needed - the free edition can't install silently)..."; Flags: postinstall skipifsilent; Check: ShouldRunNpcapInstaller
-Filename: "{tmp}\nmap-setup.exe"; StatusMsg: "Launching the Nmap installer..."; Flags: postinstall skipifsilent; Check: ShouldRunNmapInstaller
+Filename: "{tmp}\npcap-setup.exe"; StatusMsg: "Launching the Npcap installer (a few clicks needed - the free edition can't install silently)..."; Flags: postinstall skipifsilent shellexec; Check: ShouldRunNpcapInstaller
+Filename: "{tmp}\nmap-setup.exe"; StatusMsg: "Launching the Nmap installer..."; Flags: postinstall skipifsilent shellexec; Check: ShouldRunNmapInstaller
 
 [UninstallDelete]
 ; Removes the exe/shortcuts installed above. Deliberately NOT touching

@@ -75,6 +75,7 @@ python -m PyInstaller ^
     --collect-all pystray ^
     --collect-all qrcode ^
     --collect-all openai ^
+    --collect-all winrt ^
     --collect-data pypresence ^
     --hidden-import "PIL._tkinter_finder" ^
     --hidden-import "scapy.all" ^
@@ -89,6 +90,9 @@ python -m PyInstaller ^
     --hidden-import "cryptography.fernet" ^
     --hidden-import "yt_dlp" ^
     --hidden-import "openai" ^
+    --hidden-import "winrt.windows.foundation" ^
+    --hidden-import "winrt.windows.ui.notifications" ^
+    --hidden-import "winrt.windows.ui.notifications.management" ^
     --add-data "modules;modules" ^
     --add-data "core;core" ^
     --add-data "pages;pages" ^

@@ -296,7 +296,8 @@ class HubController:
             if not ok:
                 errors.append(f"Soundboard Tailscale: {msg}")
 
-        live_apps = [key for key in ("vault", "music", "yt", "notes", "games", "soundboard", "send")
+        live_apps = [key for key in ("vault", "music", "yt", "notes", "games", "soundboard",
+                                      "send")
                      if self.tailscale.is_app_serving(key)]
         hostname = status.get("hostname") or "this-device"
         hub_path = hub_service.write_hub_html(hostname, live_apps)

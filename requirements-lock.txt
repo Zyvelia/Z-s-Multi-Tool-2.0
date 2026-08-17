@@ -66,5 +66,9 @@ typing-inspection==0.4.4
 typing_extensions==4.16.0
 urllib3==2.7.0
 watchdog==6.0.0
+winrt-runtime==3.2.1
+winrt-Windows.Foundation==3.2.1
+winrt-Windows.UI.Notifications==3.2.1
+winrt-Windows.UI.Notifications.Management==3.2.1
 WMI==1.5.1
 yt-dlp==2026.7.4
