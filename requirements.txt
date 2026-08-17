@@ -38,10 +38,12 @@ yt-dlp>=2026.6.9
 # who wants that specific preview feature and is on a Python version
 # pygame supports can add it manually: pip install pygame
 
-# Windows-only: powers "creation time" editing in the metadata_editor module
-# (core/services + modules already guard this with try/except ImportError,
-# so it's not fatal if missing, but installing it means that feature works
-# out of the box for recipients instead of silently disabling itself).
+# Windows-only: powers "creation time" editing in the metadata_editor module,
+# shortcut-target resolution in startup_manager, and the Windows Update Agent
+# COM lookup in driver_checker (core/services + modules already guard this
+# with try/except ImportError, so it's not fatal if missing, but installing
+# it means those features work out of the box instead of silently disabling
+# themselves).
 pywin32>=312; sys_platform == "win32"
 
 # Windows-only: powers the notification_mirror module's capture of Windows

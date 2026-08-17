@@ -66,6 +66,14 @@ REM NOTE: --console instead of --windowed is the only functional difference
 REM from build.bat - everything else (collected packages, hidden imports,
 REM bundled data) is identical so this build behaves the same, it just
 REM shows its console.
+REM NOTE: --collect-all openai / --hidden-import openai / the three winrt
+REM hidden-imports + --collect-all winrt were added to match
+REM Zs_Multi_Tool.spec (this script had fallen out of sync with it - it
+REM predates the AI Chat module). Without --collect-all openai, the AI
+REM Chat module's "from openai import OpenAI" fails at runtime with
+REM ModuleNotFoundError, plugin_manager.py's try/except swallows it, and
+REM the module just silently never appears - this is exactly the bug this
+REM console build exists to catch.
 REM NOTE: no --add-data for "data" here on purpose. CryptoService/
 REM VaultService/AuthService all resolve through core/paths.py straight to
 REM %APPDATA%\ZsMultiTool\... at runtime and only fall back to a local
@@ -85,6 +93,8 @@ python -m PyInstaller ^
     --collect-all PIL ^
     --collect-all pystray ^
     --collect-all qrcode ^
+    --collect-all openai ^
+    --collect-all winrt ^
     --collect-data pypresence ^
     --hidden-import "PIL._tkinter_finder" ^
     --hidden-import "scapy.all" ^
@@ -98,6 +108,10 @@ python -m PyInstaller ^
     --hidden-import "psutil" ^
     --hidden-import "cryptography.fernet" ^
     --hidden-import "yt_dlp" ^
+    --hidden-import "openai" ^
+    --hidden-import "winrt.windows.foundation" ^
+    --hidden-import "winrt.windows.ui.notifications" ^
+    --hidden-import "winrt.windows.ui.notifications.management" ^
     --add-data "modules;modules" ^
     --add-data "core;core" ^
     --add-data "pages;pages" ^

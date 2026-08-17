@@ -37,7 +37,7 @@ GITHUB_REPO = "https://github.com/Zyvelia/Z-s-Multi-Tool-2.0"    # e.g. "Zs-Mult
 
 # Keep this in sync with APP_VERSION in pages/settings_page.py.
 # Bump it (and tag a matching vX.Y.Z GitHub Release) each time you ship.
-APP_VERSION = "3.0.0"
+APP_VERSION = "4.0.0"
 
 
 def _api_url() -> str:

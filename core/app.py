@@ -17,8 +17,6 @@ from core.services.discord_service import DiscordService # Added import
 from core.services.tailscale_service import TailscaleService
 from core.services.vault_web_server import VaultWebServer
 from core.services.alert_service import AlertService
-from core.services.music_autostart_service import MusicAutoStartService
-from core.services.yt_autostart_service import YTAutoStartService
 
 from pages.catalog_page import CatalogPage
 from pages.settings_page import SettingsPage
@@ -98,27 +96,6 @@ class App(ctk.CTk):
         # =====================================================
 
         self.page_manager = PageManager(self)
-
-        # Music Player's and YouTube Downloader's local web servers (used
-        # by the browser extension / phone streaming / "Send to
-        # Downloader") are each normally created lazily the first time
-        # their page is opened — see modules/media_player/ui.py and
-        # modules/yt_downloader/ui.py. If a module's own "Auto-start"
-        # setting is on, its service starts that server here instead, so
-        # it's already up as soon as the app opens rather than only
-        # after you visit the page. Neither of these touches
-        # Tailscale/phone access — only the loopback server — matching
-        # the Security Vault side, which stays fully manual.
-        #
-        # app.py no longer needs to know how each module reads its own
-        # settings or constructs its own web server — that lives in the
-        # service now, keyed only on the one thing app.py actually needs
-        # to hand it: page_manager.
-        self.music_autostart_service = MusicAutoStartService(self.page_manager)
-        self.music_autostart_service.start_if_enabled()
-
-        self.yt_autostart_service = YTAutoStartService(self.page_manager)
-        self.yt_autostart_service.start_if_enabled()
 
         # =====================================================
         # PLUGIN MANAGER

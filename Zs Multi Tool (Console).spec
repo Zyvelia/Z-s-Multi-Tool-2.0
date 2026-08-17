@@ -4,7 +4,7 @@ from PyInstaller.utils.hooks import collect_all
 
 datas = [('modules', 'modules'), ('core', 'core'), ('pages', 'pages'), ('assets', 'assets')]
 binaries = []
-hiddenimports = ['PIL._tkinter_finder', 'scapy.all', 'nmap', 'vlc', 'pyperclip', 'pypresence', 'pystray._win32', 'sounddevice', 'soundfile', 'psutil', 'cryptography.fernet', 'yt_dlp']
+hiddenimports = ['PIL._tkinter_finder', 'scapy.all', 'nmap', 'vlc', 'pyperclip', 'pypresence', 'pystray._win32', 'sounddevice', 'soundfile', 'psutil', 'cryptography.fernet', 'yt_dlp', 'openai', 'winrt.windows.foundation', 'winrt.windows.ui.notifications', 'winrt.windows.ui.notifications.management']
 datas += collect_data_files('pypresence')
 tmp_ret = collect_all('customtkinter')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
@@ -15,6 +15,10 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('pystray')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('qrcode')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+tmp_ret = collect_all('openai')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+tmp_ret = collect_all('winrt')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 

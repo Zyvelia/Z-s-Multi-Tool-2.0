@@ -66,7 +66,6 @@ python -m PyInstaller ^
     --noconfirm ^
     --onefile ^
     --windowed ^
-    --uac-admin ^
     --name "Zs Multi Tool" ^
     --icon "assets\icon.ico" ^
     --collect-all customtkinter ^
