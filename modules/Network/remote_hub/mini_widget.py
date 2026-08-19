@@ -29,6 +29,7 @@ class HubMiniWidget(ctk.CTkFrame):
         self._busy = False
         self._live = False
         self._poll_job = None
+        self._destroyed = False
 
         self.grid_columnconfigure(0, weight=1)
 
@@ -57,6 +58,7 @@ class HubMiniWidget(ctk.CTkFrame):
         self._refresh()
 
     def destroy(self):
+        self._destroyed = True
         if self._poll_job:
             try:
                 self.after_cancel(self._poll_job)
@@ -64,24 +66,36 @@ class HubMiniWidget(ctk.CTkFrame):
                 pass
         super().destroy()
 
+    def _post_to_ui(self, callback) -> None:
+        """Schedule UI work on the main thread (safe to call from workers)."""
+        if self._destroyed:
+            return
+        try:
+            self.after(0, callback)
+        except RuntimeError:
+            pass
+
     # ── status polling ───────────────────────────────────────
 
     def _refresh(self):
-        if not self.winfo_exists():
+        if self._destroyed or not self.winfo_exists():
             return
 
         def work():
+            if self._destroyed:
+                return
             try:
                 status, live_apps = self.controller.get_status_sync()
             except Exception:
                 status, live_apps = None, {}
-            if self.winfo_exists():
-                self.after(0, lambda: self._apply_status(status, live_apps))
+            if self._destroyed:
+                return
+            self._post_to_ui(lambda: self._apply_status(status, live_apps))
 
         threading.Thread(target=work, daemon=True).start()
 
     def _apply_status(self, status, live_apps):
-        if not self.winfo_exists():
+        if self._destroyed or not self.winfo_exists():
             return
 
         # A go-live/go-offline is in flight — leave the button alone,
@@ -120,14 +134,15 @@ class HubMiniWidget(ctk.CTkFrame):
                 self.controller.go_live_sync()
             else:
                 self.controller.go_offline_sync()
-            if self.winfo_exists():
-                self.after(0, self._on_toggle_done)
+            if self._destroyed:
+                return
+            self._post_to_ui(self._on_toggle_done)
 
         threading.Thread(target=work, daemon=True).start()
 
     def _on_toggle_done(self):
         self._busy = False
-        if not self.winfo_exists():
+        if self._destroyed or not self.winfo_exists():
             return
         self.toggle_btn.configure(state="normal")
         self._refresh()

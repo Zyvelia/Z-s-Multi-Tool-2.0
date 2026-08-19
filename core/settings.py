@@ -13,7 +13,10 @@ SETTINGS_FILE = paths.migrate_legacy_file(
 DEFAULT = {
     "theme": "dark",
     "auto_update_check": True,
-    "hidden_tools": []
+    "hidden_tools": [],
+    "tool_order": [],
+    "catalog_theme": "neon",
+    "module_themes": {},
 }
 
 
@@ -44,4 +47,4 @@ class SettingsManager:
 
     def reset(self):
         self.data = DEFAULT.copy()
-        self.save()
+        self.save()

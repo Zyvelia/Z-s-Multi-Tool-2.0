@@ -19,9 +19,19 @@ class PluginManager:
             "name": str,
             "category": str,
             "desc": str,
-            "open": callable
+            "open": callable,          # legacy
+            "page_class": type,        # preferred — auto-wrapped with settings + themes
         }
         """
+        tool = dict(tool)
+        name = tool.get("name", "")
+
+        page_class = tool.pop("page_class", None)
+        if page_class is not None:
+            from core.module_shell import open_module
+
+            tool["open"] = lambda manager, pc=page_class, mid=name: open_module(manager, mid, pc)
+
         self.tools.append(tool)
 
     def get_tools(self):

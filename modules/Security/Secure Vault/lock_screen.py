@@ -4,29 +4,24 @@ from .ui import PasswordVaultPage
 from core import theme
 from core.services.auth_service import AuthService
 
-BG = theme.BG
-PANEL = theme.PANEL
-CARD = theme.PANEL_2
-BORDER = theme.BORDER
 
-ACCENT = theme.ACCENT
-ACCENT_HOVER = theme.ACCENT_HOVER
 
-TEXT = theme.TEXT
-MUTED = theme.MUTED
-FAINT = theme.FAINT
 
-ERROR = theme.ERROR
-SUCCESS = theme.SUCCESS
-DANGER = theme.DANGER
 
 MIN_PASSWORD_LENGTH = 8
 
 # Strength meter: index 0-4, matching AuthService.password_strength()
-STRENGTH_COLORS = [DANGER, "#e0803f", "#e0c53f", "#8bd15a", SUCCESS]
+STRENGTH_COLORS = [theme.DANGER, "#e0803f", "#e0c53f", "#8bd15a", theme.SUCCESS]
 
 
 class PasswordVaultLockScreen(ctk.CTkFrame):
+
+    MODULE_SETTINGS_TITLE = "Remote access"
+
+    @staticmethod
+    def build_module_settings(parent, manager):
+        from .remote_access_tab import RemoteAccessTab
+        return RemoteAccessTab(parent, manager)
 
     def __init__(self, parent, manager):
         super().__init__(parent)
@@ -36,7 +31,7 @@ class PasswordVaultLockScreen(ctk.CTkFrame):
         self.auth = manager.container.auth_service
         self.alert = manager.container.alert_service
 
-        self.configure(fg_color=BG)
+        self.configure(fg_color=theme.BG)
 
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(0, weight=1)
@@ -57,9 +52,9 @@ class PasswordVaultLockScreen(ctk.CTkFrame):
         # flat rectangle, matching the rest of the app's card language.
         card = ctk.CTkFrame(
             self,
-            fg_color=PANEL,
+            fg_color=theme.PANEL,
             border_width=1,
-            border_color=BORDER,
+            border_color=theme.BORDER,
             corner_radius=theme.RADIUS,
             width=440
         )
@@ -76,7 +71,7 @@ class PasswordVaultLockScreen(ctk.CTkFrame):
         # read fine against the card's rounded ones at this thickness.
         ctk.CTkFrame(
             card,
-            fg_color=ACCENT,
+            fg_color=theme.ACCENT,
             corner_radius=0,
             height=3
         ).pack(fill="x", side="top")
@@ -123,14 +118,14 @@ class PasswordVaultLockScreen(ctk.CTkFrame):
             inner,
             text="E N D - T O - E N D   E N C R Y P T E D",
             font=theme.font(10, "bold"),
-            text_color=ACCENT
+            text_color=theme.ACCENT
         ).pack()
 
         ctk.CTkLabel(
             inner,
             text="Security Vault",
             font=theme.font(23, "bold"),
-            text_color=TEXT
+            text_color=theme.TEXT
         ).pack(pady=(4, 0))
 
         first_run = not self.auth.is_initialized()
@@ -143,7 +138,7 @@ class PasswordVaultLockScreen(ctk.CTkFrame):
                 "Enter your master password to continue."
             ),
             font=theme.font(12),
-            text_color=MUTED,
+            text_color=theme.MUTED,
             wraplength=320,
             justify="center"
         ).pack(pady=(6, 20))
@@ -151,7 +146,7 @@ class PasswordVaultLockScreen(ctk.CTkFrame):
         # Divider between the identity block above and the form below —
         # a quiet structural cue that these are two different jobs
         # (who this app is / what you need to do right now).
-        divider = ctk.CTkFrame(inner, fg_color=BORDER, height=1, width=320)
+        divider = ctk.CTkFrame(inner, fg_color=theme.BORDER, height=1, width=320)
         divider.pack(pady=(0, 20))
 
         if first_run:
@@ -164,7 +159,7 @@ class PasswordVaultLockScreen(ctk.CTkFrame):
             inner,
             text="",
             font=theme.font(12),
-            text_color=ERROR,
+            text_color=theme.ERROR,
             wraplength=320,
             justify="center"
         )
@@ -178,7 +173,7 @@ class PasswordVaultLockScreen(ctk.CTkFrame):
             inner,
             text=f"PBKDF2-HMAC-SHA256 · {self.auth.PBKDF2_ITERATIONS:,} rounds",
             font=theme.mono(10),
-            text_color=FAINT
+            text_color=theme.FAINT
         ).pack(pady=(20, 0))
 
         self.password_entry.focus_set()
@@ -201,8 +196,8 @@ class PasswordVaultLockScreen(ctk.CTkFrame):
             show="•",
             height=40,
             corner_radius=theme.RADIUS_SM,
-            fg_color=CARD,
-            border_color=BORDER,
+            fg_color=theme.PANEL_2,
+            border_color=theme.BORDER,
             font=theme.font(13)
         )
         entry.grid(row=0, column=0, sticky="ew")
@@ -219,9 +214,9 @@ class PasswordVaultLockScreen(ctk.CTkFrame):
             width=52,
             height=40,
             corner_radius=theme.RADIUS_SM,
-            fg_color=CARD,
-            hover_color=PANEL,
-            text_color=MUTED,
+            fg_color=theme.PANEL_2,
+            hover_color=theme.PANEL,
+            text_color=theme.MUTED,
             font=theme.font(11),
             command=on_toggle
         )
@@ -254,7 +249,7 @@ class PasswordVaultLockScreen(ctk.CTkFrame):
             height=4,
             corner_radius=2,
             progress_color=STRENGTH_COLORS[0],
-            fg_color=BORDER
+            fg_color=theme.BORDER
         )
         self.strength_bar.grid(row=0, column=0, sticky="ew", padx=(0, 8))
         self.strength_bar.set(0)
@@ -263,7 +258,7 @@ class PasswordVaultLockScreen(ctk.CTkFrame):
             meter_row,
             text=" ",
             font=theme.font(11),
-            text_color=FAINT,
+            text_color=theme.FAINT,
             width=80,
             anchor="e"
         )
@@ -277,7 +272,7 @@ class PasswordVaultLockScreen(ctk.CTkFrame):
             parent,
             text=f"Minimum {MIN_PASSWORD_LENGTH} characters. This password can't be recovered if you forget it.",
             font=theme.font(11),
-            text_color=FAINT,
+            text_color=theme.FAINT,
             wraplength=320,
             justify="left"
         ).pack(fill="x", pady=(4, 16))
@@ -287,8 +282,8 @@ class PasswordVaultLockScreen(ctk.CTkFrame):
             text="Create Vault",
             height=42,
             corner_radius=theme.RADIUS_SM,
-            fg_color=ACCENT,
-            hover_color=ACCENT_HOVER,
+            fg_color=theme.ACCENT,
+            hover_color=theme.ACCENT_HOVER,
             text_color="#0b0d10",
             font=theme.font(13, "bold"),
             command=self.create_master_password
@@ -317,8 +312,8 @@ class PasswordVaultLockScreen(ctk.CTkFrame):
             text="Unlock Vault",
             height=42,
             corner_radius=theme.RADIUS_SM,
-            fg_color=ACCENT,
-            hover_color=ACCENT_HOVER,
+            fg_color=theme.ACCENT,
+            hover_color=theme.ACCENT_HOVER,
             text_color="#0b0d10",
             font=theme.font(13, "bold"),
             command=self.unlock_vault
@@ -408,6 +403,12 @@ class PasswordVaultLockScreen(ctk.CTkFrame):
     # =====================================================
 
     def open_vault(self):
+        from core.module_shell import find_module_shell
+
+        shell = find_module_shell(self)
+        if shell is not None:
+            shell.open_vault_dashboard(PasswordVaultPage)
+            return
 
         if "vault_dashboard" not in self.manager.pages:
 

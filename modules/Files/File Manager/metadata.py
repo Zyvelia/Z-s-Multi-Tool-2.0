@@ -11,9 +11,9 @@ from typing import Optional
 
 import customtkinter as ctk
 
+from core import theme
+
 from .utils import (
-    BG, BG_PANEL, BG_RAISED, BORDER, ACCENT, TEXT_HI, TEXT_MID, TEXT_LOW,
-    FONT, FONT_MONO,
     human_size, file_hash, file_permissions, mime_type, format_ts,
 )
 
@@ -46,9 +46,9 @@ class MetadataPanel(ctk.CTkFrame):
     """Right-side panel showing file metadata."""
 
     def __init__(self, parent: ctk.CTkBaseClass, **kwargs):
-        super().__init__(parent, fg_color=BG_PANEL,
+        super().__init__(parent, fg_color=theme.PANEL,
                          corner_radius=10, border_width=1,
-                         border_color=BORDER, width=220, **kwargs)
+                         border_color=theme.BORDER, width=220, **kwargs)
         self.grid_propagate(False)
         self._rows: dict[str, ctk.CTkLabel] = {}
         self._build()
@@ -58,12 +58,12 @@ class MetadataPanel(ctk.CTkFrame):
     def _build(self):
         ctk.CTkLabel(
             self, text="METADATA",
-            text_color=TEXT_LOW, font=(FONT, 9, "bold")
+            text_color=theme.FAINT, font=(theme.FONT_FAMILY, 9, "bold")
         ).pack(anchor="w", padx=14, pady=(12, 6))
 
         self._scroll = ctk.CTkScrollableFrame(
             self, fg_color="transparent",
-            scrollbar_button_color=BORDER,
+            scrollbar_button_color=theme.BORDER,
         )
         self._scroll.pack(fill="both", expand=True, padx=4, pady=(0, 8))
 
@@ -73,13 +73,13 @@ class MetadataPanel(ctk.CTkFrame):
 
         ctk.CTkLabel(
             frame, text=key,
-            text_color=TEXT_LOW, font=(FONT, 9, "bold"),
+            text_color=theme.FAINT, font=(theme.FONT_FAMILY, 9, "bold"),
             anchor="w"
         ).pack(fill="x", padx=8)
 
         lbl = ctk.CTkLabel(
             frame, text=value,
-            text_color=TEXT_MID, font=(FONT_MONO, 9),
+            text_color=theme.MUTED, font=(theme.MONO_FAMILY, 9),
             anchor="w", justify="left", wraplength=180
         )
         lbl.pack(fill="x", padx=8, pady=(0, 4))
@@ -123,5 +123,5 @@ class MetadataPanel(ctk.CTkFrame):
         self._clear()
         ctk.CTkLabel(
             self._scroll, text="No file selected",
-            text_color=TEXT_LOW, font=(FONT, 11)
+            text_color=theme.FAINT, font=(theme.FONT_FAMILY, 11)
         ).pack(pady=20)

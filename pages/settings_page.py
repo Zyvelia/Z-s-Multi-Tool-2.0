@@ -6,6 +6,7 @@ from PIL import Image
 from core import theme
 from core import paths
 from core import updater
+from pages.catalog_theme import list_catalog_themes
 
 # ── About section links ──────────────────────────────────────────────────
 # Fill in GITHUB_URL once the repo is uploaded — the button below enables
@@ -28,6 +29,7 @@ class SettingsPage(ctk.CTkFrame):
         self.plugin_manager = plugin_manager
 
         self.tool_check_vars = {}
+        self._catalog_theme_cards = {}
 
         self.build_ui()
 
@@ -88,6 +90,33 @@ class SettingsPage(ctk.CTkFrame):
         ).pack(side="left")
 
         # =====================================================
+        # CATALOG / HOME THEME
+        # =====================================================
+
+        catalog_frame = ctk.CTkFrame(self, **theme.panel_style())
+        catalog_frame.pack(fill="x", padx=theme.PAD_LG, pady=theme.PAD)
+
+        self._section_title(catalog_frame, "🏠  Home / Catalog")
+
+        ctk.CTkLabel(
+            catalog_frame,
+            text="Choose a color theme for the tool grid on the home screen. "
+                 "Changes apply immediately — go back to Home to preview.",
+            font=theme.font(12),
+            text_color=theme.MUTED,
+            anchor="w",
+            justify="left",
+            wraplength=760,
+        ).pack(fill="x", padx=theme.PAD_LG, pady=(0, 10))
+
+        themes_row = ctk.CTkFrame(catalog_frame, fg_color="transparent")
+        themes_row.pack(fill="x", padx=theme.PAD_LG, pady=(0, theme.PAD))
+
+        current_theme = self.settings.get("catalog_theme") or "neon"
+        for bundle in list_catalog_themes():
+            self._add_catalog_theme_option(themes_row, bundle, current_theme)
+
+        # =====================================================
         # UPDATES
         # =====================================================
 
@@ -134,12 +163,24 @@ class SettingsPage(ctk.CTkFrame):
         ctk.CTkLabel(
             tools_frame,
             text="Uncheck a tool to hide it from the home screen. "
-                 "Use the ✕ on a tool card to hide it quickly instead.",
+                 "Use the ✕ on a tool card to hide it quickly instead. "
+                 "Drag a card by its grip, title, or description to "
+                 "reorder the home screen — the order is saved automatically.",
             font=theme.font(12),
             text_color=theme.MUTED,
             anchor="w",
-            justify="left"
+            justify="left",
+            wraplength=760
         ).pack(fill="x", padx=theme.PAD_LG, pady=(0, 8))
+
+        ctk.CTkButton(
+            tools_frame,
+            text="↕  Reset Tool Order",
+            width=180,
+            height=32,
+            command=self._on_reset_order,
+            **theme.secondary_button_style()
+        ).pack(anchor="w", padx=theme.PAD_LG, pady=(0, 8))
 
         tools_list = ctk.CTkScrollableFrame(
             tools_frame,
@@ -240,6 +281,76 @@ class SettingsPage(ctk.CTkFrame):
         if GITHUB_URL:
             webbrowser.open(GITHUB_URL)
 
+    def _add_catalog_theme_option(self, parent, bundle, current_id):
+        selected = bundle.id == current_id
+
+        card = ctk.CTkFrame(
+            parent,
+            fg_color=theme.PANEL_2,
+            corner_radius=theme.RADIUS_SM,
+            border_width=2 if selected else 1,
+            border_color=theme.ACCENT if selected else theme.BORDER,
+            width=210,
+            height=108,
+            cursor="hand2",
+        )
+        card.pack(side="left", padx=(0, 10), pady=4)
+        card.pack_propagate(False)
+        self._catalog_theme_cards[bundle.id] = card
+
+        swatch_row = ctk.CTkFrame(card, fg_color="transparent")
+        swatch_row.pack(anchor="w", padx=10, pady=(10, 6))
+        for color in (bundle.t.BG, bundle.t.ACCENT, bundle.t.TEXT):
+            ctk.CTkFrame(
+                swatch_row,
+                width=30,
+                height=14,
+                fg_color=color,
+                corner_radius=4,
+            ).pack(side="left", padx=(0, 5))
+
+        ctk.CTkLabel(
+            card,
+            text=bundle.name,
+            font=theme.font(13, "bold"),
+            text_color=theme.TEXT,
+        ).pack(anchor="w", padx=10)
+
+        ctk.CTkLabel(
+            card,
+            text=bundle.description,
+            font=theme.font(10),
+            text_color=theme.MUTED,
+            wraplength=188,
+            justify="left",
+        ).pack(anchor="w", padx=10, pady=(2, 8))
+
+        def on_click(_event=None, theme_id=bundle.id):
+            self._select_catalog_theme(theme_id)
+
+        self._bind_click_recursive(card, on_click)
+
+    def _bind_click_recursive(self, widget, callback):
+        widget.bind("<Button-1>", callback)
+        for child in widget.winfo_children():
+            self._bind_click_recursive(child, callback)
+
+    def _select_catalog_theme(self, theme_id):
+        self.settings.set("catalog_theme", theme_id)
+        self._refresh_catalog_theme_selection(theme_id)
+
+        catalog_page = self.manager.pages.get("catalog")
+        if catalog_page:
+            catalog_page.apply_theme(theme_id)
+
+    def _refresh_catalog_theme_selection(self, selected_id):
+        for theme_id, card in self._catalog_theme_cards.items():
+            selected = theme_id == selected_id
+            card.configure(
+                border_width=2 if selected else 1,
+                border_color=theme.ACCENT if selected else theme.BORDER,
+            )
+
     # =========================================================
     # SETTINGS ACTIONS
     # =========================================================
@@ -301,6 +412,9 @@ class SettingsPage(ctk.CTkFrame):
     def on_show(self):
         """Called by PageManager every time this page becomes visible."""
         self._refresh_tools_list()
+        self._refresh_catalog_theme_selection(
+            self.settings.get("catalog_theme") or "neon"
+        )
 
     def _on_toggle_tool_visible(self, name, var):
         hidden = set(self.settings.get("hidden_tools") or [])
@@ -310,6 +424,12 @@ class SettingsPage(ctk.CTkFrame):
             hidden.add(name)
         self.settings.set("hidden_tools", list(hidden))
 
+        catalog_page = self.manager.pages.get("catalog")
+        if catalog_page:
+            catalog_page.render()
+
+    def _on_reset_order(self):
+        self.settings.set("tool_order", [])
         catalog_page = self.manager.pages.get("catalog")
         if catalog_page:
             catalog_page.render()

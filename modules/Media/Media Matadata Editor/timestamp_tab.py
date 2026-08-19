@@ -22,24 +22,10 @@ try:
 except ImportError:
     WIN32_AVAILABLE = False
 
-BG = theme.BG
-PANEL = theme.PANEL
-PANEL_2 = theme.PANEL_2
-ACCENT = theme.ACCENT
-ACCENT_HOVER = theme.ACCENT_HOVER
-TEXT = theme.TEXT
-MUTED = theme.MUTED
-DANGER = theme.DANGER
-PANEL_HOVER = theme.PANEL_HOVER
-
-_BTN = dict(fg_color=PANEL_2, hover_color=PANEL_HOVER, text_color=TEXT,
-            height=34, corner_radius=8)
-_BTN_ACCENT = dict(fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color="white",
-                    height=34, corner_radius=8)
-
 
 def _make_btn(parent, text, cmd, **overrides):
-    kw = {**_BTN, **overrides}
+    kw = theme.secondary_button_kwargs()
+    kw.update(overrides)
     return ctk.CTkButton(parent, text=text, command=cmd, **kw)
 
 
@@ -57,26 +43,26 @@ class FileTimestampsTab(ctk.CTkFrame):
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
 
-        top = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
+        top = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=10)
         top.grid(row=0, column=0, sticky="ew", padx=2, pady=(2, 6))
         top.grid_columnconfigure(1, weight=1)
 
-        _make_btn(top, "Open File", self._open_file, width=110, **_BTN_ACCENT).grid(
+        _make_btn(top, "Open File", self._open_file, width=110, **theme.primary_button_kwargs()).grid(
             row=0, column=0, padx=10, pady=10)
-        self.path_label = ctk.CTkLabel(top, text="No file loaded", text_color=MUTED, anchor="w")
+        self.path_label = ctk.CTkLabel(top, text="No file loaded", text_color=theme.MUTED, anchor="w")
         self.path_label.grid(row=0, column=1, sticky="ew", padx=6, pady=10)
 
-        panel = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
+        panel = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=10)
         panel.grid(row=1, column=0, sticky="nsew", padx=2, pady=2)
         panel.grid_columnconfigure(1, weight=1)
 
         labels = ["Created", "Modified", "Accessed"]
         self.vars = {}
         for i, label in enumerate(labels):
-            ctk.CTkLabel(panel, text=label, width=100, anchor="w", text_color=TEXT).grid(
+            ctk.CTkLabel(panel, text=label, width=100, anchor="w", text_color=theme.TEXT).grid(
                 row=i, column=0, padx=(14, 6), pady=10, sticky="w")
             var = ctk.StringVar()
-            entry = ctk.CTkEntry(panel, fg_color=PANEL_2, border_color=PANEL_2,
+            entry = ctk.CTkEntry(panel, fg_color=theme.PANEL_2, border_color=theme.PANEL_2,
                                   textvariable=var, placeholder_text=self.DATE_FMT)
             entry.grid(row=i, column=1, padx=(0, 8), pady=10, sticky="ew")
             self.vars[label] = (var, entry)
@@ -90,18 +76,18 @@ class FileTimestampsTab(ctk.CTkFrame):
         else:
             note_text = "Format: YYYY-MM-DD HH:MM:SS"
 
-        ctk.CTkLabel(panel, text=note_text, text_color=MUTED, justify="left", anchor="w").grid(
+        ctk.CTkLabel(panel, text=note_text, text_color=theme.MUTED, justify="left", anchor="w").grid(
             row=len(labels), column=0, columnspan=2, padx=14, pady=(4, 14), sticky="w")
 
         btn_row = ctk.CTkFrame(self, fg_color="transparent")
         btn_row.grid(row=2, column=0, sticky="ew", padx=2, pady=8)
 
         _make_btn(btn_row, "Set to Now", self._set_now).pack(side="left", padx=(0, 8))
-        _make_btn(btn_row, "Save Changes", self._save_changes, **_BTN_ACCENT).pack(side="left", padx=8)
+        _make_btn(btn_row, "Save Changes", self._save_changes, **theme.primary_button_kwargs()).pack(side="left", padx=8)
         _make_btn(btn_row, "Reload / Discard", self._reload_current).pack(side="left", padx=8)
 
         self.panel = panel
-        self.status_label = ctk.CTkLabel(self, text="", text_color=MUTED, anchor="w")
+        self.status_label = ctk.CTkLabel(self, text="", text_color=theme.MUTED, anchor="w")
         self.status_label.grid(row=3, column=0, sticky="ew", padx=4, pady=(0, 2))
 
         self._set_controls_enabled(False)
@@ -114,7 +100,7 @@ class FileTimestampsTab(ctk.CTkFrame):
             entry.configure(state=state)
 
     def _set_status(self, msg, error=False):
-        self.status_label.configure(text=msg, text_color=(DANGER if error else MUTED))
+        self.status_label.configure(text=msg, text_color=(theme.DANGER if error else theme.MUTED))
 
     def _open_file(self):
         path = filedialog.askopenfilename(title="Select file")

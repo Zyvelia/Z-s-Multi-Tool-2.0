@@ -14,12 +14,8 @@ from collections import deque
 import customtkinter as ctk
 import psutil
 
-try:
-    from .style import theme, METRIC_COLORS, core_color
-except ImportError:  # pragma: no cover - fallback for standalone use/testing
-    from . import _theme as theme
-    METRIC_COLORS = theme.METRIC_COLORS
-    core_color = theme.core_color
+from core import theme
+from .colors import core_color, metric_colors
 
 
 REFRESH_MS = 1000
@@ -178,16 +174,16 @@ class SystemMonitorPage(ctk.CTkFrame):
         for i in range(4):
             cards_row.grid_columnconfigure(i, weight=1, uniform="cards")
 
-        self.cpu_card = MetricCard(cards_row, "CPU", color=METRIC_COLORS["cpu"])
+        self.cpu_card = MetricCard(cards_row, "CPU", color=metric_colors()["cpu"])
         self.cpu_card.grid(row=0, column=0, padx=(0, 8), pady=(0, 12), sticky="nsew")
 
-        self.ram_card = MetricCard(cards_row, "MEMORY", color=METRIC_COLORS["ram"])
+        self.ram_card = MetricCard(cards_row, "MEMORY", color=metric_colors()["ram"])
         self.ram_card.grid(row=0, column=1, padx=8, pady=(0, 12), sticky="nsew")
 
-        self.disk_card = MetricCard(cards_row, "DISK (C:)", color=METRIC_COLORS["disk"])
+        self.disk_card = MetricCard(cards_row, "DISK (C:)", color=metric_colors()["disk"])
         self.disk_card.grid(row=0, column=2, padx=8, pady=(0, 12), sticky="nsew")
 
-        self.swap_card = MetricCard(cards_row, "SWAP", color=METRIC_COLORS["swap"])
+        self.swap_card = MetricCard(cards_row, "SWAP", color=metric_colors()["swap"])
         self.swap_card.grid(row=0, column=3, padx=(8, 0), pady=(0, 12), sticky="nsew")
 
         # ---- per-core CPU row ----

@@ -13,8 +13,9 @@ Tabs:
     API Keys   -> Add, view (masked), and remove API keys. Keys are
                   encrypted at rest via crypto_store.py.
     Saved      -> Every headline the user has kept, across all feeds.
-    Settings   -> Manage custom feeds, country, headline count,
-                  auto-refresh interval, and stored data.
+
+Module ⚙ settings -> Custom feeds, country, headline count,
+                  auto-refresh interval, and stored data management.
 
 API calls run on background threads so the UI never freezes; results are
 marshalled back to the main thread via `after()`.
@@ -61,7 +62,27 @@ KEY_PROVIDER_INFO["newsapi"] = {
 GAME_PROVIDER_ORDER = ["fortnite", "steam", "clash_of_clans", "clash_royale", "brawl_stars", "custom"]
 
 
+def _get_news_page(manager):
+    if manager is None:
+        return None
+    current = getattr(manager, "current", None)
+    if current is None:
+        return None
+    inner = getattr(current, "_inner", current)
+    if inner.__class__.__name__ == "WeatherNewsUI":
+        return inner
+    return None
+
+
 class WeatherNewsUI(ctk.CTkFrame):
+
+    MODULE_SETTINGS_TITLE = "Feeds & preferences"
+
+    @staticmethod
+    def build_module_settings(parent, manager):
+        from .settings_panel import GameStatsNewsSettingsPanel
+        return GameStatsNewsSettingsPanel(parent, manager)
+
     def __init__(self, master, manager=None):
         super().__init__(master, fg_color=theme.BG)
         self.manager = manager
@@ -89,14 +110,12 @@ class WeatherNewsUI(ctk.CTkFrame):
         self.tab_game_stats = self.tabview.add("Game Stats")
         self.tab_api_keys = self.tabview.add("API Keys")
         self.tab_saved = self.tabview.add("Saved")
-        self.tab_settings = self.tabview.add("Settings")
 
         self._build_home_tab()
         self._build_feeds_tab()
         self._build_game_stats_tab()
         self._build_api_keys_tab()
         self._build_saved_tab()
-        self._build_settings_tab()
 
         # Initial load
         self.refresh_home()
@@ -195,8 +214,8 @@ class WeatherNewsUI(ctk.CTkFrame):
 
         ctk.CTkLabel(
             tab,
-            text="Track any topic — a company, a hobby, a hometown team. Add feeds in Settings, "
-                 "then pick one below to see the latest headlines.",
+            text="Track any topic — a company, a hobby, a hometown team. Add feeds in "
+                 "⚙ settings, then pick one below to see the latest headlines.",
             text_color=theme.MUTED, justify="left", wraplength=700, anchor="w"
         ).grid(row=1, column=0, sticky="ew", padx=5, pady=(4, 10))
 
@@ -215,7 +234,7 @@ class WeatherNewsUI(ctk.CTkFrame):
         if not feeds:
             ctk.CTkLabel(
                 self.feeds_body,
-                text="No custom feeds yet. Go to Settings → Custom Feeds to add one "
+                text="No custom feeds yet. Open ⚙ settings → Custom Feeds to add one "
                      "(e.g. name: \"F1\", keywords: \"Formula 1\").",
                 justify="left", wraplength=700, anchor="w"
             ).grid(row=0, column=0, sticky="w", pady=10)
@@ -707,205 +726,6 @@ class WeatherNewsUI(ctk.CTkFrame):
             storage.clear_saved_articles()
             self._render_saved_tab()
             self._refresh_save_buttons()
-
-    # ------------------------------------------------------------------
-    # SETTINGS TAB
-    # ------------------------------------------------------------------
-
-    def _build_settings_tab(self):
-        tab = self.tab_settings
-        tab.grid_columnconfigure(0, weight=1)
-        tab.grid_rowconfigure(0, weight=1)
-
-        scroll = ctk.CTkScrollableFrame(tab, label_text="", fg_color="transparent")
-        scroll.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
-        scroll.grid_columnconfigure(0, weight=1)
-
-        # --- Custom feeds management ---------------------------------
-        feeds_section = ctk.CTkFrame(scroll, fg_color=theme.PANEL_2, corner_radius=10)
-        feeds_section.grid(row=0, column=0, sticky="ew", pady=(0, 15))
-        feeds_section.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(
-            feeds_section, text="Custom Feeds", font=ctk.CTkFont(size=15, weight="bold")
-        ).grid(row=0, column=0, sticky="w", padx=15, pady=(15, 5), columnspan=3)
-
-        add_row = ctk.CTkFrame(feeds_section, fg_color="transparent")
-        add_row.grid(row=1, column=0, columnspan=3, sticky="ew", padx=15, pady=(0, 10))
-        add_row.grid_columnconfigure(0, weight=1)
-        add_row.grid_columnconfigure(1, weight=1)
-
-        self.new_feed_name_entry = ctk.CTkEntry(add_row, placeholder_text="Feed name (e.g. F1)")
-        self.new_feed_name_entry.grid(row=0, column=0, sticky="ew", padx=(0, 5))
-
-        self.new_feed_query_entry = ctk.CTkEntry(add_row, placeholder_text="Keywords (e.g. Formula 1)")
-        self.new_feed_query_entry.grid(row=0, column=1, sticky="ew", padx=(0, 5))
-        self.new_feed_query_entry.bind("<Return>", lambda e: self._add_feed())
-
-        ctk.CTkButton(add_row, text="Add Feed", width=90, command=self._add_feed).grid(
-            row=0, column=2
-        )
-
-        self.feeds_list_frame = ctk.CTkFrame(feeds_section, fg_color="transparent")
-        self.feeds_list_frame.grid(row=2, column=0, columnspan=3, sticky="ew", padx=15, pady=(0, 15))
-        self.feeds_list_frame.grid_columnconfigure(0, weight=1)
-
-        self._render_settings_feed_list()
-
-        # --- Preferences -----------------------------------------------
-        prefs_section = ctk.CTkFrame(scroll, fg_color=theme.PANEL_2, corner_radius=10)
-        prefs_section.grid(row=1, column=0, sticky="ew", pady=(0, 15))
-        prefs_section.grid_columnconfigure(1, weight=1)
-
-        ctk.CTkLabel(
-            prefs_section, text="Preferences", font=ctk.CTkFont(size=15, weight="bold")
-        ).grid(row=0, column=0, sticky="w", padx=15, pady=(15, 10), columnspan=2)
-
-        ctk.CTkLabel(prefs_section, text="Headline country code").grid(
-            row=1, column=0, sticky="w", padx=15, pady=6
-        )
-        self.country_entry = ctk.CTkEntry(prefs_section, width=100)
-        self.country_entry.insert(0, self.settings.get("country", "us"))
-        self.country_entry.grid(row=1, column=1, sticky="w", padx=15, pady=6)
-        self.country_entry.bind("<FocusOut>", lambda e: self._on_country_changed())
-        self.country_entry.bind("<Return>", lambda e: self._on_country_changed())
-
-        ctk.CTkLabel(prefs_section, text="Headlines per feed").grid(
-            row=2, column=0, sticky="w", padx=15, pady=6
-        )
-        self.page_size_entry = ctk.CTkEntry(prefs_section, width=100)
-        self.page_size_entry.insert(0, str(self.settings.get("page_size", 15)))
-        self.page_size_entry.grid(row=2, column=1, sticky="w", padx=15, pady=6)
-        self.page_size_entry.bind("<FocusOut>", lambda e: self._on_page_size_changed())
-        self.page_size_entry.bind("<Return>", lambda e: self._on_page_size_changed())
-
-        ctk.CTkLabel(prefs_section, text="Auto-refresh").grid(
-            row=3, column=0, sticky="w", padx=15, pady=(6, 15)
-        )
-        current_minutes = self.settings.get("refresh_interval_minutes", 0)
-        current_label = next(
-            (label for label, mins in REFRESH_INTERVAL_OPTIONS.items() if mins == current_minutes),
-            "Off",
-        )
-        self.refresh_interval_menu = ctk.CTkOptionMenu(
-            prefs_section, values=list(REFRESH_INTERVAL_OPTIONS.keys()),
-            command=self._on_refresh_interval_changed
-        )
-        self.refresh_interval_menu.set(current_label)
-        self.refresh_interval_menu.grid(row=3, column=1, sticky="w", padx=15, pady=(6, 15))
-
-        # --- Data management --------------------------------------------
-        data_section = ctk.CTkFrame(scroll, fg_color=theme.PANEL_2, corner_radius=10)
-        data_section.grid(row=2, column=0, sticky="ew")
-        data_section.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(
-            data_section, text="Your Data", font=ctk.CTkFont(size=15, weight="bold")
-        ).grid(row=0, column=0, sticky="w", padx=15, pady=(15, 5))
-
-        ctk.CTkLabel(
-            data_section,
-            text=f"Feeds, saved articles, and preferences:\n{storage.storage_path()}\n\n"
-                 f"Encrypted API keys:\n{crypto_store.storage_path()}",
-            text_color=theme.MUTED, justify="left", wraplength=700, anchor="w"
-        ).grid(row=1, column=0, sticky="w", padx=15, pady=(0, 10))
-
-        btn_row = ctk.CTkFrame(data_section, fg_color="transparent")
-        btn_row.grid(row=2, column=0, sticky="w", padx=15, pady=(0, 15))
-
-        ctk.CTkButton(
-            btn_row, text="Clear saved articles", fg_color=theme.DANGER_BG, hover_color=theme.DANGER_HOVER, text_color=theme.DANGER,
-            command=self._clear_saved_confirm
-        ).grid(row=0, column=0, padx=(0, 10))
-
-        ctk.CTkButton(
-            btn_row, text="Reset all data", fg_color=theme.DANGER_BG, hover_color=theme.DANGER_HOVER, text_color=theme.DANGER,
-            command=self._reset_all_confirm
-        ).grid(row=0, column=1)
-
-    # -- Feed management callbacks --
-
-    def _render_settings_feed_list(self):
-        self._clear_frame(self.feeds_list_frame)
-        feeds = storage.get_custom_feeds()
-
-        if not feeds:
-            ctk.CTkLabel(
-                self.feeds_list_frame, text="No custom feeds yet.", text_color=theme.MUTED
-            ).grid(row=0, column=0, sticky="w")
-            return
-
-        for i, feed in enumerate(feeds):
-            row = ctk.CTkFrame(self.feeds_list_frame, fg_color=theme.PANEL_2)
-            row.grid(row=i, column=0, sticky="ew", pady=3)
-            row.grid_columnconfigure(0, weight=1)
-
-            ctk.CTkLabel(
-                row, text=f"{feed['name']}  —  \"{feed['query']}\"", anchor="w"
-            ).grid(row=0, column=0, sticky="w", padx=10, pady=8)
-
-            ctk.CTkButton(
-                row, text="Remove", width=80, fg_color=theme.DANGER_BG, hover_color=theme.DANGER_HOVER, text_color=theme.DANGER,
-                command=lambda name=feed["name"]: self._remove_feed(name)
-            ).grid(row=0, column=1, padx=10, pady=8)
-
-    def _add_feed(self):
-        name = self.new_feed_name_entry.get().strip()
-        query = self.new_feed_query_entry.get().strip()
-        if not name or not query:
-            messagebox.showwarning("Add Feed", "Please enter both a feed name and keywords.")
-            return
-        storage.add_custom_feed(name, query)
-        self.new_feed_name_entry.delete(0, "end")
-        self.new_feed_query_entry.delete(0, "end")
-        self._render_settings_feed_list()
-        self._render_feeds_tab()
-
-    def _remove_feed(self, name):
-        storage.remove_custom_feed(name)
-        if self._active_feed_name == name:
-            self._active_feed_name = None
-        self._render_settings_feed_list()
-        self._render_feeds_tab()
-
-    # -- Preference callbacks --
-
-    def _on_country_changed(self):
-        value = self.country_entry.get().strip().lower() or "us"
-        self.settings = storage.update_setting("country", value)
-
-    def _on_page_size_changed(self):
-        raw = self.page_size_entry.get().strip()
-        try:
-            value = max(1, min(50, int(raw)))
-        except ValueError:
-            value = self.settings.get("page_size", 15)
-        self.page_size_entry.delete(0, "end")
-        self.page_size_entry.insert(0, str(value))
-        self.settings = storage.update_setting("page_size", value)
-
-    def _on_refresh_interval_changed(self, label):
-        minutes = REFRESH_INTERVAL_OPTIONS.get(label, 0)
-        self.settings = storage.update_setting("refresh_interval_minutes", minutes)
-        self._schedule_auto_refresh()
-
-    def _reset_all_confirm(self):
-        if messagebox.askyesno(
-            "Reset all data",
-            "This will remove all custom feeds, saved articles, and preferences "
-            "(API keys are stored separately and are not affected). Continue?"
-        ):
-            storage.clear_all_data()
-            self.settings = storage.get_settings()
-            self._active_feed_name = None
-            self._render_settings_feed_list()
-            self._render_feeds_tab()
-            self._render_saved_tab()
-            self.country_entry.delete(0, "end")
-            self.country_entry.insert(0, self.settings.get("country", "us"))
-            self.page_size_entry.delete(0, "end")
-            self.page_size_entry.insert(0, str(self.settings.get("page_size", 15)))
-            self.refresh_interval_menu.set("Off")
 
     # ------------------------------------------------------------------
     # Auto-refresh

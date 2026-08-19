@@ -1,20 +1,11 @@
 from .ui import FolderStructureGeneratorPage
 
 
-def open_folder_structure_generator(manager):
-    return FolderStructureGeneratorPage(
-        manager.container,
-        manager
-    )
-
-
 def register(plugin_manager):
-    plugin_manager.register(
-        {
-            "name": "Folder Generator",
-            "category": "Files",
-            "desc": "Create predefined folder structures for games from JSON templates.",
-            "icon": "🗂",
-            "open": open_folder_structure_generator,
-        }
-    )
+    plugin_manager.register({
+        "name": "Folder Generator",
+        "category": "Files",
+        "desc": "Create predefined folder structures for games from JSON templates.",
+        "icon": "🗂",
+        "page_class": FolderStructureGeneratorPage,
+    })
