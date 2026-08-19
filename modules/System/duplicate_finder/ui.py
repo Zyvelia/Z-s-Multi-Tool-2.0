@@ -22,7 +22,7 @@ from .backend import (
     _human_size,
     delete_files,
 )
-from .style import theme as t
+from core import theme as t
 
 POLL_MS = 80
 

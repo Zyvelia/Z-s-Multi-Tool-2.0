@@ -5,14 +5,8 @@ import subprocess # Added import for subprocess
 
 from core import theme
 
-BG = theme.BG
-PANEL = theme.PANEL
-CARD = theme.PANEL_2
 
-ACCENT = theme.ACCENT
 
-TEXT = theme.TEXT
-MUTED = theme.MUTED
 
 
 class FileEncryptorPage(ctk.CTkFrame):
@@ -29,7 +23,7 @@ class FileEncryptorPage(ctk.CTkFrame):
         self.selected_file = None
         self.last_output = None # Added to remember output file
 
-        self.configure(fg_color=BG)
+        self.configure(fg_color=theme.BG)
 
         self.build_ui()
 
@@ -41,7 +35,7 @@ class FileEncryptorPage(ctk.CTkFrame):
 
         header = ctk.CTkFrame(
             self,
-            fg_color=PANEL
+            fg_color=theme.PANEL
         )
 
         header.pack(
@@ -54,7 +48,7 @@ class FileEncryptorPage(ctk.CTkFrame):
             header,
             text="🔒 File Encryptor",
             font=("Segoe UI", 26, "bold"),
-            text_color=TEXT
+            text_color=theme.TEXT
         ).pack(
             side="left",
             padx=10
@@ -64,7 +58,7 @@ class FileEncryptorPage(ctk.CTkFrame):
         self.file_label = ctk.CTkLabel(
             self,
             text="No file selected",
-            text_color=MUTED
+            text_color=theme.MUTED
         )
         self.file_label.pack(
             pady=(10, 5)
@@ -74,7 +68,7 @@ class FileEncryptorPage(ctk.CTkFrame):
         self.size_label = ctk.CTkLabel(
             self,
             text="Size: --",
-            text_color=MUTED
+            text_color=theme.MUTED
         )
         self.size_label.pack(
             pady=(0, 5)
@@ -83,7 +77,7 @@ class FileEncryptorPage(ctk.CTkFrame):
         self.status_label = ctk.CTkLabel(
             self,
             text="Ready",
-            text_color=ACCENT
+            text_color=theme.ACCENT
         )
         self.status_label.pack(
             pady=(0, 15)
@@ -106,13 +100,13 @@ class FileEncryptorPage(ctk.CTkFrame):
             encrypt_tab,
             text="Encrypt File",
             font=("Segoe UI", 20, "bold"),
-            text_color=TEXT
+            text_color=theme.TEXT
         ).pack(pady=(20, 5))
 
         ctk.CTkButton(
             encrypt_tab,
             text="Select File",
-            fg_color=ACCENT,
+            fg_color=theme.ACCENT,
             command=self.select_encrypt_file
         ).pack(pady=5)
 
@@ -149,13 +143,13 @@ class FileEncryptorPage(ctk.CTkFrame):
             decrypt_tab,
             text="Decrypt File",
             font=("Segoe UI", 20, "bold"),
-            text_color=TEXT
+            text_color=theme.TEXT
         ).pack(pady=(30, 5))
 
         ctk.CTkButton(
             decrypt_tab,
             text="Select .enc File",
-            fg_color=ACCENT,
+            fg_color=theme.ACCENT,
             command=self.select_decrypt_file
         ).pack(pady=5)
 
@@ -214,12 +208,12 @@ class FileEncryptorPage(ctk.CTkFrame):
 
             self.status_label.configure(
                 text="File Selected",
-                text_color=ACCENT
+                text_color=theme.ACCENT
             )
         else:
             self.file_label.configure(text="No file selected")
             self.size_label.configure(text="Size: --") # Reset size label
-            self.status_label.configure(text="Ready", text_color=ACCENT)
+            self.status_label.configure(text="Ready", text_color=theme.ACCENT)
 
 
     def select_decrypt_file(self):
@@ -249,12 +243,12 @@ class FileEncryptorPage(ctk.CTkFrame):
 
             self.status_label.configure(
                 text="Encrypted File Selected",
-                text_color=ACCENT
+                text_color=theme.ACCENT
             )
         else:
             self.file_label.configure(text="No file selected")
             self.size_label.configure(text="Size: --") # Reset size label
-            self.status_label.configure(text="Ready", text_color=ACCENT)
+            self.status_label.configure(text="Ready", text_color=theme.ACCENT)
 
 
     # =====================================================

@@ -1,5 +1,4 @@
 import customtkinter as ctk
-from tkinter import filedialog
 import os
 import json
 import sys
@@ -22,18 +21,12 @@ from core import paths
 from .web_server import YTWebServer
 
 # ── Colours (shared app theme) ───────────────────────────────────────────
-BG      = theme.BG
-PANEL   = theme.PANEL
-PANEL_2 = theme.PANEL_2
-ACCENT  = theme.ACCENT
-DANGER  = theme.DANGER
-SUCCESS = theme.SUCCESS
-TEXT    = theme.TEXT
-MUTED   = theme.MUTED
 
-_BTN        = dict(fg_color=PANEL_2, hover_color=ACCENT,    text_color=TEXT,    height=34, corner_radius=8)
-_BTN_ACCENT = dict(fg_color=ACCENT,  hover_color=theme.ACCENT_DIM, text_color="white", height=34, corner_radius=8)
-_BTN_DANGER = dict(fg_color=DANGER,  hover_color=theme.DANGER_HOVER, text_color="white", height=34, corner_radius=8)
+def _make_btn(parent, text, cmd, **ov):
+    kw = theme.secondary_button_kwargs()
+    kw.update(ov)
+    return ctk.CTkButton(parent, text=text, command=cmd, **kw)
+
 
 SETTINGS_FILE = paths.migrate_legacy_file(
     paths.data_path("yt_downloader", "downloader_settings.json"),
@@ -97,17 +90,74 @@ def _read_setting(key, default=""):
     reused across rebuilds — reading a destroyed widget silently returns
     "" and produces a false "no valid output folder" error even when the
     setting is saved correctly on disk."""
+    return _read_all_settings().get(key, default)
+
+
+def _read_all_settings():
+    defaults = {
+        "output_dir": os.path.expanduser("~"),
+        "cookie_file": "",
+        "format": "mp3",
+        "type": "video",
+        "quality": "192",
+        "remote_port": DEFAULT_REMOTE_PORT,
+        "auto_start_remote": False,
+        "access_code": "",
+    }
     try:
         if os.path.exists(SETTINGS_FILE):
-            with open(SETTINGS_FILE) as f:
-                return json.load(f).get(key, default)
+            with open(SETTINGS_FILE, encoding="utf-8") as f:
+                defaults.update(json.load(f))
     except Exception:
         pass
-    return default
+    return defaults
 
 
-def _make_btn(parent, text, cmd, **ov):
-    return ctk.CTkButton(parent, text=text, command=cmd, **{**_BTN, **ov})
+def _write_settings(updates: dict) -> None:
+    data = _read_all_settings()
+    data.update(updates)
+    try:
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
+
+
+def log_to_yt_page(manager, msg: str) -> None:
+    if manager is None:
+        return
+    current = getattr(manager, "current", None)
+    if current is None:
+        return
+    inner = getattr(current, "_inner", current)
+    if inner.__class__.__name__ == "YTDownloaderPage":
+        inner._log_msg(msg)
+
+
+def maybe_autostart_remote(manager) -> None:
+    s = _read_all_settings()
+    if not s.get("auto_start_remote"):
+        return
+    web_server = getattr(manager, "yt_web_server", None)
+    if web_server is None or web_server.is_running():
+        return
+    port = s.get("remote_port", DEFAULT_REMOTE_PORT)
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        port = DEFAULT_REMOTE_PORT
+
+    def work():
+        web_server.start(port)
+
+    threading.Thread(target=work, daemon=True).start()
+
+
+def _set_entry(entry, value: str):
+    entry.configure(state='normal')
+    entry.delete(0, 'end')
+    entry.insert(0, value)
+    entry.configure(state='readonly')
 
 
 def _find_ffmpeg() -> str:
@@ -170,22 +220,20 @@ def _find_deno() -> str | None:
 
 class YTDownloaderPage(ctk.CTkFrame):
 
+    MODULE_SETTINGS_TITLE = "Paths & access"
+
+    @staticmethod
+    def build_module_settings(parent, manager):
+        from .settings_panel import YTDownloaderSettingsPanel
+        return YTDownloaderSettingsPanel(parent, manager)
+
     def __init__(self, parent, manager):
-        super().__init__(parent, fg_color=BG)
+        super().__init__(parent, fg_color=theme.BG)
         self.manager      = manager
         self.ffmpeg_dir   = _find_ffmpeg()
         self._downloading = False
         self._remote_job_ids_seen = set()
 
-        # Shared with Music Player / Security Vault's Settings tabs — same
-        # tailnet connection, same TailscaleService instance either way.
-        self.tailscale = manager.container.tailscale_service
-        self._phone_poll_job = None
-
-        # Shared with the browser extension: a loopback server that lets a
-        # "Send to Downloader" button on a YouTube tab queue a download
-        # here. Created once and stashed on the manager (same lazy pattern
-        # Music Player uses) so it survives navigating away from this page.
         self.web_server = getattr(manager, "yt_web_server", None) or YTWebServer(
             get_output_dir=lambda: _read_setting("output_dir", os.path.expanduser("~")),
             get_cookie_file=lambda: _read_setting("cookie_file", ""),
@@ -193,16 +241,12 @@ class YTDownloaderPage(ctk.CTkFrame):
         )
         manager.yt_web_server = self.web_server
         self.web_server.on_job_update = self._on_remote_job_update
+        self.web_server.access_code = _read_setting("access_code", "")
 
         self._build_ui()
         self._load_settings()
         threading.Thread(target=self._check_for_update, daemon=True).start()
-
-        if self._autostart_var.get() and not self.web_server.is_running():
-            self._start_remote_access()
-
-        self._refresh_remote_status()
-        self._refresh_phone_status()
+        maybe_autostart_remote(manager)
 
     # ── Build ──────────────────────────────────────────────────────────────────
 
@@ -210,40 +254,37 @@ class YTDownloaderPage(ctk.CTkFrame):
         self._build_header()
         self._build_url_row()
         self._build_options_row()
-        self._build_paths_row()
-        self._build_remote_row()
-        self._build_phone_row()
         self._build_log()
 
     def _build_header(self):
-        header = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
+        header = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=10)
         header.pack(fill="x", padx=12, pady=(12, 4))
 
         ctk.CTkLabel(header, text="▶  YouTube Downloader",
-                     font=("Segoe UI", 22, "bold"), text_color=TEXT
+                     font=("Segoe UI", 22, "bold"), text_color=theme.TEXT
                      ).pack(side="left", padx=14, pady=10)
 
-        self._status_lbl = ctk.CTkLabel(header, text="Idle", text_color=MUTED)
+        self._status_lbl = ctk.CTkLabel(header, text="Idle", text_color=theme.MUTED)
         self._status_lbl.pack(side="right", padx=14)
 
     def _build_url_row(self):
-        panel = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
+        panel = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=10)
         panel.pack(fill="x", padx=12, pady=(0, 4))
 
         inner = ctk.CTkFrame(panel, fg_color="transparent")
         inner.pack(fill="x", padx=10, pady=10)
 
-        ctk.CTkLabel(inner, text="URL", text_color=MUTED,
+        ctk.CTkLabel(inner, text="URL", text_color=theme.MUTED,
                      font=("Segoe UI", 12)).pack(side="left", padx=(0, 8))
 
         self._url_entry = ctk.CTkEntry(
             inner, placeholder_text="Paste YouTube video or playlist URL…",
-            corner_radius=8, fg_color=PANEL_2, text_color=TEXT,
-            border_color=PANEL_2)
+            corner_radius=8, fg_color=theme.PANEL_2, text_color=theme.TEXT,
+            border_color=theme.PANEL_2)
         self._url_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
 
         self._dl_btn = _make_btn(inner, "⬇  Download", self._start_download,
-                                 **_BTN_ACCENT, width=130)
+                                 **theme.primary_button_kwargs(), width=130)
         self._dl_btn.pack(side="left")
 
         self._update_btn = _make_btn(inner, "⟳  Update yt-dlp", self._start_update,
@@ -251,356 +292,87 @@ class YTDownloaderPage(ctk.CTkFrame):
         self._update_btn.pack(side="left", padx=(8, 0))
 
     def _build_options_row(self):
-        panel = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
+        panel = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=10)
         panel.pack(fill="x", padx=12, pady=(0, 4))
 
         inner = ctk.CTkFrame(panel, fg_color="transparent")
         inner.pack(fill="x", padx=10, pady=10)
 
         # ── Type ──
-        ctk.CTkLabel(inner, text="Type", text_color=MUTED,
+        ctk.CTkLabel(inner, text="Type", text_color=theme.MUTED,
                      font=("Segoe UI", 12)).pack(side="left", padx=(0, 6))
 
         self._type_var = ctk.StringVar(value="video")
         for label, val in [("Single Video", "video"), ("Playlist", "playlist")]:
             ctk.CTkRadioButton(
                 inner, text=label, variable=self._type_var, value=val,
-                text_color=TEXT, fg_color=ACCENT, hover_color="#2f7fd6"
+                text_color=theme.TEXT, fg_color=theme.ACCENT, hover_color="#2f7fd6"
             ).pack(side="left", padx=6)
 
         # ── Format ──
-        ctk.CTkLabel(inner, text="Format", text_color=MUTED,
+        ctk.CTkLabel(inner, text="Format", text_color=theme.MUTED,
                      font=("Segoe UI", 12)).pack(side="left", padx=(20, 6))
 
         self._fmt_var = ctk.StringVar(value="mp3")
         for label, val in [("MP3", "mp3"), ("MP4", "mp4")]:
             ctk.CTkRadioButton(
                 inner, text=label, variable=self._fmt_var, value=val,
-                text_color=TEXT, fg_color=ACCENT, hover_color="#2f7fd6"
+                text_color=theme.TEXT, fg_color=theme.ACCENT, hover_color="#2f7fd6"
             ).pack(side="left", padx=6)
 
         # ── Quality (MP3) ──
-        ctk.CTkLabel(inner, text="Quality", text_color=MUTED,
+        ctk.CTkLabel(inner, text="Quality", text_color=theme.MUTED,
                      font=("Segoe UI", 12)).pack(side="left", padx=(20, 6))
 
         self._quality_var = ctk.StringVar(value="192")
         ctk.CTkOptionMenu(
             inner, variable=self._quality_var,
             values=["320", "256", "192", "128", "96"],
-            fg_color=PANEL_2, button_color=ACCENT,
-            button_hover_color="#2f7fd6", text_color=TEXT,
+            fg_color=theme.PANEL_2, button_color=theme.ACCENT,
+            button_hover_color="#2f7fd6", text_color=theme.TEXT,
             width=80
         ).pack(side="left")
 
-        ctk.CTkLabel(inner, text="kbps", text_color=MUTED,
+        ctk.CTkLabel(inner, text="kbps", text_color=theme.MUTED,
                      font=("Segoe UI", 11)).pack(side="left", padx=(4, 0))
 
-    def _build_paths_row(self):
-        panel = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
-        panel.pack(fill="x", padx=12, pady=(0, 4))
-
-        inner = ctk.CTkFrame(panel, fg_color="transparent")
-        inner.pack(fill="x", padx=10, pady=10)
-
-        # ── Output dir ──
-        out_col = ctk.CTkFrame(inner, fg_color="transparent")
-        out_col.pack(side="left", fill="x", expand=True, padx=(0, 12))
-
-        ctk.CTkLabel(out_col, text="📁  Output Folder", text_color=MUTED,
-                     font=("Segoe UI", 11)).pack(anchor="w", pady=(0, 4))
-
-        out_row = ctk.CTkFrame(out_col, fg_color="transparent")
-        out_row.pack(fill="x")
-
-        self._out_entry = ctk.CTkEntry(
-            out_row, fg_color=PANEL_2, text_color=TEXT,
-            border_color=PANEL_2, corner_radius=8, state="readonly")
-        self._out_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
-
-        _make_btn(out_row, "Browse", self._browse_output, width=80).pack(side="left")
-
-        # ── Cookie file ──
-        cookie_col = ctk.CTkFrame(inner, fg_color="transparent")
-        cookie_col.pack(side="left", fill="x", expand=True)
-
-        ctk.CTkLabel(cookie_col, text="🍪  Cookie File (optional)", text_color=MUTED,
-                     font=("Segoe UI", 11)).pack(anchor="w", pady=(0, 4))
-
-        cookie_row = ctk.CTkFrame(cookie_col, fg_color="transparent")
-        cookie_row.pack(fill="x")
-
-        self._cookie_entry = ctk.CTkEntry(
-            cookie_row, fg_color=PANEL_2, text_color=TEXT,
-            border_color=PANEL_2, corner_radius=8, state="readonly")
-        self._cookie_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
-
-        _make_btn(cookie_row, "Browse", self._browse_cookie, width=80).pack(side="left")
-        _make_btn(cookie_row, "✕", self._clear_cookie, width=36).pack(side="left", padx=(4, 0))
-
-        cookie_refresh_row = ctk.CTkFrame(cookie_col, fg_color="transparent")
-        cookie_refresh_row.pack(fill="x", pady=(4, 0))
-
-        self._cookie_browser_var = ctk.StringVar(value="opera_gx")
-        self._cookie_browser_menu = ctk.CTkOptionMenu(
-            cookie_refresh_row, values=list(_COOKIE_BROWSERS.keys()),
-            variable=self._cookie_browser_var, fg_color=PANEL_2, button_color=PANEL_2,
-            button_hover_color=ACCENT, text_color=TEXT, width=110)
-        self._cookie_browser_menu.pack(side="left", padx=(0, 6))
-
-        _make_btn(cookie_refresh_row, "Refresh from Browser",
-                  self._refresh_cookie_from_browser).pack(side="left", fill="x", expand=True)
-
-    def _refresh_cookie_from_browser(self):
-        """Regenerates cookies.txt straight from the selected browser's own
-        local cookie store via yt-dlp's built-in extractor, then points the
-        Cookie File field at it. Saves having to run yt-dlp by hand any time
-        the session cookie goes stale."""
-        if youtube_dl is None:
-            self._log_msg("❌ yt-dlp not installed. Run: pip install yt-dlp")
-            return
-
-        browser_key = self._cookie_browser_var.get()
-        out_path = os.path.join(os.path.dirname(SETTINGS_FILE), "cookies.txt")
-
-        def _do():
-            try:
-                browser_name, profile = _resolve_cookie_browser(browser_key)
-                os.makedirs(os.path.dirname(out_path), exist_ok=True)
-                jar = youtube_dl.cookies.extract_cookies_from_browser(browser_name, profile)
-                jar.filename = out_path
-                jar.save(ignore_discard=True, ignore_expires=True)
-                count = len(jar)
-                self._log_msg(f"🍪 Pulled {count} cookie(s) from {browser_key} → {out_path}")
-                self.after(0, lambda: (self._set_entry(self._cookie_entry, out_path), self._save_settings()))
-            except Exception as e:
-                self._log_msg(f"❌ Couldn't read cookies from {browser_key}: {e}")
-                self._log_msg("   Tip: close the browser fully first — it locks its cookie DB while running.")
-
-        threading.Thread(target=_do, daemon=True).start()
-
-    def _build_remote_row(self):
-        panel = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
-        panel.pack(fill="x", padx=12, pady=(0, 4))
-
-        top = ctk.CTkFrame(panel, fg_color="transparent")
-        top.pack(fill="x", padx=10, pady=(10, 4))
-
-        ctk.CTkLabel(top, text="🧩  Browser extension (\"Send to Downloader\")",
-                     font=("Segoe UI", 13, "bold"), text_color=TEXT).pack(side="left")
-
-        self._remote_status_lbl = ctk.CTkLabel(top, text="⚪ Off", text_color=MUTED)
-        self._remote_status_lbl.pack(side="right")
-
-        row = ctk.CTkFrame(panel, fg_color="transparent")
-        row.pack(fill="x", padx=10, pady=(0, 6))
-
-        self._remote_stop_btn = _make_btn(row, "■ Stop", self._stop_remote_access,
-                                          **_BTN_DANGER, width=90)
-        self._remote_stop_btn.pack(side="left")
-
-        ctk.CTkLabel(row, text="Local port", text_color=MUTED,
-                     font=("Segoe UI", 12)).pack(side="left", padx=(20, 6))
-        self._remote_port_entry = ctk.CTkEntry(
-            row, width=80, fg_color=PANEL_2, text_color=TEXT, border_color=PANEL_2, corner_radius=8)
-        self._remote_port_entry.pack(side="left")
-
-        self._autostart_var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(
-            row, text="Auto-start with the app", variable=self._autostart_var,
-            text_color=MUTED, font=("Segoe UI", 12), fg_color=ACCENT, hover_color="#2f7fd6",
-            command=self._save_settings,
-        ).pack(side="left", padx=(20, 0))
-
-        ctk.CTkLabel(
-            panel,
-            text="Starts automatically with the app if \"Auto-start\" below is checked, or "
-                 "whenever Remote Hub goes live. Once it's on, use the \"Send to Downloader\" "
-                 "button in the Zs Multi Tool Companion browser extension on any YouTube tab. "
-                 "Downloads land in the output folder above, using the format/quality set "
-                 "here. Loopback only (127.0.0.1) — never reachable off this PC.",
-            text_color=MUTED, font=("Segoe UI", 11), anchor="w", justify="left", wraplength=760,
-        ).pack(fill="x", padx=10, pady=(0, 10))
-
-    def _build_phone_row(self):
-        panel = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
-        panel.pack(fill="x", padx=12, pady=(0, 4))
-
-        top = ctk.CTkFrame(panel, fg_color="transparent")
-        top.pack(fill="x", padx=10, pady=(10, 4))
-
-        ctk.CTkLabel(top, text="📱  Phone access (Tailscale)",
-                     font=("Segoe UI", 13, "bold"), text_color=TEXT).pack(side="left")
-
-        self._phone_status_lbl = ctk.CTkLabel(top, text="⚪ Off", text_color=MUTED)
-        self._phone_status_lbl.pack(side="right")
-
-        row = ctk.CTkFrame(panel, fg_color="transparent")
-        row.pack(fill="x", padx=10, pady=(0, 6))
-
-        self._phone_stop_btn = _make_btn(row, "■ Stop", self._stop_phone_access,
-                                          **_BTN_DANGER, width=90)
-        self._phone_stop_btn.pack(side="left")
-
-        ctk.CTkLabel(row, text="Access code (optional)", text_color=MUTED,
-                     font=("Segoe UI", 12)).pack(side="left", padx=(20, 6))
-        self._access_code_entry = ctk.CTkEntry(
-            row, width=110, show="•", fg_color=PANEL_2, text_color=TEXT,
-            border_color=PANEL_2, corner_radius=8)
-        self._access_code_entry.pack(side="left")
-        # No "Start" button to sync this on click anymore — Remote Hub can
-        # start the server at any time, so push edits to the shared
-        # web_server straight away instead of waiting for a click.
-        self._access_code_entry.bind("<KeyRelease>", self._on_access_code_changed)
-
-        ctk.CTkLabel(
-            panel,
-            text="Started from Remote Hub's Go Live button, alongside your other apps — "
-                 "exposes this same downloader to your phone over your own Tailscale "
-                 "network, reachable only from devices signed into your tailnet, never "
-                 "the open internet. Uses the same local port as the browser extension "
-                 "above. An access code is optional — if set, it's required to queue a "
-                 "download from the mobile page (and from the browser extension, since "
-                 "they share this same endpoint) but not to view download status.",
-            text_color=MUTED, font=("Segoe UI", 11), anchor="w", justify="left", wraplength=760,
-        ).pack(fill="x", padx=10, pady=(0, 10))
-
-    def _on_access_code_changed(self, _event=None):
-        self.web_server.access_code = self._access_code_entry.get().strip()
-        self._save_settings()
-
-    def _stop_phone_access(self):
-        self.tailscale.disable_app_serve("yt")
-        self._refresh_phone_status()
-
-    def _refresh_phone_status(self):
-        if self._phone_poll_job:
-            try:
-                self.after_cancel(self._phone_poll_job)
-            except Exception:
-                pass
-
-        def work():
-            status = self.tailscale.get_status()
-            live = status["running"] and self.tailscale.is_app_serving("yt")
-            self.after(0, lambda: self._apply_phone_status(status, live))
-
-        threading.Thread(target=work, daemon=True).start()
-        self._phone_poll_job = self.after(4000, self._refresh_phone_status)
-
-    def _apply_phone_status(self, status, live):
-        if not self.winfo_exists():
-            return
-        if live:
-            hostname = status.get("hostname") or "this-device"
-            self._phone_status_lbl.configure(
-                text=f"🟢 https://{hostname}:8445/", text_color=SUCCESS
-            )
-        else:
-            self._phone_status_lbl.configure(text="⚪ Off", text_color=MUTED)
-
     def _build_log(self):
-        panel = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
+        panel = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=10)
         panel.pack(fill="x", expand=False, padx=12, pady=(0, 12))
 
         top = ctk.CTkFrame(panel, fg_color="transparent")
         top.pack(fill="x", padx=10, pady=(8, 4))
 
         ctk.CTkLabel(top, text="Download Log",
-                     font=("Segoe UI", 13, "bold"), text_color=TEXT).pack(side="left")
+                     font=("Segoe UI", 13, "bold"), text_color=theme.TEXT).pack(side="left")
 
         _make_btn(top, "🗑 Clear", self._clear_log, width=80).pack(side="right")
 
         self._log = ctk.CTkTextbox(
-            panel, fg_color=PANEL_2, text_color=TEXT,
+            panel, fg_color=theme.PANEL_2, text_color=theme.TEXT,
             corner_radius=8, font=("Consolas", 11), height=140, state="disabled")
         self._log.pack(fill="x", expand=False, padx=10, pady=(0, 10))
 
         # Progress bar
         self._progress = ctk.CTkProgressBar(
-            panel, progress_color=ACCENT, fg_color=PANEL_2, corner_radius=4)
+            panel, progress_color=theme.ACCENT, fg_color=theme.PANEL_2, corner_radius=4)
         self._progress.set(0)
         self._progress.pack(fill="x", padx=10, pady=(0, 10))
 
     # ── Settings ──────────────────────────────────────────────────────────────
 
     def _load_settings(self):
-        try:
-            if os.path.exists(SETTINGS_FILE):
-                with open(SETTINGS_FILE) as f:
-                    s = json.load(f)
-                self._set_entry(self._out_entry, s.get("output_dir", os.path.expanduser("~")))
-                self._set_entry(self._cookie_entry, s.get("cookie_file", ""))
-                self._fmt_var.set(s.get("format", "mp3"))
-                self._type_var.set(s.get("type", "video"))
-                self._quality_var.set(s.get("quality", "192"))
-                self._remote_port_entry.insert(0, str(s.get("remote_port", DEFAULT_REMOTE_PORT)))
-                self._autostart_var.set(bool(s.get("auto_start_remote", False)))
-                self._access_code_entry.insert(0, s.get("access_code", ""))
-                self.web_server.access_code = s.get("access_code", "")
-            else:
-                self._set_entry(self._out_entry, os.path.expanduser("~"))
-                self._remote_port_entry.insert(0, str(DEFAULT_REMOTE_PORT))
-        except Exception:
-            self._set_entry(self._out_entry, os.path.expanduser("~"))
-            if not self._remote_port_entry.get():
-                self._remote_port_entry.insert(0, str(DEFAULT_REMOTE_PORT))
+        s = _read_all_settings()
+        self._fmt_var.set(s.get("format", "mp3"))
+        self._type_var.set(s.get("type", "video"))
+        self._quality_var.set(s.get("quality", "192"))
 
     def _save_settings(self):
-        try:
-            with open(SETTINGS_FILE, "w") as f:
-                json.dump({
-                    "output_dir":        self._out_entry.get(),
-                    "cookie_file":       self._cookie_entry.get(),
-                    "format":            self._fmt_var.get(),
-                    "type":              self._type_var.get(),
-                    "quality":           self._quality_var.get(),
-                    "remote_port":       self._current_remote_port(),
-                    "auto_start_remote": bool(self._autostart_var.get()),
-                    "access_code":       self._access_code_entry.get().strip(),
-                }, f, indent=2)
-        except Exception:
-            pass
-
-    # ── Remote access (browser extension) ───────────────────────────────────
-
-    def _current_remote_port(self):
-        try:
-            return int(self._remote_port_entry.get().strip() or DEFAULT_REMOTE_PORT)
-        except ValueError:
-            return DEFAULT_REMOTE_PORT
-
-    def _start_remote_access(self):
-        port = self._current_remote_port()
-
-        def work():
-            ok, msg = self.web_server.start(port)
-            self.after(0, lambda: self._after_start_remote_access(ok, msg))
-
-        threading.Thread(target=work, daemon=True).start()
-
-    def _after_start_remote_access(self, ok, msg):
-        if not ok:
-            self._log_msg(f"❌ Couldn't start browser-extension server: {msg}")
-        else:
-            self._log_msg(f"🧩 Browser-extension server started — {msg}")
-        self._save_settings()
-        self._refresh_remote_status()
-
-    def _stop_remote_access(self):
-        self.web_server.stop()
-        self._log_msg("🧩 Browser-extension server stopped.")
-        self._refresh_remote_status()
-
-    def _refresh_remote_status(self):
-        if not self.winfo_exists():
-            return
-        if self.web_server.is_running():
-            self._remote_status_lbl.configure(
-                text=f"🟢 On — 127.0.0.1:{self.web_server.port}", text_color=SUCCESS)
-            self._remote_stop_btn.configure(state="normal")
-        else:
-            self._remote_status_lbl.configure(text="⚪ Off", text_color=MUTED)
-            self._remote_stop_btn.configure(state="disabled")
+        _write_settings({
+            "format": self._fmt_var.get(),
+            "type": self._type_var.get(),
+            "quality": self._quality_var.get(),
+        })
 
     def _on_remote_job_update(self, job):
         """Fires (from the server's worker thread) whenever a job queued by
@@ -615,24 +387,16 @@ class YTDownloaderPage(ctk.CTkFrame):
                 self._log_msg(f"🧩 Extension queued: {job['url']}  ({job['format']}, {job['type']})")
 
             if job["status"] == "downloading":
-                self._set_status(f"⬇ (extension) {job['message']}", ACCENT)
+                self._set_status(f"⬇ (extension) {job['message']}", theme.ACCENT)
                 self._set_progress(job.get("percent", 0.0))
             elif job["status"] == "done":
                 self._log_msg(f"✅ (extension) Download complete: {job['url']}")
-                self._set_status("✅ Done", SUCCESS)
+                self._set_status("✅ Done", theme.SUCCESS)
                 self._set_progress(1.0)
             elif job["status"] == "error":
                 self._log_msg(f"❌ (extension) {job['url']} — {job['message']}")
-                self._set_status("❌ Failed", DANGER)
+                self._set_status("❌ Failed", theme.DANGER)
         self.after(0, _do)
-
-    # ── Helpers ───────────────────────────────────────────────────────────────
-
-    def _set_entry(self, entry, value: str):
-        entry.configure(state='normal')
-        entry.delete(0, 'end')
-        entry.insert(0, value)
-        entry.configure(state='readonly')
 
     # ── yt-dlp updates ────────────────────────────────────────────────────────
 
@@ -735,25 +499,6 @@ class YTDownloaderPage(ctk.CTkFrame):
             self.after(0, lambda: self._update_btn.configure(
                 state="normal", text="⟳  Update yt-dlp"))
 
-    # ── File pickers ──────────────────────────────────────────────────────────
-
-    def _browse_output(self):
-        d = filedialog.askdirectory(initialdir=self._out_entry.get() or os.path.expanduser("~"))
-        if d:
-            self._set_entry(self._out_entry, d)
-            self._save_settings()
-
-    def _browse_cookie(self):
-        f = filedialog.askopenfilename(
-            filetypes=[("Text files", "*.txt"), ("All files", "*.*")])
-        if f:
-            self._set_entry(self._cookie_entry, f)
-            self._save_settings()
-
-    def _clear_cookie(self):
-        self._set_entry(self._cookie_entry, "")
-        self._save_settings()
-
     # ── Logging ───────────────────────────────────────────────────────────────
 
     def _log_msg(self, msg: str):
@@ -769,7 +514,7 @@ class YTDownloaderPage(ctk.CTkFrame):
         self._log.delete("1.0", "end")
         self._log.configure(state="disabled")
 
-    def _set_status(self, text: str, color: str = MUTED):
+    def _set_status(self, text: str, color: str = theme.MUTED):
         self.after(0, lambda: self._status_lbl.configure(text=text, text_color=color))
 
     def _set_progress(self, val: float):
@@ -785,11 +530,11 @@ class YTDownloaderPage(ctk.CTkFrame):
             return
 
         url        = self._url_entry.get().strip()
-        output_dir = self._out_entry.get().strip()
+        output_dir = _read_setting("output_dir", os.path.expanduser("~")).strip()
         fmt        = self._fmt_var.get()
         dl_type    = self._type_var.get()
         quality    = self._quality_var.get()
-        cookie     = self._cookie_entry.get().strip()
+        cookie     = _read_setting("cookie_file", "").strip()
 
         if not url:
             self._log_msg("❌ Please enter a URL.")
@@ -823,7 +568,7 @@ class YTDownloaderPage(ctk.CTkFrame):
                 pass
             speed = d.get("_speed_str", "").replace("\x1b[0K", "").strip()
             eta   = d.get("_eta_str",   "").replace("\x1b[0K", "").strip()
-            self._set_status(f"⬇ {pct_str}  {speed}  ETA {eta}", ACCENT)
+            self._set_status(f"⬇ {pct_str}  {speed}  ETA {eta}", theme.ACCENT)
 
         elif d["status"] == "finished":
             self._set_status("⚙ Post-processing…", "#f0a500")
@@ -950,7 +695,7 @@ class YTDownloaderPage(ctk.CTkFrame):
                 self._set_status("⚠ Finished with errors", "#f0a500")
             else:
                 self._log_msg("✅ Download complete!")
-                self._set_status("✅ Done", SUCCESS)
+                self._set_status("✅ Done", theme.SUCCESS)
                 self._set_progress(1.0)
 
         except Exception as e:
@@ -965,7 +710,7 @@ class YTDownloaderPage(ctk.CTkFrame):
                     "(or 'yt-dlp -U' / '--update-to nightly' if it's a standalone exe) "
                     "and try again."
                 )
-            self._set_status("❌ Failed", DANGER)
+            self._set_status("❌ Failed", theme.DANGER)
 
         finally:
             self._downloading = False

@@ -11,11 +11,11 @@ from pathlib import Path
 from typing import Optional
 
 import customtkinter as ctk
+
+from core import theme
 from tkinter import filedialog, messagebox
 
 from .utils import (
-    BG, BG_PANEL, BG_RAISED, BORDER, ACCENT, ACCENT_DIM, ACCENT_GLOW,
-    RED, RED_DIM, TEXT_HI, TEXT_MID, TEXT_LOW, FONT, FONT_MONO,
     detect_viewer, human_size,
 )
 from .icons import (
@@ -27,7 +27,7 @@ from .editors import TextEditor, HexViewer, ImageViewer, AudioPlayer, ArchiveVie
 
 # ── extra colours ─────────────────────────────────────────
 TAB_ACTIVE_BG   = "#1e2a3a"
-TAB_ACTIVE_LINE = ACCENT
+TAB_ACTIVE_LINE = theme.ACCENT
 SIDEBAR_W       = 230
 META_W          = 210
 STATUSBAR_H     = 28
@@ -64,7 +64,7 @@ class _Tab:
 class FileViewerUI(ctk.CTkFrame):
 
     def __init__(self, parent, manager, **kw):
-        super().__init__(parent, fg_color=BG, **kw)
+        super().__init__(parent, fg_color=theme.BG, **kw)
         self.manager          = manager
         self._tabs: list[_Tab] = []
         self._active_tab: Optional[_Tab] = None
@@ -81,34 +81,34 @@ class FileViewerUI(ctk.CTkFrame):
 
         # browser
         style.configure("Browser.Treeview",
-                        background=BG_PANEL, fieldbackground=BG_PANEL,
-                        foreground=TEXT_MID, rowheight=26,
-                        font=(FONT, 10), borderwidth=0, relief="flat")
+                        background=theme.PANEL, fieldbackground=theme.PANEL,
+                        foreground=theme.MUTED, rowheight=26,
+                        font=(theme.FONT_FAMILY, 10), borderwidth=0, relief="flat")
         style.configure("Browser.Treeview.Heading",
-                        background=BG_PANEL, foreground=TEXT_LOW,
-                        font=(FONT, 9, "bold"), relief="flat", borderwidth=0)
+                        background=theme.PANEL, foreground=theme.FAINT,
+                        font=(theme.FONT_FAMILY, 9, "bold"), relief="flat", borderwidth=0)
         style.map("Browser.Treeview",
                   background=[("selected", TAB_ACTIVE_BG)],
-                  foreground=[("selected", ACCENT)])
+                  foreground=[("selected", theme.ACCENT)])
 
         # archive
         style.configure("Archive.Treeview",
-                        background=BG_RAISED, fieldbackground=BG_RAISED,
-                        foreground=TEXT_MID, rowheight=24,
-                        font=(FONT_MONO, 10), borderwidth=0)
+                        background=theme.PANEL_2, fieldbackground=theme.PANEL_2,
+                        foreground=theme.MUTED, rowheight=24,
+                        font=(theme.MONO_FAMILY, 10), borderwidth=0)
         style.configure("Archive.Treeview.Heading",
-                        background=BG_PANEL, foreground=TEXT_LOW,
-                        font=(FONT, 9, "bold"), relief="flat")
+                        background=theme.PANEL, foreground=theme.FAINT,
+                        font=(theme.FONT_FAMILY, 9, "bold"), relief="flat")
         style.map("Archive.Treeview",
                   background=[("selected", TAB_ACTIVE_BG)],
-                  foreground=[("selected", ACCENT)])
+                  foreground=[("selected", theme.ACCENT)])
 
         # scrollbar
         style.configure("Vertical.TScrollbar",
-                        background=BG_RAISED, troughcolor=BG_PANEL,
+                        background=theme.PANEL_2, troughcolor=theme.PANEL,
                         borderwidth=0, arrowsize=12)
         style.map("Vertical.TScrollbar",
-                  background=[("active", BORDER)])
+                  background=[("active", theme.BORDER)])
 
     # ── build ─────────────────────────────────────────────
 
@@ -120,23 +120,23 @@ class FileViewerUI(ctk.CTkFrame):
     # ── top toolbar ───────────────────────────────────────
 
     def _build_top_toolbar(self):
-        bar = ctk.CTkFrame(self, fg_color=BG_PANEL,
+        bar = ctk.CTkFrame(self, fg_color=theme.PANEL,
                            corner_radius=0, border_width=0, height=52)
         bar.pack(fill="x")
         bar.pack_propagate(False)
-        ctk.CTkFrame(bar, height=1, fg_color=BORDER).pack(fill="x", side="bottom")
+        ctk.CTkFrame(bar, height=1, fg_color=theme.BORDER).pack(fill="x", side="bottom")
 
         inner = ctk.CTkFrame(bar, fg_color="transparent")
         inner.pack(fill="both", expand=True, padx=14)
 
         # divider
         ctk.CTkFrame(inner, width=1, height=24,
-                     fg_color=BORDER).pack(side="left", padx=(0, 14))
+                     fg_color=theme.BORDER).pack(side="left", padx=(0, 14))
 
         # title
         ctk.CTkLabel(
             inner, text="Universal File Viewer",
-            text_color=TEXT_HI, font=(FONT, 15, "bold")
+            text_color=theme.TEXT, font=(theme.FONT_FAMILY, 15, "bold")
         ).pack(side="left")
 
         # right-side buttons
@@ -146,9 +146,9 @@ class FileViewerUI(ctk.CTkFrame):
         def _primary(text, cmd, w=90):
             b = ctk.CTkButton(
                 right, text=text, command=cmd, width=w, height=30,
-                fg_color=ACCENT_GLOW, hover_color="#1e3f60",
-                text_color=ACCENT, border_width=1, border_color="#2a5a8a",
-                corner_radius=6, font=(FONT, 11, "bold")
+                fg_color=theme.ACCENT_GLOW, hover_color="#1e3f60",
+                text_color=theme.ACCENT, border_width=1, border_color="#2a5a8a",
+                corner_radius=6, font=(theme.FONT_FAMILY, 11, "bold")
             )
             b.pack(side="left", padx=2)
             return b
@@ -156,9 +156,9 @@ class FileViewerUI(ctk.CTkFrame):
         def _ghost(text, cmd, w=80):
             b = ctk.CTkButton(
                 right, text=text, command=cmd, width=w, height=30,
-                fg_color="transparent", hover_color=BG_RAISED,
-                text_color=TEXT_MID, border_width=1, border_color=BORDER,
-                corner_radius=6, font=(FONT, 11)
+                fg_color="transparent", hover_color=theme.PANEL_2,
+                text_color=theme.MUTED, border_width=1, border_color=theme.BORDER,
+                corner_radius=6, font=(theme.FONT_FAMILY, 11)
             )
             b.pack(side="left", padx=2)
             return b
@@ -168,20 +168,20 @@ class FileViewerUI(ctk.CTkFrame):
         _ghost(f"{ICON_SAVE_AS}  Save As", self._save_as_current,  90)
 
         ctk.CTkFrame(right, width=1, height=24,
-                     fg_color=BORDER).pack(side="left", padx=8)
+                     fg_color=theme.BORDER).pack(side="left", padx=8)
 
         _ghost(f"{ICON_FIND}  Find",      self._find_in_current,   76)
         _ghost(f"{ICON_REPLACE}  Replace", self._replace_in_current, 88)
 
         ctk.CTkFrame(right, width=1, height=24,
-                     fg_color=BORDER).pack(side="left", padx=8)
+                     fg_color=theme.BORDER).pack(side="left", padx=8)
 
         _ghost(f"{ICON_REFRESH}  Refresh", self._refresh_current,  88)
 
     # ── body ─────────────────────────────────────────────
 
     def _build_body(self):
-        body = ctk.CTkFrame(self, fg_color=BG, corner_radius=0)
+        body = ctk.CTkFrame(self, fg_color=theme.BG, corner_radius=0)
         body.pack(fill="both", expand=True)
         body.columnconfigure(1, weight=1)
         body.rowconfigure(0, weight=1)
@@ -194,7 +194,7 @@ class FileViewerUI(ctk.CTkFrame):
 
     def _build_sidebar(self, parent):
         sidebar = ctk.CTkFrame(
-            parent, fg_color=BG_PANEL,
+            parent, fg_color=theme.PANEL,
             corner_radius=0, border_width=0,
             width=SIDEBAR_W
         )
@@ -202,7 +202,7 @@ class FileViewerUI(ctk.CTkFrame):
         sidebar.grid_propagate(False)
 
         # right border
-        ctk.CTkFrame(sidebar, width=1, fg_color=BORDER).pack(
+        ctk.CTkFrame(sidebar, width=1, fg_color=theme.BORDER).pack(
             side="right", fill="y")
 
         inner = ctk.CTkFrame(sidebar, fg_color="transparent")
@@ -215,18 +215,18 @@ class FileViewerUI(ctk.CTkFrame):
 
         ctk.CTkLabel(
             hdr, text="FILE BROWSER",
-            text_color=TEXT_LOW, font=(FONT, 9, "bold")
+            text_color=theme.FAINT, font=(theme.FONT_FAMILY, 9, "bold")
         ).pack(side="left", padx=12, pady=8)
 
         ctk.CTkButton(
             hdr, text="↑", width=26, height=22,
-            fg_color="transparent", hover_color=BG_RAISED,
-            text_color=TEXT_LOW, border_width=0,
-            corner_radius=4, font=(FONT, 13),
+            fg_color="transparent", hover_color=theme.PANEL_2,
+            text_color=theme.FAINT, border_width=0,
+            corner_radius=4, font=(theme.FONT_FAMILY, 13),
             command=self._go_up
         ).pack(side="right", padx=8)
 
-        ctk.CTkFrame(inner, height=1, fg_color=BORDER).pack(fill="x")
+        ctk.CTkFrame(inner, height=1, fg_color=theme.BORDER).pack(fill="x")
 
         # path bar
         path_bar = ctk.CTkFrame(inner, fg_color="transparent", height=32)
@@ -236,18 +236,18 @@ class FileViewerUI(ctk.CTkFrame):
         self._path_var = tk.StringVar(value=str(self._browser_root))
         pe = ctk.CTkEntry(
             path_bar, textvariable=self._path_var,
-            fg_color=BG_PANEL, border_color=BG_PANEL,
-            text_color=TEXT_LOW, font=(FONT_MONO, 8),
+            fg_color=theme.PANEL, border_color=theme.PANEL,
+            text_color=theme.FAINT, font=(theme.MONO_FAMILY, 8),
             border_width=0, corner_radius=0,
         )
         pe.pack(fill="x", padx=10, pady=4)
         pe.bind("<Return>",
                 lambda e: self._refresh_browser(Path(self._path_var.get())))
 
-        ctk.CTkFrame(inner, height=1, fg_color=BORDER).pack(fill="x")
+        ctk.CTkFrame(inner, height=1, fg_color=theme.BORDER).pack(fill="x")
 
         # tree
-        tree_wrap = tk.Frame(inner, bg=BG_PANEL, bd=0, highlightthickness=0)
+        tree_wrap = tk.Frame(inner, bg=theme.PANEL, bd=0, highlightthickness=0)
         tree_wrap.pack(fill="both", expand=True)
 
         sb = ttk.Scrollbar(tree_wrap, orient="vertical", style="Vertical.TScrollbar")
@@ -333,36 +333,36 @@ class FileViewerUI(ctk.CTkFrame):
     # ── center (tab bar + editor host) ───────────────────
 
     def _build_center(self, parent):
-        center = ctk.CTkFrame(parent, fg_color=BG, corner_radius=0)
+        center = ctk.CTkFrame(parent, fg_color=theme.BG, corner_radius=0)
         center.grid(row=0, column=1, sticky="nsew")
         center.rowconfigure(1, weight=1)
         center.columnconfigure(0, weight=1)
 
         # ── tab bar ───────────────────────────────────────
         tab_bar_outer = ctk.CTkFrame(
-            center, fg_color=BG_PANEL,
+            center, fg_color=theme.PANEL,
             corner_radius=0, height=38
         )
         tab_bar_outer.grid(row=0, column=0, sticky="ew")
         tab_bar_outer.grid_propagate(False)
         ctk.CTkFrame(tab_bar_outer, height=1,
-                     fg_color=BORDER).pack(fill="x", side="bottom")
+                     fg_color=theme.BORDER).pack(fill="x", side="bottom")
 
         self._tab_scroll = ctk.CTkScrollableFrame(
             tab_bar_outer, fg_color="transparent",
             orientation="horizontal", height=36,
-            scrollbar_button_color=BORDER,
-            scrollbar_button_hover_color=ACCENT_DIM,
+            scrollbar_button_color=theme.BORDER,
+            scrollbar_button_hover_color=theme.ACCENT_DIM,
         )
         self._tab_scroll.pack(fill="both", expand=True)
 
         # ── welcome ───────────────────────────────────────
-        self._welcome = ctk.CTkFrame(center, fg_color=BG, corner_radius=0)
+        self._welcome = ctk.CTkFrame(center, fg_color=theme.BG, corner_radius=0)
         self._welcome.grid(row=1, column=0, sticky="nsew")
         self._build_welcome(self._welcome)
 
         # ── editor host ───────────────────────────────────
-        self._editor_host = ctk.CTkFrame(center, fg_color=BG, corner_radius=0)
+        self._editor_host = ctk.CTkFrame(center, fg_color=theme.BG, corner_radius=0)
         self._editor_host.grid(row=1, column=0, sticky="nsew")
         self._editor_host.grid_remove()
 
@@ -371,18 +371,18 @@ class FileViewerUI(ctk.CTkFrame):
         mid.place(relx=0.5, rely=0.45, anchor="center")
 
         ctk.CTkLabel(mid, text="📁",
-                     font=(FONT, 56), text_color="#1e2a3a").pack(pady=(0, 12))
+                     font=(theme.FONT_FAMILY, 56), text_color="#1e2a3a").pack(pady=(0, 12))
 
         ctk.CTkLabel(mid, text="No file open",
-                     text_color=TEXT_MID, font=(FONT, 18, "bold")).pack()
+                     text_color=theme.MUTED, font=(theme.FONT_FAMILY, 18, "bold")).pack()
 
         ctk.CTkLabel(mid,
                      text="Browse the panel on the left or click  Open  above.",
-                     text_color=TEXT_LOW, font=(FONT, 12)).pack(pady=(6, 24))
+                     text_color=theme.FAINT, font=(theme.FONT_FAMILY, 12)).pack(pady=(6, 24))
 
-        tips = ctk.CTkFrame(mid, fg_color=BG_PANEL,
+        tips = ctk.CTkFrame(mid, fg_color=theme.PANEL,
                             corner_radius=10, border_width=1,
-                            border_color=BORDER)
+                            border_color=theme.BORDER)
         tips.pack(fill="x", ipadx=20, ipady=10)
 
         rows = [
@@ -395,19 +395,19 @@ class FileViewerUI(ctk.CTkFrame):
         for icon, label, exts in rows:
             row = ctk.CTkFrame(tips, fg_color="transparent")
             row.pack(fill="x", padx=16, pady=3)
-            ctk.CTkLabel(row, text=icon, font=(FONT, 14),
-                         text_color=TEXT_MID, width=24).pack(side="left")
-            ctk.CTkLabel(row, text=label, font=(FONT, 11, "bold"),
-                         text_color=TEXT_MID, width=110,
+            ctk.CTkLabel(row, text=icon, font=(theme.FONT_FAMILY, 14),
+                         text_color=theme.MUTED, width=24).pack(side="left")
+            ctk.CTkLabel(row, text=label, font=(theme.FONT_FAMILY, 11, "bold"),
+                         text_color=theme.MUTED, width=110,
                          anchor="w").pack(side="left", padx=(6, 12))
-            ctk.CTkLabel(row, text=exts, font=(FONT, 10),
-                         text_color=TEXT_LOW, anchor="w").pack(side="left")
+            ctk.CTkLabel(row, text=exts, font=(theme.FONT_FAMILY, 10),
+                         text_color=theme.FAINT, anchor="w").pack(side="left")
 
     # ── metadata panel (right) ────────────────────────────
 
     def _build_meta_panel(self, parent):
         meta_outer = ctk.CTkFrame(
-            parent, fg_color=BG_PANEL,
+            parent, fg_color=theme.PANEL,
             corner_radius=0, border_width=0,
             width=META_W
         )
@@ -415,7 +415,7 @@ class FileViewerUI(ctk.CTkFrame):
         meta_outer.grid_propagate(False)
 
         # left border
-        ctk.CTkFrame(meta_outer, width=1, fg_color=BORDER).pack(
+        ctk.CTkFrame(meta_outer, width=1, fg_color=theme.BORDER).pack(
             side="left", fill="y")
 
         inner = ctk.CTkFrame(meta_outer, fg_color="transparent")
@@ -426,9 +426,9 @@ class FileViewerUI(ctk.CTkFrame):
         hdr.pack_propagate(False)
         ctk.CTkLabel(
             hdr, text="PROPERTIES",
-            text_color=TEXT_LOW, font=(FONT, 9, "bold")
+            text_color=theme.FAINT, font=(theme.FONT_FAMILY, 9, "bold")
         ).pack(side="left", padx=12, pady=8)
-        ctk.CTkFrame(inner, height=1, fg_color=BORDER).pack(fill="x")
+        ctk.CTkFrame(inner, height=1, fg_color=theme.BORDER).pack(fill="x")
 
         self._metadata_panel = MetadataPanel(inner)
         self._metadata_panel.pack(fill="both", expand=True)
@@ -437,25 +437,25 @@ class FileViewerUI(ctk.CTkFrame):
     # ── status bar ────────────────────────────────────────
 
     def _build_status_bar(self):
-        bar = ctk.CTkFrame(self, fg_color=BG_PANEL,
+        bar = ctk.CTkFrame(self, fg_color=theme.PANEL,
                            corner_radius=0, height=STATUSBAR_H)
         bar.pack(fill="x", side="bottom")
         bar.pack_propagate(False)
-        ctk.CTkFrame(bar, height=1, fg_color=BORDER).pack(fill="x", side="top")
+        ctk.CTkFrame(bar, height=1, fg_color=theme.BORDER).pack(fill="x", side="top")
 
         self._status_lbl = ctk.CTkLabel(
             bar, text="Ready", anchor="w",
-            text_color=TEXT_LOW, font=(FONT, 10)
+            text_color=theme.FAINT, font=(theme.FONT_FAMILY, 10)
         )
         self._status_lbl.pack(side="left", padx=12, pady=4)
 
         # viewer type badge on right
-        self._vtype_frame = ctk.CTkFrame(bar, fg_color=BG_RAISED,
+        self._vtype_frame = ctk.CTkFrame(bar, fg_color=theme.PANEL_2,
                                          corner_radius=4)
         self._vtype_frame.pack(side="right", padx=12, pady=5)
         self._viewer_type_lbl = ctk.CTkLabel(
             self._vtype_frame, text="",
-            text_color=TEXT_LOW, font=(FONT, 9, "bold"),
+            text_color=theme.FAINT, font=(theme.FONT_FAMILY, 9, "bold"),
             padx=8, pady=0
         )
         self._viewer_type_lbl.pack()
@@ -464,13 +464,13 @@ class FileViewerUI(ctk.CTkFrame):
         self._status_lbl.configure(text=msg)
 
     def _set_viewer_badge(self, viewer_type: str):
-        color, icon = VIEWER_COLORS.get(viewer_type, (TEXT_LOW, ""))
+        color, icon = VIEWER_COLORS.get(viewer_type, (theme.FAINT, ""))
         self._viewer_type_lbl.configure(
             text=f"{icon}  {viewer_type.upper()}",
             text_color=color
         )
         self._vtype_frame.configure(
-            fg_color=BG_RAISED, border_width=1,
+            fg_color=theme.PANEL_2, border_width=1,
             border_color=color
         )
 
@@ -528,7 +528,7 @@ class FileViewerUI(ctk.CTkFrame):
     # ── tab button ────────────────────────────────────────
 
     def _add_tab_button(self, tab: _Tab):
-        color, icon = VIEWER_COLORS.get(tab.viewer_type, (TEXT_LOW, "📄"))
+        color, icon = VIEWER_COLORS.get(tab.viewer_type, (theme.FAINT, "📄"))
 
         tab._btn_frame = ctk.CTkFrame(
             self._tab_scroll, fg_color="transparent",
@@ -538,7 +538,7 @@ class FileViewerUI(ctk.CTkFrame):
 
         # coloured left accent line
         tab._indicator = ctk.CTkFrame(
-            tab._btn_frame, width=3, fg_color=BORDER, corner_radius=0
+            tab._btn_frame, width=3, fg_color=theme.BORDER, corner_radius=0
         )
         tab._indicator.pack(side="left", fill="y")
 
@@ -554,11 +554,11 @@ class FileViewerUI(ctk.CTkFrame):
             text=f"{icon}  {display}",
             width=0,
             fg_color="transparent",
-            hover_color=BG_RAISED,
-            text_color=TEXT_LOW,
+            hover_color=theme.PANEL_2,
+            text_color=theme.FAINT,
             border_width=0,
             corner_radius=0,
-            font=(FONT, 11),
+            font=(theme.FONT_FAMILY, 11),
             anchor="w",
             command=lambda t=tab: self._activate_tab(t)
         )
@@ -567,8 +567,8 @@ class FileViewerUI(ctk.CTkFrame):
         ctk.CTkButton(
             content, text="×", width=22, height=22,
             fg_color="transparent", hover_color="#3a1a1a",
-            text_color=TEXT_LOW, border_width=0,
-            corner_radius=4, font=(FONT, 13),
+            text_color=theme.FAINT, border_width=0,
+            corner_radius=4, font=(theme.FONT_FAMILY, 13),
             command=lambda t=tab: self._close_tab(t)
         ).pack(side="left", padx=(2, 6))
 
@@ -576,9 +576,9 @@ class FileViewerUI(ctk.CTkFrame):
         for t in self._tabs:
             t.widget.pack_forget()
             if t._btn:
-                t._btn.configure(text_color=TEXT_LOW, fg_color="transparent")
+                t._btn.configure(text_color=theme.FAINT, fg_color="transparent")
             if t._indicator:
-                t._indicator.configure(fg_color=BORDER)
+                t._indicator.configure(fg_color=theme.BORDER)
             if t._btn_frame:
                 t._btn_frame.configure(fg_color="transparent")
 
@@ -587,9 +587,9 @@ class FileViewerUI(ctk.CTkFrame):
         tab.widget.pack(fill="both", expand=True)
         self._active_tab = tab
 
-        color, _ = VIEWER_COLORS.get(tab.viewer_type, (ACCENT, ""))
+        color, _ = VIEWER_COLORS.get(tab.viewer_type, (theme.ACCENT, ""))
         if tab._btn:
-            tab._btn.configure(text_color=TEXT_HI, fg_color=TAB_ACTIVE_BG)
+            tab._btn.configure(text_color=theme.TEXT, fg_color=TAB_ACTIVE_BG)
         if tab._indicator:
             tab._indicator.configure(fg_color=color)
         if tab._btn_frame:
@@ -624,7 +624,7 @@ class FileViewerUI(ctk.CTkFrame):
                 self._welcome.grid()
                 self._metadata_panel.clear()
                 self._viewer_type_lbl.configure(text="")
-                self._vtype_frame.configure(fg_color=BG_RAISED, border_width=0)
+                self._vtype_frame.configure(fg_color=theme.PANEL_2, border_width=0)
                 self._set_status("Ready")
 
     def _on_tab_modified(self, path: str, modified: bool):
@@ -632,7 +632,7 @@ class FileViewerUI(ctk.CTkFrame):
             if tab.path == path:
                 name    = Path(path).name
                 display = name if len(name) <= 22 else name[:20] + "…"
-                _, icon = VIEWER_COLORS.get(tab.viewer_type, (TEXT_LOW, "📄"))
+                _, icon = VIEWER_COLORS.get(tab.viewer_type, (theme.FAINT, "📄"))
                 dot     = "  ●" if modified else ""
                 tab.label_var.set(f"{icon}  {display}{dot}")
                 if tab._btn:

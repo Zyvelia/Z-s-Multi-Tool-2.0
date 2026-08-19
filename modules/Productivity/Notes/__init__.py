@@ -1,10 +1,4 @@
-# modules/notes/__init__.py
-
 from .ui import NotesPage
-
-
-def open_notes(manager):
-    return NotesPage(manager.container, manager)
 
 
 def register(manager):
@@ -13,5 +7,5 @@ def register(manager):
         "category": "Productivity",
         "desc": "Free-form notes with attached links",
         "icon": "📝",
-        "open": open_notes
+        "page_class": NotesPage,
     })

@@ -13,23 +13,11 @@ from PIL import Image
 
 from core import theme
 
-BG = theme.BG
-PANEL = theme.PANEL
-PANEL_2 = theme.PANEL_2
-ACCENT = theme.ACCENT
-ACCENT_HOVER = theme.ACCENT_HOVER
-TEXT = theme.TEXT
-MUTED = theme.MUTED
-DANGER = theme.DANGER
-DANGER_HOVER = theme.DANGER_HOVER
-PANEL_HOVER = theme.PANEL_HOVER
 
-_BTN = dict(fg_color=PANEL_2, hover_color=PANEL_HOVER, text_color=TEXT,
-            height=34, corner_radius=8)
-_BTN_ACCENT = dict(fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color="white",
-                    height=34, corner_radius=8)
-_BTN_DANGER = dict(fg_color=PANEL_2, hover_color=DANGER_HOVER, text_color=TEXT,
-                    height=34, corner_radius=8)
+def _make_btn(parent, text, cmd, **overrides):
+    kw = theme.secondary_button_kwargs()
+    kw.update(overrides)
+    return ctk.CTkButton(parent, text=text, command=cmd, **kw)
 
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".tif", ".tiff")
 
@@ -44,11 +32,6 @@ EXIF_FIELDS = [
     (0x0131, "Software"),
     (0x0132, "DateTime"),
 ]
-
-
-def _make_btn(parent, text, cmd, **overrides):
-    kw = {**_BTN, **overrides}
-    return ctk.CTkButton(parent, text=text, command=cmd, **kw)
 
 
 class ImageExifTab(ctk.CTkFrame):
@@ -68,50 +51,50 @@ class ImageExifTab(ctk.CTkFrame):
         self.grid_columnconfigure(1, weight=0)
         self.grid_rowconfigure(1, weight=1)
 
-        top = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
+        top = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=10)
         top.grid(row=0, column=0, columnspan=2, sticky="ew", padx=2, pady=(2, 6))
         top.grid_columnconfigure(1, weight=1)
 
-        _make_btn(top, "Open Image", self._open_file, width=110, **_BTN_ACCENT).grid(
+        _make_btn(top, "Open Image", self._open_file, width=110, **theme.primary_button_kwargs()).grid(
             row=0, column=0, padx=10, pady=10)
-        self.path_label = ctk.CTkLabel(top, text="No file loaded", text_color=MUTED, anchor="w")
+        self.path_label = ctk.CTkLabel(top, text="No file loaded", text_color=theme.MUTED, anchor="w")
         self.path_label.grid(row=0, column=1, sticky="ew", padx=6, pady=10)
 
-        fields_panel = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
+        fields_panel = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=10)
         fields_panel.grid(row=1, column=0, sticky="nsew", padx=(2, 6), pady=2)
         fields_panel.grid_columnconfigure(1, weight=1)
 
         for i, (tag_id, label) in enumerate(EXIF_FIELDS):
-            ctk.CTkLabel(fields_panel, text=label, width=120, anchor="w", text_color=TEXT).grid(
+            ctk.CTkLabel(fields_panel, text=label, width=120, anchor="w", text_color=theme.TEXT).grid(
                 row=i, column=0, padx=(14, 6), pady=8, sticky="w")
             var = ctk.StringVar()
-            entry = ctk.CTkEntry(fields_panel, fg_color=PANEL_2, border_color=PANEL_2, textvariable=var)
+            entry = ctk.CTkEntry(fields_panel, fg_color=theme.PANEL_2, border_color=theme.PANEL_2, textvariable=var)
             entry.grid(row=i, column=1, padx=(0, 14), pady=8, sticky="ew")
             self.field_vars[tag_id] = var
 
         ctk.CTkLabel(
             fields_panel,
             text="Only common top-level EXIF fields are shown.\nGPS and maker-note data are left untouched.",
-            text_color=MUTED, justify="left", anchor="w"
+            text_color=theme.MUTED, justify="left", anchor="w"
         ).grid(row=len(EXIF_FIELDS), column=0, columnspan=2, padx=14, pady=(10, 10), sticky="w")
 
-        side_panel = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10, width=220)
+        side_panel = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=10, width=220)
         side_panel.grid(row=1, column=1, sticky="ns", padx=(6, 2), pady=2)
         side_panel.grid_propagate(False)
 
-        ctk.CTkLabel(side_panel, text="Preview", text_color=MUTED).pack(pady=(14, 6))
+        ctk.CTkLabel(side_panel, text="Preview", text_color=theme.MUTED).pack(pady=(14, 6))
         self.preview_label = ctk.CTkLabel(side_panel, text="No\nImage", width=180, height=180,
-                                           fg_color=PANEL_2, corner_radius=8, text_color=MUTED)
+                                           fg_color=theme.PANEL_2, corner_radius=8, text_color=theme.MUTED)
         self.preview_label.pack(padx=14, pady=6)
 
-        _make_btn(side_panel, "Strip All EXIF", self._strip_all, **_BTN_DANGER).pack(padx=14, pady=(20, 4), fill="x")
-        _make_btn(side_panel, "Save Changes", self._save_changes, **_BTN_ACCENT).pack(padx=14, pady=4, fill="x")
+        _make_btn(side_panel, "Strip All EXIF", self._strip_all, **theme.danger_button_kwargs()).pack(padx=14, pady=(20, 4), fill="x")
+        _make_btn(side_panel, "Save Changes", self._save_changes, **theme.primary_button_kwargs()).pack(padx=14, pady=4, fill="x")
         _make_btn(side_panel, "Reload / Discard", self._reload_current).pack(padx=14, pady=4, fill="x")
 
         self.side_panel = side_panel
         self.fields_panel = fields_panel
 
-        self.status_label = ctk.CTkLabel(self, text="", text_color=MUTED, anchor="w")
+        self.status_label = ctk.CTkLabel(self, text="", text_color=theme.MUTED, anchor="w")
         self.status_label.grid(row=2, column=0, columnspan=2, sticky="ew", padx=4, pady=(6, 2))
 
         self._set_controls_enabled(False)
@@ -126,7 +109,7 @@ class ImageExifTab(ctk.CTkFrame):
                 child.configure(state=state)
 
     def _set_status(self, msg, error=False):
-        self.status_label.configure(text=msg, text_color=(DANGER if error else MUTED))
+        self.status_label.configure(text=msg, text_color=(theme.DANGER if error else theme.MUTED))
 
     def _open_file(self):
         path = filedialog.askopenfilename(

@@ -3,8 +3,11 @@ import json
 import shutil
 import subprocess
 import threading
-import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
+
+import customtkinter as ctk
+from tkinter import messagebox, simpledialog, ttk
+
+from core import theme
 
 DB_FILENAME = "apps.json"
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), DB_FILENAME)
@@ -26,49 +29,49 @@ def winget_available():
     return shutil.which("winget") is not None
 
 
-class AppInstallerModule(tk.Frame):
-    """
-    Tkinter module for the plugin framework.
-    Browses a shared apps.json database (kept in this same folder so it can
-    be committed to git / shared with others) and installs apps via winget,
-    or runs custom install commands.
-    """
+class AppInstallerModule(ctk.CTkFrame):
+    """Browse apps.json and install via winget or custom commands."""
 
     def __init__(self, container, manager=None):
-        super().__init__(container)
+        super().__init__(container, fg_color=theme.BG)
         self.manager = manager
         self.db = load_database()
-        self.check_vars = {}      # winget id -> tk.BooleanVar
-        self.entry_lookup = {}    # tree row id -> (winget id, category, app dict)
+        self.check_vars = {}
+        self.entry_lookup = {}
 
         self._build_ui()
         self._populate_tree()
 
         if not winget_available():
-            self._log("⚠️  winget was not found on PATH. Installs will fail until it's available.\n")
-
-    # ---------- UI construction ----------
+            self._log("winget was not found on PATH. Installs will fail until it's available.\n")
 
     def _build_ui(self):
-        self.pack(fill="both", expand=True)
+        self.grid_rowconfigure(1, weight=1)
+        self.grid_columnconfigure(0, weight=1)
 
-        top = ttk.Frame(self)
-        top.pack(fill="x", padx=8, pady=(8, 4))
+        top = ctk.CTkFrame(self, fg_color="transparent")
+        top.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 6))
+        top.grid_columnconfigure(1, weight=1)
 
-        ttk.Label(top, text="Search:").pack(side="left")
-        self.search_var = tk.StringVar()
+        ctk.CTkLabel(top, text="Search:", text_color=theme.MUTED).grid(row=0, column=0, padx=(0, 8))
+        self.search_var = ctk.StringVar()
         self.search_var.trace_add("write", lambda *_: self._populate_tree())
-        search_entry = ttk.Entry(top, textvariable=self.search_var)
-        search_entry.pack(side="left", fill="x", expand=True, padx=6)
+        ctk.CTkEntry(top, textvariable=self.search_var, fg_color=theme.PANEL_2,
+                     border_color=theme.BORDER, text_color=theme.TEXT).grid(
+            row=0, column=1, sticky="ew", padx=(0, 8))
+        ctk.CTkButton(top, text="Add App to DB", command=self._add_app_dialog,
+                      **theme.secondary_button_kwargs()).grid(row=0, column=2, padx=4)
+        ctk.CTkButton(top, text="Reload DB", command=self._reload_db,
+                      **theme.secondary_button_kwargs()).grid(row=0, column=3)
 
-        ttk.Button(top, text="Add App to DB", command=self._add_app_dialog).pack(side="left", padx=2)
-        ttk.Button(top, text="Reload DB", command=self._reload_db).pack(side="left", padx=2)
-
-        tree_frame = ttk.Frame(self)
-        tree_frame.pack(fill="both", expand=True, padx=8, pady=4)
+        tree_wrap = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=theme.RADIUS,
+                                 border_width=1, border_color=theme.BORDER)
+        tree_wrap.grid(row=1, column=0, sticky="nsew", padx=12, pady=6)
+        tree_wrap.grid_rowconfigure(0, weight=1)
+        tree_wrap.grid_columnconfigure(0, weight=1)
 
         columns = ("selected", "name", "id", "category", "desc")
-        self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="extended")
+        self.tree = ttk.Treeview(tree_wrap, columns=columns, show="headings", selectmode="extended")
         self.tree.heading("selected", text="✔")
         self.tree.heading("name", text="App")
         self.tree.heading("id", text="Winget ID")
@@ -80,34 +83,65 @@ class AppInstallerModule(tk.Frame):
         self.tree.column("category", width=100)
         self.tree.column("desc", width=260)
 
-        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
+        style = ttk.Style(self.tree)
+        style.theme_use("clam")
+        style.configure("Treeview",
+                        background=theme.PANEL_2, foreground=theme.TEXT,
+                        fieldbackground=theme.PANEL_2, bordercolor=theme.BORDER,
+                        rowheight=26)
+        style.map("Treeview", background=[("selected", theme.ACCENT_GLOW)],
+                  foreground=[("selected", theme.ACCENT)])
+        style.configure("Treeview.Heading", background=theme.PANEL, foreground=theme.MUTED,
+                        relief="flat")
+        style.configure("Vertical.TScrollbar", background=theme.PANEL_2, troughcolor=theme.PANEL,
+                        bordercolor=theme.BORDER)
+
+        vsb = ttk.Scrollbar(tree_wrap, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
-        self.tree.pack(side="left", fill="both", expand=True)
-        vsb.pack(side="right", fill="y")
+        self.tree.grid(row=0, column=0, sticky="nsew", padx=(8, 0), pady=8)
+        vsb.grid(row=0, column=1, sticky="ns", pady=8, padx=(0, 8))
 
         self.tree.bind("<Button-1>", self._on_tree_click)
         self.tree.bind("<space>", self._toggle_selected_rows)
 
-        action_frame = ttk.Frame(self)
-        action_frame.pack(fill="x", padx=8, pady=4)
-        ttk.Button(action_frame, text="Install Checked", command=self._install_checked).pack(side="left")
-        ttk.Button(action_frame, text="Check All Visible", command=lambda: self._set_all_visible(True)).pack(side="left", padx=4)
-        ttk.Button(action_frame, text="Uncheck All", command=lambda: self._set_all_visible(False)).pack(side="left")
+        action_frame = ctk.CTkFrame(self, fg_color="transparent")
+        action_frame.grid(row=2, column=0, sticky="ew", padx=12, pady=4)
+        ctk.CTkButton(action_frame, text="Install Checked", command=self._install_checked,
+                      **theme.primary_button_kwargs()).pack(side="left")
+        ctk.CTkButton(action_frame, text="Check All Visible",
+                      command=lambda: self._set_all_visible(True),
+                      **theme.secondary_button_kwargs()).pack(side="left", padx=6)
+        ctk.CTkButton(action_frame, text="Uncheck All",
+                      command=lambda: self._set_all_visible(False),
+                      **theme.secondary_button_kwargs()).pack(side="left")
 
-        custom_frame = ttk.LabelFrame(self, text="Run a custom install command")
-        custom_frame.pack(fill="x", padx=8, pady=4)
-        self.custom_cmd_var = tk.StringVar()
-        ttk.Entry(custom_frame, textvariable=self.custom_cmd_var).pack(
-            side="left", fill="x", expand=True, padx=(6, 4), pady=6
-        )
-        ttk.Button(custom_frame, text="Run", command=self._run_custom_command).pack(side="left", padx=(0, 6))
+        custom_frame = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=theme.RADIUS,
+                                    border_width=1, border_color=theme.BORDER)
+        custom_frame.grid(row=3, column=0, sticky="ew", padx=12, pady=4)
+        custom_frame.grid_columnconfigure(0, weight=1)
 
-        log_frame = ttk.LabelFrame(self, text="Output")
-        log_frame.pack(fill="both", expand=False, padx=8, pady=(4, 8))
-        self.log_text = tk.Text(log_frame, height=8, state="disabled", wrap="word")
-        self.log_text.pack(fill="both", expand=True, padx=4, pady=4)
+        ctk.CTkLabel(custom_frame, text="Run a custom install command",
+                     text_color=theme.TEXT, font=theme.font(13, "bold")).grid(
+            row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(10, 4))
+        self.custom_cmd_var = ctk.StringVar()
+        ctk.CTkEntry(custom_frame, textvariable=self.custom_cmd_var, fg_color=theme.PANEL_2,
+                     border_color=theme.BORDER, text_color=theme.TEXT).grid(
+            row=1, column=0, sticky="ew", padx=12, pady=(0, 10))
+        ctk.CTkButton(custom_frame, text="Run", command=self._run_custom_command,
+                      **theme.secondary_button_kwargs(), width=80).grid(
+            row=1, column=1, padx=(0, 12), pady=(0, 10))
 
-    # ---------- Data / tree ----------
+        log_frame = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=theme.RADIUS,
+                                 border_width=1, border_color=theme.BORDER)
+        log_frame.grid(row=4, column=0, sticky="ew", padx=12, pady=(4, 12))
+        log_frame.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(log_frame, text="Output", text_color=theme.MUTED,
+                     font=theme.font(12, "bold")).grid(row=0, column=0, sticky="w", padx=12, pady=(8, 4))
+        self.log_text = ctk.CTkTextbox(log_frame, height=120, fg_color=theme.PANEL_2,
+                                       text_color=theme.TEXT, font=theme.mono(11))
+        self.log_text.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 12))
+        self.log_text.configure(state="disabled")
 
     def _iter_apps(self):
         for category, apps in self.db.get("categories", {}).items():
@@ -124,8 +158,9 @@ class AppInstallerModule(tk.Frame):
             if query and query not in haystack:
                 continue
             wid = app["id"]
-            checked = self.check_vars.get(wid, tk.BooleanVar(value=False))
-            self.check_vars[wid] = checked
+            if wid not in self.check_vars:
+                self.check_vars[wid] = ctk.BooleanVar(value=False)
+            checked = self.check_vars[wid]
             mark = "☑" if checked.get() else "☐"
             row_id = self.tree.insert(
                 "", "end", values=(mark, app.get("name", ""), wid, category, app.get("desc", ""))
@@ -164,8 +199,6 @@ class AppInstallerModule(tk.Frame):
             vals[0] = "☑" if state else "☐"
             self.tree.item(row_id, values=vals)
 
-    # ---------- Database editing ----------
-
     def _add_app_dialog(self):
         name = simpledialog.askstring("App name", "Display name:", parent=self)
         if not name:
@@ -184,14 +217,12 @@ class AppInstallerModule(tk.Frame):
         self.db["categories"][category].append({"name": name, "id": wid, "desc": desc})
         save_database(self.db)
         self._populate_tree()
-        self._log(f"Added {name} ({wid}) to {category}. Commit apps.json to share it on GitHub.\n")
+        self._log(f"Added {name} ({wid}) to {category}.\n")
 
     def _reload_db(self):
         self.db = load_database()
         self._populate_tree()
         self._log("Database reloaded from apps.json.\n")
-
-    # ---------- Installing ----------
 
     def _install_checked(self):
         selected_ids = [wid for wid, var in self.check_vars.items() if var.get()]
@@ -241,8 +272,6 @@ class AppInstallerModule(tk.Frame):
             self._log(f"--- exit code {proc.returncode} ---\n")
         except Exception as e:
             self._log(f"--- ERROR: {e} ---\n")
-
-    # ---------- Logging ----------
 
     def _log(self, msg):
         def append():

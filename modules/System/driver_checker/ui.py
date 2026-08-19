@@ -27,7 +27,7 @@ from .backend import (
     check_software_updates,
     list_installed_drivers,
 )
-from .style import theme as t
+from core import theme as t
 
 
 class DriverCheckerModule(ctk.CTkFrame):
