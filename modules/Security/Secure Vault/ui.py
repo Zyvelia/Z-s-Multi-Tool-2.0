@@ -13,27 +13,12 @@ except ImportError:
 from core import theme
 from core.services.auth_service import AuthService
 from .authenticator_tab import AuthenticatorTab
-from .remote_access_tab import RemoteAccessTab
 
-BG = theme.BG
-PANEL = theme.PANEL
-CARD = theme.PANEL_2
-CARD_HOVER = theme.PANEL_HOVER
-BORDER = theme.BORDER
 
-ACCENT = theme.ACCENT
-ACCENT_HOVER = theme.ACCENT_HOVER
-ACCENT_GLOW = theme.ACCENT_GLOW
 
-TEXT = theme.TEXT
-MUTED = theme.MUTED
-FAINT = theme.FAINT
 
-ERROR = theme.ERROR
-SUCCESS = theme.SUCCESS
-DANGER = theme.DANGER
 
-STRENGTH_COLORS = [DANGER, "#e0803f", "#e0c53f", "#8bd15a", SUCCESS]
+STRENGTH_COLORS = [theme.DANGER, "#e0803f", "#e0c53f", "#8bd15a", theme.SUCCESS]
 
 DEFAULT_CATEGORIES = ["General", "Email", "Gaming", "Work", "Banking", "Social", "Alt Accounts"]
 
@@ -50,7 +35,7 @@ class PasswordVaultPage(ctk.CTkFrame):
         self.visible_passwords = set()
         self._lock_overlay_visible = False
 
-        self.configure(fg_color=BG)
+        self.configure(fg_color=theme.BG)
 
         self.grid_rowconfigure(1, weight=1)
         self.grid_columnconfigure(0, weight=1)
@@ -74,9 +59,17 @@ class PasswordVaultPage(ctk.CTkFrame):
         # overlay if AuthService's inactivity timeout has elapsed.
         self.after(15000, self._auto_lock_tick)
 
+    def _vault_is_foreground(self):
+        current = self.manager.current
+        if current is self:
+            return True
+        if getattr(current, "_inner", None) is self:
+            return True
+        return False
+
     def _auto_lock_tick(self):
         try:
-            if self.manager.current is self and not self._lock_overlay_visible:
+            if self._vault_is_foreground() and not self._lock_overlay_visible:
                 if self.auth.is_locked():
                     self._show_lock_overlay()
         except Exception:
@@ -102,7 +95,7 @@ class PasswordVaultPage(ctk.CTkFrame):
         actual inactivity — but only touches while the vault tab is the
         one actually on screen, so clicking around in some other tool
         doesn't quietly keep the vault's lock timer from ever firing."""
-        if self.manager.current is self:
+        if self._vault_is_foreground():
             self.auth.touch()
 
     # =====================================================
@@ -113,7 +106,7 @@ class PasswordVaultPage(ctk.CTkFrame):
 
         # ---------------- HEADER ----------------
 
-        header = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=theme.RADIUS)
+        header = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=theme.RADIUS)
         header.grid(row=0, column=0, sticky="ew", padx=15, pady=15)
 
         header.grid_columnconfigure(0, weight=1)
@@ -122,7 +115,7 @@ class PasswordVaultPage(ctk.CTkFrame):
             header,
             text="🔐 Security Vault",
             font=theme.font(24, "bold"),
-            text_color=TEXT
+            text_color=theme.TEXT
         ).grid(row=0, column=0, sticky="w", padx=(15, 10), pady=12)
 
         actions = ctk.CTkFrame(header, fg_color="transparent")
@@ -158,16 +151,15 @@ class PasswordVaultPage(ctk.CTkFrame):
 
         self.tabview = ctk.CTkTabview(
             self,
-            fg_color=BG,
-            segmented_button_fg_color=PANEL,
-            segmented_button_selected_color=ACCENT,
-            segmented_button_selected_hover_color=ACCENT,
+            fg_color=theme.BG,
+            segmented_button_fg_color=theme.PANEL,
+            segmented_button_selected_color=theme.ACCENT,
+            segmented_button_selected_hover_color=theme.ACCENT,
         )
         self.tabview.grid(row=1, column=0, sticky="nsew", padx=15, pady=(0, 15))
 
         passwords_tab = self.tabview.add("🔐 Passwords")
         authenticator_tab = self.tabview.add("🔑 Authenticator")
-        settings_tab = self.tabview.add("⚙ Settings")
 
         passwords_tab.grid_rowconfigure(2, weight=1)
         passwords_tab.grid_columnconfigure(0, weight=1)
@@ -175,11 +167,7 @@ class PasswordVaultPage(ctk.CTkFrame):
         authenticator_tab.grid_rowconfigure(0, weight=1)
         authenticator_tab.grid_columnconfigure(0, weight=1)
 
-        settings_tab.grid_rowconfigure(0, weight=1)
-        settings_tab.grid_columnconfigure(0, weight=1)
-
         AuthenticatorTab(authenticator_tab, self.manager).grid(row=0, column=0, sticky="nsew")
-        RemoteAccessTab(settings_tab, self.manager).grid(row=0, column=0, sticky="nsew")
 
         # ---------------- STATS ----------------
 
@@ -196,28 +184,28 @@ class PasswordVaultPage(ctk.CTkFrame):
 
         # ---------------- SEARCH / FILTER ----------------
 
-        search_frame = ctk.CTkFrame(passwords_tab, fg_color=PANEL, corner_radius=theme.RADIUS)
+        search_frame = ctk.CTkFrame(passwords_tab, fg_color=theme.PANEL, corner_radius=theme.RADIUS)
         search_frame.grid(row=1, column=0, sticky="ew", pady=(0, 10))
         search_frame.grid_columnconfigure(0, weight=1)
 
         self.search = ctk.CTkEntry(
             search_frame, placeholder_text="🔍 Search site or username…",
-            height=36, fg_color=CARD, border_color=BORDER, corner_radius=theme.RADIUS_SM
+            height=36, fg_color=theme.PANEL_2, border_color=theme.BORDER, corner_radius=theme.RADIUS_SM
         )
         self.search.grid(row=0, column=0, sticky="ew", padx=(12, 6), pady=10)
         self.search.bind("<KeyRelease>", lambda e: self.render())
 
         self.filter_category = ctk.CTkOptionMenu(
             search_frame, values=["All"] + self._all_categories(), command=lambda x: self.render(),
-            width=140, height=36, fg_color=CARD, button_color=CARD,
-            button_hover_color=CARD_HOVER, corner_radius=theme.RADIUS_SM
+            width=140, height=36, fg_color=theme.PANEL_2, button_color=theme.PANEL_2,
+            button_hover_color=theme.PANEL_HOVER, corner_radius=theme.RADIUS_SM
         )
         self.filter_category.set("All")
         self.filter_category.grid(row=0, column=1, padx=(6, 12), pady=10)
 
         # ---------------- PASSWORD LIST ----------------
 
-        self.cards = ctk.CTkScrollableFrame(passwords_tab, fg_color=PANEL, corner_radius=theme.RADIUS)
+        self.cards = ctk.CTkScrollableFrame(passwords_tab, fg_color=theme.PANEL, corner_radius=theme.RADIUS)
         self.cards.grid(row=2, column=0, sticky="nsew")
 
         # Any click/key inside the vault counts as activity, resetting
@@ -239,13 +227,13 @@ class PasswordVaultPage(ctk.CTkFrame):
         # see core/tray.py). Sits on top via grid in the same cells as
         # everything above, then lift()'d above it.
 
-        self.lock_overlay = ctk.CTkFrame(self, fg_color=BG)
+        self.lock_overlay = ctk.CTkFrame(self, fg_color=theme.BG)
         self.lock_overlay.grid_rowconfigure(0, weight=1)
         self.lock_overlay.grid_columnconfigure(0, weight=1)
 
         overlay_card = ctk.CTkFrame(
-            self.lock_overlay, fg_color=PANEL, corner_radius=theme.RADIUS,
-            border_width=1, border_color=BORDER
+            self.lock_overlay, fg_color=theme.PANEL, corner_radius=theme.RADIUS,
+            border_width=1, border_color=theme.BORDER
         )
         overlay_card.grid(row=0, column=0)
 
@@ -254,21 +242,21 @@ class PasswordVaultPage(ctk.CTkFrame):
 
         ctk.CTkLabel(inner, text="🔒", font=theme.font(30)).pack(pady=(0, 8))
         ctk.CTkLabel(
-            inner, text="Vault Locked", font=theme.font(19, "bold"), text_color=TEXT
+            inner, text="Vault Locked", font=theme.font(19, "bold"), text_color=theme.TEXT
         ).pack()
         ctk.CTkLabel(
             inner, text="Re-enter your master password to continue.",
-            font=theme.font(12), text_color=MUTED
+            font=theme.font(12), text_color=theme.MUTED
         ).pack(pady=(4, 18))
 
         self.relock_entry = ctk.CTkEntry(
             inner, show="•", height=38, width=280,
-            fg_color=CARD, border_color=BORDER, corner_radius=theme.RADIUS_SM,
+            fg_color=theme.PANEL_2, border_color=theme.BORDER, corner_radius=theme.RADIUS_SM,
             placeholder_text="Master password"
         )
         self.relock_entry.pack(pady=(0, 10))
 
-        self.relock_error = ctk.CTkLabel(inner, text="", font=theme.font(11), text_color=ERROR)
+        self.relock_error = ctk.CTkLabel(inner, text="", font=theme.font(11), text_color=theme.ERROR)
         self.relock_error.pack()
 
         def do_unlock():
@@ -318,12 +306,12 @@ class PasswordVaultPage(ctk.CTkFrame):
         self.filter_category.set(current if current in values else "All")
 
     def _stat_pill(self, parent, label, value, col):
-        pill = ctk.CTkFrame(parent, fg_color=PANEL, corner_radius=theme.RADIUS)
+        pill = ctk.CTkFrame(parent, fg_color=theme.PANEL, corner_radius=theme.RADIUS)
         pill.grid(row=0, column=col, sticky="ew", padx=(0 if col == 0 else 5, 0))
 
-        value_label = ctk.CTkLabel(pill, text=value, font=theme.font(19, "bold"), text_color=TEXT)
+        value_label = ctk.CTkLabel(pill, text=value, font=theme.font(19, "bold"), text_color=theme.TEXT)
         value_label.pack(anchor="w", padx=14, pady=(10, 0))
-        ctk.CTkLabel(pill, text=label, font=theme.font(11), text_color=MUTED).pack(anchor="w", padx=14, pady=(0, 10))
+        ctk.CTkLabel(pill, text=label, font=theme.font(11), text_color=theme.MUTED).pack(anchor="w", padx=14, pady=(0, 10))
 
         return value_label
 
@@ -354,8 +342,8 @@ class PasswordVaultPage(ctk.CTkFrame):
         if strength == "Strong":
             return "#f1c40f"
         if strength == "Very Strong":
-            return SUCCESS
-        return ERROR
+            return theme.SUCCESS
+        return theme.ERROR
 
     # =====================================================
     # ADD ENTRY (modal, with a bigger generator)
@@ -366,35 +354,35 @@ class PasswordVaultPage(ctk.CTkFrame):
         dialog.title("Add Entry")
         dialog.geometry("460x760")
         dialog.transient(self.master)
-        dialog.configure(fg_color=PANEL)
+        dialog.configure(fg_color=theme.PANEL)
         dialog.grab_set()
 
         ctk.CTkLabel(
-            dialog, text="➕ Add New Entry", font=theme.font(19, "bold"), text_color=TEXT
+            dialog, text="➕ Add New Entry", font=theme.font(19, "bold"), text_color=theme.TEXT
         ).pack(pady=(20, 16), padx=24, anchor="w")
 
         def field_label(text):
-            ctk.CTkLabel(dialog, text=text, anchor="w", font=theme.font(12), text_color=MUTED).pack(
+            ctk.CTkLabel(dialog, text=text, anchor="w", font=theme.font(12), text_color=theme.MUTED).pack(
                 fill="x", padx=24, pady=(0, 3)
             )
 
         field_label("Website / Service")
         site_entry = ctk.CTkEntry(
             dialog, placeholder_text="e.g. github.com", height=38,
-            fg_color=CARD, border_color=BORDER, corner_radius=theme.RADIUS_SM
+            fg_color=theme.PANEL_2, border_color=theme.BORDER, corner_radius=theme.RADIUS_SM
         )
         site_entry.pack(fill="x", padx=24, pady=(0, 12))
 
         field_label("Username")
         user_entry = ctk.CTkEntry(
-            dialog, height=38, fg_color=CARD, border_color=BORDER, corner_radius=theme.RADIUS_SM
+            dialog, height=38, fg_color=theme.PANEL_2, border_color=theme.BORDER, corner_radius=theme.RADIUS_SM
         )
         user_entry.pack(fill="x", padx=24, pady=(0, 12))
 
         field_label("Category")
         category_menu = ctk.CTkComboBox(
-            dialog, values=self._all_categories(), height=38, fg_color=CARD,
-            border_color=BORDER, button_color=CARD, button_hover_color=CARD_HOVER,
+            dialog, values=self._all_categories(), height=38, fg_color=theme.PANEL_2,
+            border_color=theme.BORDER, button_color=theme.PANEL_2, button_hover_color=theme.PANEL_HOVER,
             corner_radius=theme.RADIUS_SM
         )
         category_menu.set("General")
@@ -409,11 +397,11 @@ class PasswordVaultPage(ctk.CTkFrame):
 
         pass_entry = ctk.CTkEntry(
             pass_row, height=38, font=theme.mono(13),
-            fg_color=CARD, border_color=BORDER, corner_radius=theme.RADIUS_SM
+            fg_color=theme.PANEL_2, border_color=theme.BORDER, corner_radius=theme.RADIUS_SM
         )
         pass_entry.grid(row=0, column=0, sticky="ew")
 
-        strength_label = ctk.CTkLabel(dialog, text="Strength: —", font=theme.font(11), text_color=MUTED)
+        strength_label = ctk.CTkLabel(dialog, text="Strength: —", font=theme.font(11), text_color=theme.MUTED)
         strength_label.pack(anchor="w", padx=24, pady=(4, 16))
 
         def update_strength(_e=None):
@@ -424,16 +412,16 @@ class PasswordVaultPage(ctk.CTkFrame):
 
         # ---------------- Generator (bigger) ----------------
 
-        gen_panel = ctk.CTkFrame(dialog, fg_color=CARD, corner_radius=theme.RADIUS)
+        gen_panel = ctk.CTkFrame(dialog, fg_color=theme.PANEL_2, corner_radius=theme.RADIUS)
         gen_panel.pack(fill="x", padx=24, pady=(0, 18))
 
         ctk.CTkLabel(
-            gen_panel, text="🎲 Password Generator", font=theme.font(15, "bold"), text_color=TEXT
+            gen_panel, text="🎲 Password Generator", font=theme.font(15, "bold"), text_color=theme.TEXT
         ).pack(anchor="w", padx=18, pady=(16, 10))
 
         length_label = ctk.CTkLabel(
             gen_panel, text=f"Length: {self.gen_length_var.get()}",
-            font=theme.font(13), text_color=MUTED
+            font=theme.font(13), text_color=theme.MUTED
         )
         length_label.pack(fill="x", padx=18)
 
@@ -443,7 +431,7 @@ class PasswordVaultPage(ctk.CTkFrame):
 
         length_slider = ctk.CTkSlider(
             gen_panel, from_=8, to=64, height=20,
-            progress_color=ACCENT, button_color=ACCENT, button_hover_color=ACCENT_HOVER,
+            progress_color=theme.ACCENT, button_color=theme.ACCENT, button_hover_color=theme.ACCENT_HOVER,
             command=on_length_change
         )
         length_slider.set(self.gen_length_var.get())
@@ -487,13 +475,13 @@ class PasswordVaultPage(ctk.CTkFrame):
 
         ctk.CTkButton(
             gen_panel, text="🎲  Generate Password", height=44, font=theme.font(14, "bold"),
-            fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color="#0b0d10",
+            fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER, text_color="#0b0d10",
             corner_radius=theme.RADIUS_SM, command=do_generate
         ).pack(fill="x", padx=18, pady=(6, 18))
 
         # ---------------- Save ----------------
 
-        status_label = ctk.CTkLabel(dialog, text="", font=theme.font(11), text_color=ERROR)
+        status_label = ctk.CTkLabel(dialog, text="", font=theme.font(11), text_color=theme.ERROR)
         status_label.pack(padx=24)
 
         def submit():
@@ -538,9 +526,9 @@ class PasswordVaultPage(ctk.CTkFrame):
     def toggle_favorites_filter(self):
         self.show_favorites_only = not self.show_favorites_only
         if self.show_favorites_only:
-            self.favorites_toggle_button.configure(fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color="#0b0d10")
+            self.favorites_toggle_button.configure(fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER, text_color="#0b0d10")
         else:
-            self.favorites_toggle_button.configure(fg_color=CARD, hover_color=CARD_HOVER, text_color=TEXT)
+            self.favorites_toggle_button.configure(fg_color=theme.PANEL_2, hover_color=theme.PANEL_HOVER, text_color=theme.TEXT)
         self.render()
 
     def toggle_favorite(self, entry_id):
@@ -562,39 +550,39 @@ class PasswordVaultPage(ctk.CTkFrame):
         dialog.title("Edit Entry")
         dialog.geometry("420x480")
         dialog.transient(self.master)
-        dialog.configure(fg_color=PANEL)
+        dialog.configure(fg_color=theme.PANEL)
         dialog.grab_set()
 
         entry_id = entry["id"]
 
-        ctk.CTkLabel(dialog, text="✏ Edit Entry", font=theme.font(18, "bold"), text_color=TEXT).pack(
+        ctk.CTkLabel(dialog, text="✏ Edit Entry", font=theme.font(18, "bold"), text_color=theme.TEXT).pack(
             pady=(20, 16), padx=24, anchor="w"
         )
 
         def field_label(text):
-            ctk.CTkLabel(dialog, text=text, anchor="w", font=theme.font(12), text_color=MUTED).pack(
+            ctk.CTkLabel(dialog, text=text, anchor="w", font=theme.font(12), text_color=theme.MUTED).pack(
                 fill="x", padx=24, pady=(0, 3)
             )
 
         field_label("Site")
-        edit_site_entry = ctk.CTkEntry(dialog, height=38, fg_color=CARD, border_color=BORDER, corner_radius=theme.RADIUS_SM)
+        edit_site_entry = ctk.CTkEntry(dialog, height=38, fg_color=theme.PANEL_2, border_color=theme.BORDER, corner_radius=theme.RADIUS_SM)
         edit_site_entry.insert(0, entry["site"])
         edit_site_entry.pack(fill="x", padx=24, pady=(0, 12))
 
         field_label("Username")
-        edit_user_entry = ctk.CTkEntry(dialog, height=38, fg_color=CARD, border_color=BORDER, corner_radius=theme.RADIUS_SM)
+        edit_user_entry = ctk.CTkEntry(dialog, height=38, fg_color=theme.PANEL_2, border_color=theme.BORDER, corner_radius=theme.RADIUS_SM)
         edit_user_entry.insert(0, entry["username"])
         edit_user_entry.pack(fill="x", padx=24, pady=(0, 12))
 
         field_label("Password")
-        edit_pass_entry = ctk.CTkEntry(dialog, height=38, font=theme.mono(13), fg_color=CARD, border_color=BORDER, corner_radius=theme.RADIUS_SM)
+        edit_pass_entry = ctk.CTkEntry(dialog, height=38, font=theme.mono(13), fg_color=theme.PANEL_2, border_color=theme.BORDER, corner_radius=theme.RADIUS_SM)
         edit_pass_entry.insert(0, entry["password"])
         edit_pass_entry.pack(fill="x", padx=24, pady=(0, 12))
 
         field_label("Category")
         edit_category_menu = ctk.CTkComboBox(
-            dialog, values=self._all_categories(), height=38, fg_color=CARD,
-            border_color=BORDER, button_color=CARD, button_hover_color=CARD_HOVER,
+            dialog, values=self._all_categories(), height=38, fg_color=theme.PANEL_2,
+            border_color=theme.BORDER, button_color=theme.PANEL_2, button_hover_color=theme.PANEL_HOVER,
             corner_radius=theme.RADIUS_SM
         )
         edit_category_menu.set(entry["category"])
@@ -631,31 +619,31 @@ class PasswordVaultPage(ctk.CTkFrame):
         dialog.title("Change Master Password")
         dialog.geometry("380x420")
         dialog.transient(self.master)
-        dialog.configure(fg_color=PANEL)
+        dialog.configure(fg_color=theme.PANEL)
         dialog.grab_set()  # modal — this touches vault security, don't let it get lost behind other windows
 
         ctk.CTkLabel(
             dialog,
             text="🔑 Change Master Password",
             font=theme.font(17, "bold"),
-            text_color=TEXT
+            text_color=theme.TEXT
         ).pack(pady=(20, 4))
 
         ctk.CTkLabel(
             dialog,
             text="You'll need your current password to confirm.",
             font=theme.font(11),
-            text_color=MUTED,
+            text_color=theme.MUTED,
             wraplength=300
         ).pack(pady=(0, 16))
 
         def labeled_entry(text):
             ctk.CTkLabel(
-                dialog, text=text, anchor="w", font=theme.font(12), text_color=MUTED
+                dialog, text=text, anchor="w", font=theme.font(12), text_color=theme.MUTED
             ).pack(fill="x", padx=24, pady=(4, 2))
             e = ctk.CTkEntry(
                 dialog, show="•", height=36,
-                fg_color=CARD, border_color=BORDER, corner_radius=theme.RADIUS_SM
+                fg_color=theme.PANEL_2, border_color=theme.BORDER, corner_radius=theme.RADIUS_SM
             )
             e.pack(fill="x", padx=24)
             return e
@@ -665,12 +653,12 @@ class PasswordVaultPage(ctk.CTkFrame):
 
         strength_bar = ctk.CTkProgressBar(
             dialog, height=4, corner_radius=2,
-            progress_color=STRENGTH_COLORS[0], fg_color=BORDER
+            progress_color=STRENGTH_COLORS[0], fg_color=theme.BORDER
         )
         strength_bar.pack(fill="x", padx=24, pady=(6, 0))
         strength_bar.set(0)
 
-        strength_label = ctk.CTkLabel(dialog, text=" ", font=theme.font(11), text_color=FAINT)
+        strength_label = ctk.CTkLabel(dialog, text=" ", font=theme.font(11), text_color=theme.FAINT)
         strength_label.pack(anchor="e", padx=24)
 
         def update_strength(_event=None):
@@ -683,7 +671,7 @@ class PasswordVaultPage(ctk.CTkFrame):
 
         confirm_entry = labeled_entry("Confirm new password")
 
-        status_label = ctk.CTkLabel(dialog, text="", font=theme.font(11), text_color=ERROR, wraplength=300)
+        status_label = ctk.CTkLabel(dialog, text="", font=theme.font(11), text_color=theme.ERROR, wraplength=300)
         status_label.pack(pady=(10, 0))
 
         def submit():
@@ -692,23 +680,23 @@ class PasswordVaultPage(ctk.CTkFrame):
             confirm = confirm_entry.get()
 
             if len(new) < 8:
-                status_label.configure(text_color=ERROR, text="New password must be at least 8 characters.")
+                status_label.configure(text_color=theme.ERROR, text="New password must be at least 8 characters.")
                 return
 
             if new != confirm:
-                status_label.configure(text_color=ERROR, text="New passwords do not match.")
+                status_label.configure(text_color=theme.ERROR, text="New passwords do not match.")
                 return
 
             if new == current:
-                status_label.configure(text_color=ERROR, text="New password must be different from the current one.")
+                status_label.configure(text_color=theme.ERROR, text="New password must be different from the current one.")
                 return
 
             if not auth.change_master_password(current, new):
-                status_label.configure(text_color=ERROR, text="Current password is incorrect.")
+                status_label.configure(text_color=theme.ERROR, text="Current password is incorrect.")
                 current_entry.delete(0, "end")
                 return
 
-            status_label.configure(text_color=SUCCESS, text="Master password changed.")
+            status_label.configure(text_color=theme.SUCCESS, text="Master password changed.")
             dialog.after(700, dialog.destroy)
 
         current_entry.bind("<Return>", lambda e: new_entry.focus_set())
@@ -719,8 +707,8 @@ class PasswordVaultPage(ctk.CTkFrame):
             dialog,
             text="Change Password",
             height=38,
-            fg_color=ACCENT,
-            hover_color=ACCENT_HOVER,
+            fg_color=theme.ACCENT,
+            hover_color=theme.ACCENT_HOVER,
             text_color="#0b0d10",
             font=theme.font(13, "bold"),
             command=submit
@@ -782,11 +770,11 @@ class PasswordVaultPage(ctk.CTkFrame):
         security = self.vault.security_score()
         score = security["score"]
 
-        color = SUCCESS
+        color = theme.SUCCESS
         if score < 80:
             color = "#f1c40f"
         if score < 60:
-            color = ERROR
+            color = theme.ERROR
 
         self.security_label.configure(text=f"{score}/100", text_color=color)
 
@@ -815,14 +803,14 @@ class PasswordVaultPage(ctk.CTkFrame):
                 self.cards,
                 text="No entries yet — click ➕ Add Entry to save your first login."
                 if not all_entries_from_vault else "No entries match your search/filter.",
-                font=theme.font(13), text_color=MUTED
+                font=theme.font(13), text_color=theme.MUTED
             ).pack(pady=30)
 
         for item in entries_to_render:
             self._render_card(item)
 
     def _render_card(self, item):
-        card = ctk.CTkFrame(self.cards, fg_color=CARD, corner_radius=theme.RADIUS, border_width=1, border_color=BORDER)
+        card = ctk.CTkFrame(self.cards, fg_color=theme.PANEL_2, corner_radius=theme.RADIUS, border_width=1, border_color=theme.BORDER)
         card.pack(fill="x", padx=6, pady=6)
 
         body = ctk.CTkFrame(card, fg_color="transparent")
@@ -841,30 +829,30 @@ class PasswordVaultPage(ctk.CTkFrame):
         title_row = ctk.CTkFrame(info, fg_color="transparent")
         title_row.pack(fill="x", anchor="w")
 
-        ctk.CTkLabel(title_row, text=item["site"], font=theme.font(16, "bold"), text_color=TEXT).pack(side="left")
+        ctk.CTkLabel(title_row, text=item["site"], font=theme.font(16, "bold"), text_color=theme.TEXT).pack(side="left")
 
         ctk.CTkLabel(
             title_row, text=f"  {item['category']}  ", font=theme.font(10, "bold"),
-            text_color=ACCENT, fg_color=ACCENT_GLOW, corner_radius=theme.RADIUS_SM
+            text_color=theme.ACCENT, fg_color=theme.ACCENT_GLOW, corner_radius=theme.RADIUS_SM
         ).pack(side="left", padx=(8, 0))
 
         if item.get("favorite", False):
             ctk.CTkLabel(title_row, text="⭐", font=theme.font(11)).pack(side="left", padx=(6, 0))
 
-        ctk.CTkLabel(info, text=item["username"] or "—", font=theme.font(12), text_color=MUTED).pack(
+        ctk.CTkLabel(info, text=item["username"] or "—", font=theme.font(12), text_color=theme.MUTED).pack(
             anchor="w", pady=(3, 0)
         )
 
         is_visible = item["id"] in self.visible_passwords
         password_text = item["password"] if is_visible else "•" * 14
         ctk.CTkLabel(
-            info, text=password_text, font=theme.mono(12), text_color=TEXT if is_visible else FAINT
+            info, text=password_text, font=theme.mono(12), text_color=theme.TEXT if is_visible else theme.FAINT
         ).pack(anchor="w", pady=(3, 0))
 
         updated_date_str = item["updated"]
         if isinstance(updated_date_str, datetime.datetime):
             updated_date_str = updated_date_str.strftime("%Y-%m-%d")
-        ctk.CTkLabel(body, text=f"Updated {updated_date_str[:10]}", font=theme.font(10), text_color=FAINT).pack(
+        ctk.CTkLabel(body, text=f"Updated {updated_date_str[:10]}", font=theme.font(10), text_color=theme.FAINT).pack(
             side="right", anchor="n"
         )
 

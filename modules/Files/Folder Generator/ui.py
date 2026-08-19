@@ -26,24 +26,13 @@ from .tree_preview import render_tree
 from core import theme
 from core import paths
 
-# ── Colours (matches the app's shared dark theme) ─────────────────────────
-BG = theme.BG
-PANEL = theme.PANEL
-PANEL_2 = theme.PANEL_2
-ACCENT = theme.ACCENT
-DANGER = theme.DANGER
-SUCCESS = theme.SUCCESS
-TEXT = theme.TEXT
-MUTED = theme.MUTED
-
-_BTN = dict(fg_color=PANEL_2, hover_color=ACCENT, text_color=TEXT, height=34, corner_radius=8)
-_BTN_ACCENT = dict(fg_color=ACCENT, hover_color=theme.ACCENT_DIM, text_color="white", height=34, corner_radius=8)
-
-_ENTRY = dict(fg_color=PANEL_2, border_color=PANEL_2, text_color=TEXT, height=34, corner_radius=8)
+_ENTRY = dict(fg_color=theme.PANEL_2, border_color=theme.PANEL_2, text_color=theme.TEXT, height=34, corner_radius=8)
 
 
 def _make_btn(parent, text, cmd, **overrides):
-    return ctk.CTkButton(parent, text=text, command=cmd, **{**_BTN, **overrides})
+    kw = theme.secondary_button_kwargs()
+    kw.update(overrides)
+    return ctk.CTkButton(parent, text=text, command=cmd, **kw)
 
 
 class ScrollableDropdown:
@@ -90,7 +79,7 @@ class ScrollableDropdown:
         height = visible_rows * self.ROW_HEIGHT + 12
 
         self._scroll_frame = ctk.CTkScrollableFrame(
-            self._toplevel, fg_color=PANEL_2, corner_radius=8,
+            self._toplevel, fg_color=theme.PANEL_2, corner_radius=8,
             width=self._width, height=height,
         )
         self._scroll_frame.pack(fill="both", expand=True)
@@ -141,7 +130,7 @@ class ScrollableDropdown:
         for name in self._values:
             ctk.CTkButton(
                 self._scroll_frame, text=name, anchor="w",
-                fg_color="transparent", hover_color=ACCENT, text_color=TEXT,
+                fg_color="transparent", hover_color=theme.ACCENT, text_color=theme.TEXT,
                 height=28, corner_radius=6,
                 command=lambda n=name: self._select(n),
             ).pack(fill="x", padx=2, pady=1)
@@ -170,7 +159,7 @@ class FolderStructureGeneratorPage(ctk.CTkFrame):
     """Main page for the Folder Structure Generator module."""
 
     def __init__(self, parent, manager, database_path: Optional[str] = None):
-        super().__init__(parent, fg_color=BG)
+        super().__init__(parent, fg_color=theme.BG)
         self.manager = manager
         self.database_path = database_path or paths.seed_from_resource(
             paths.data_path("folder_gen", "games.json"),
@@ -203,25 +192,25 @@ class FolderStructureGeneratorPage(ctk.CTkFrame):
         self._build_main_panels()
 
     def _build_header(self):
-        header = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
+        header = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=10)
         header.pack(fill="x", padx=12, pady=(12, 4))
 
         ctk.CTkLabel(
             header, text="🗂  Folder Structure Generator",
-            font=("Segoe UI", 22, "bold"), text_color=TEXT,
+            font=("Segoe UI", 22, "bold"), text_color=theme.TEXT,
         ).pack(side="left", padx=14, pady=10)
 
-        self._header_status = ctk.CTkLabel(header, text="Loading database…", text_color=MUTED)
+        self._header_status = ctk.CTkLabel(header, text="Loading database…", text_color=theme.MUTED)
         self._header_status.pack(side="right", padx=14)
 
     def _build_search_bar(self):
-        bar = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
+        bar = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=10)
         bar.pack(fill="x", padx=12, pady=(0, 4))
 
         inner = ctk.CTkFrame(bar, fg_color="transparent")
         inner.pack(fill="x", padx=10, pady=(10, 4))
 
-        ctk.CTkLabel(inner, text="Search", text_color=MUTED, font=("Segoe UI", 11)).pack(
+        ctk.CTkLabel(inner, text="Search", text_color=theme.MUTED, font=("Segoe UI", 11)).pack(
             anchor="w", pady=(0, 4)
         )
 
@@ -233,13 +222,13 @@ class FolderStructureGeneratorPage(ctk.CTkFrame):
         ).pack(fill="x")
 
     def _build_game_bar(self):
-        bar = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
+        bar = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=10)
         bar.pack(fill="x", padx=12, pady=(0, 4))
 
         inner = ctk.CTkFrame(bar, fg_color="transparent")
         inner.pack(fill="x", padx=10, pady=(4, 10))
 
-        ctk.CTkLabel(inner, text="Game", text_color=MUTED, font=("Segoe UI", 11)).pack(
+        ctk.CTkLabel(inner, text="Game", text_color=theme.MUTED, font=("Segoe UI", 11)).pack(
             anchor="w", pady=(0, 4)
         )
 
@@ -249,7 +238,7 @@ class FolderStructureGeneratorPage(ctk.CTkFrame):
         self._game_var = ctk.StringVar(value="Loading…")
         self._game_menu = ctk.CTkButton(
             row, textvariable=self._game_var, anchor="w",
-            fg_color=PANEL_2, hover_color="#232a3a", text_color=TEXT,
+            fg_color=theme.PANEL_2, hover_color="#232a3a", text_color=theme.TEXT,
             width=320, height=34, corner_radius=8,
             command=lambda: self._game_dropdown.toggle(),
         )
@@ -259,17 +248,17 @@ class FolderStructureGeneratorPage(ctk.CTkFrame):
         )
 
         # Compact metadata strip: category / developer / publisher / platform.
-        self._meta_label = ctk.CTkLabel(row, text="", text_color=MUTED, font=("Segoe UI", 11))
+        self._meta_label = ctk.CTkLabel(row, text="", text_color=theme.MUTED, font=("Segoe UI", 11))
         self._meta_label.pack(side="left", padx=(16, 0))
 
     def _build_output_bar(self):
-        bar = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
+        bar = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=10)
         bar.pack(fill="x", padx=12, pady=(0, 4))
 
         inner = ctk.CTkFrame(bar, fg_color="transparent")
         inner.pack(fill="x", padx=10, pady=10)
 
-        ctk.CTkLabel(inner, text="Output Folder", text_color=MUTED, font=("Segoe UI", 11)).pack(
+        ctk.CTkLabel(inner, text="Output Folder", text_color=theme.MUTED, font=("Segoe UI", 11)).pack(
             anchor="w", pady=(0, 4)
         )
 
@@ -288,7 +277,7 @@ class FolderStructureGeneratorPage(ctk.CTkFrame):
         _make_btn(row, "Browse", self._browse_output, width=90).pack(side="left")
 
     def _build_stub_bar(self):
-        bar = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
+        bar = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=10)
         bar.pack(fill="x", padx=12, pady=(0, 4))
 
         inner = ctk.CTkFrame(bar, fg_color="transparent")
@@ -296,7 +285,7 @@ class FolderStructureGeneratorPage(ctk.CTkFrame):
 
         ctk.CTkLabel(
             inner, text="Stub Executable (copied + renamed to each game's exe)",
-            text_color=MUTED, font=("Segoe UI", 11),
+            text_color=theme.MUTED, font=("Segoe UI", 11),
         ).pack(anchor="w", pady=(0, 4))
 
         row = ctk.CTkFrame(inner, fg_color="transparent")
@@ -315,7 +304,7 @@ class FolderStructureGeneratorPage(ctk.CTkFrame):
         _make_btn(row, "Browse", self._browse_stub, width=90).pack(side="left")
 
     def _build_options_bar(self):
-        bar = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
+        bar = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=10)
         bar.pack(fill="x", padx=12, pady=(0, 4))
 
         inner = ctk.CTkFrame(bar, fg_color="transparent")
@@ -324,13 +313,13 @@ class FolderStructureGeneratorPage(ctk.CTkFrame):
         self._create_file_var = ctk.BooleanVar(value=True)
         ctk.CTkCheckBox(
             inner, text="Create placeholder executable file", variable=self._create_file_var,
-            text_color=TEXT, fg_color=ACCENT, hover_color="#2f7fd6",
+            text_color=theme.TEXT, fg_color=theme.ACCENT, hover_color="#2f7fd6",
         ).pack(side="left", padx=(0, 20))
 
         self._overwrite_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(
             inner, text="Overwrite if it already exists", variable=self._overwrite_var,
-            text_color=TEXT, fg_color=DANGER, hover_color="#8b0000",
+            text_color=theme.TEXT, fg_color=theme.DANGER, hover_color="#8b0000",
         ).pack(side="left")
 
     def _build_main_panels(self):
@@ -344,42 +333,44 @@ class FolderStructureGeneratorPage(ctk.CTkFrame):
         self._build_status_panel(container)
 
     def _build_preview_panel(self, parent):
-        panel = ctk.CTkFrame(parent, fg_color=PANEL, corner_radius=10)
+        panel = ctk.CTkFrame(parent, fg_color=theme.PANEL, corner_radius=10)
         panel.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
 
         top = ctk.CTkFrame(panel, fg_color="transparent")
         top.pack(fill="x", padx=10, pady=(8, 4))
-        ctk.CTkLabel(top, text="Preview", font=("Segoe UI", 15, "bold"), text_color=TEXT).pack(
+        ctk.CTkLabel(top, text="Preview", font=("Segoe UI", 15, "bold"), text_color=theme.TEXT).pack(
             side="left"
         )
 
         self._preview_box = ctk.CTkTextbox(
-            panel, fg_color=PANEL_2, text_color=TEXT, corner_radius=8,
+            panel, fg_color=theme.PANEL_2, text_color=theme.TEXT, corner_radius=8,
             font=("Consolas", 12), wrap="none", state="disabled",
         )
         self._preview_box.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
+        create_kw = theme.primary_button_kwargs()
+        create_kw["font"] = ("Segoe UI", 13, "bold")
         self._create_btn = ctk.CTkButton(
             panel, text="Create Folder Structure", command=self._on_create_clicked,
-            font=("Segoe UI", 13, "bold"), **_BTN_ACCENT,
+            **create_kw,
         )
         self._create_btn.pack(fill="x", padx=10, pady=(0, 10))
 
     def _build_status_panel(self, parent):
-        panel = ctk.CTkFrame(parent, fg_color=PANEL, corner_radius=10)
+        panel = ctk.CTkFrame(parent, fg_color=theme.PANEL, corner_radius=10)
         panel.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
 
         top = ctk.CTkFrame(panel, fg_color="transparent")
         top.pack(fill="x", padx=10, pady=(8, 4))
-        ctk.CTkLabel(top, text="Status", font=("Segoe UI", 15, "bold"), text_color=TEXT).pack(
+        ctk.CTkLabel(top, text="Status", font=("Segoe UI", 15, "bold"), text_color=theme.TEXT).pack(
             side="left"
         )
-        self._progress_bar = ctk.CTkProgressBar(panel, progress_color=ACCENT)
+        self._progress_bar = ctk.CTkProgressBar(panel, progress_color=theme.ACCENT)
         self._progress_bar.pack(fill="x", padx=10, pady=(0, 6))
         self._progress_bar.set(0)
 
         self._status_box = ctk.CTkTextbox(
-            panel, fg_color=PANEL_2, text_color=TEXT, corner_radius=8,
+            panel, fg_color=theme.PANEL_2, text_color=theme.TEXT, corner_radius=8,
             font=("Consolas", 12), state="disabled",
         )
         self._status_box.pack(fill="both", expand=True, padx=10, pady=(0, 10))

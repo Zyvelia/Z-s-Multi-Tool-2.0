@@ -112,6 +112,11 @@ python -m PyInstaller ^
     --hidden-import "winrt.windows.foundation" ^
     --hidden-import "winrt.windows.ui.notifications" ^
     --hidden-import "winrt.windows.ui.notifications.management" ^
+    --hidden-import "win32com" ^
+    --hidden-import "win32com.client" ^
+    --hidden-import "win32timezone" ^
+    --hidden-import "pythoncom" ^
+    --hidden-import "pywintypes" ^
     --add-data "modules;modules" ^
     --add-data "core;core" ^
     --add-data "pages;pages" ^

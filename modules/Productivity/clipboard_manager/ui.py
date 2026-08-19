@@ -13,23 +13,14 @@ import time
 
 import customtkinter as ctk
 
+from core import theme
 from .clipboard_history import (
     ClipboardEntry,
     ClipboardMonitor,
     ClipboardSettings,
     ClipboardStore,
-    MAX_MAX_ITEMS,
-    MIN_MAX_ITEMS,
-    POLL_INTERVAL_CHOICES_MS,
-    UNLIMITED,
 )
 
-BG = "#0f1115"
-PANEL = "#151922"
-PANEL_2 = "#1b2030"
-ACCENT = "#4ea1ff"
-DANGER = "#ff5c5c"
-MUTED = "#7d8494"
 
 PREVIEW_LINE_LIMIT = 3
 PREVIEW_CHAR_LIMIT = 220
@@ -69,12 +60,51 @@ def _format_time(ts: float) -> str:
     return time.strftime("%H:%M:%S", time.localtime(ts))
 
 
+def apply_clipboard_settings(
+    root_widget,
+    *,
+    max_items: int,
+    poll_interval_ms: int,
+    capture_enabled: bool,
+) -> None:
+    store, monitor, settings = _get_or_create_monitor(root_widget)
+    settings.max_items = max_items
+    settings.poll_interval_ms = poll_interval_ms
+    settings.capture_enabled = capture_enabled
+    settings.save()
+
+    store.set_max_items(max_items)
+    monitor.set_interval(poll_interval_ms)
+    if capture_enabled and not monitor.is_running():
+        monitor.start()
+    elif not capture_enabled and monitor.is_running():
+        monitor.stop()
+
+
+def refresh_clipboard_module_ui(manager) -> None:
+    if manager is None:
+        return
+    current = getattr(manager, "current", None)
+    if current is None:
+        return
+    inner = getattr(current, "_inner", current)
+    if inner.__class__.__name__ == "ClipboardManagerModule":
+        inner._refresh_list(force=True)
+
+
 class ClipboardManagerModule(ctk.CTkFrame):
     """`manager` is the plugin manager / root App instance
     (manager.container is the root, per the shared convention)."""
 
+    MODULE_SETTINGS_TITLE = "Options"
+
+    @staticmethod
+    def build_module_settings(parent, manager):
+        from .settings_panel import ClipboardSettingsPanel
+        return ClipboardSettingsPanel(parent, manager)
+
     def __init__(self, master, manager=None, **kwargs):
-        super().__init__(master, fg_color=BG, **kwargs)
+        super().__init__(master, fg_color=theme.BG, **kwargs)
         self.manager = manager
         root_widget = manager.container if manager is not None else master
 
@@ -108,7 +138,7 @@ class ClipboardManagerModule(ctk.CTkFrame):
             self,
             text="Runs in the background — capture continues while you're on other pages.",
             font=ctk.CTkFont(size=12),
-            text_color=MUTED,
+            text_color=theme.MUTED,
         )
         subtitle.grid(row=1, column=0, sticky="w", padx=16, pady=(0, 12))
 
@@ -118,29 +148,23 @@ class ClipboardManagerModule(ctk.CTkFrame):
         self.search_var = ctk.StringVar()
         search_entry = ctk.CTkEntry(
             top_bar, placeholder_text="Search history…", width=220,
-            fg_color=PANEL_2, textvariable=self.search_var,
+            fg_color=theme.PANEL_2, textvariable=self.search_var,
         )
         search_entry.pack(side="left", padx=(0, 8))
         self.search_var.trace_add("write", lambda *_: self._on_search_changed())
 
         ctk.CTkButton(
             top_bar, text="Clear Unpinned", width=120,
-            fg_color=PANEL_2, hover_color=DANGER,
+            fg_color=theme.PANEL_2, hover_color=theme.DANGER,
             command=self._clear_unpinned,
-        ).pack(side="left", padx=(0, 8))
-
-        ctk.CTkButton(
-            top_bar, text="⚙ Settings", width=100,
-            fg_color=PANEL_2, hover_color=ACCENT,
-            command=self._open_settings,
         ).pack(side="left")
 
         # ---- scrollable history list ----
-        self.list_frame = ctk.CTkScrollableFrame(self, fg_color=PANEL, corner_radius=10)
+        self.list_frame = ctk.CTkScrollableFrame(self, fg_color=theme.PANEL, corner_radius=10)
         self.list_frame.grid(row=2, column=0, sticky="nsew", padx=16, pady=(0, 8))
         self.list_frame.grid_columnconfigure(0, weight=1)
 
-        self.status_label = ctk.CTkLabel(self, text="", text_color=MUTED, anchor="w")
+        self.status_label = ctk.CTkLabel(self, text="", text_color=theme.MUTED, anchor="w")
         self.status_label.grid(row=3, column=0, sticky="ew", padx=16, pady=(0, 16))
 
     # --------------------------------------------------------------- state
@@ -190,7 +214,7 @@ class ClipboardManagerModule(ctk.CTkFrame):
         if not entries:
             empty = ctk.CTkLabel(
                 self.list_frame, text="  (nothing here yet — copy something to get started)",
-                text_color=MUTED,
+                text_color=theme.MUTED,
             )
             empty.grid(row=0, column=0, sticky="w", pady=8)
             return
@@ -199,7 +223,7 @@ class ClipboardManagerModule(ctk.CTkFrame):
             self._build_row(row, entry)
 
     def _build_row(self, row: int, entry: ClipboardEntry) -> None:
-        card = ctk.CTkFrame(self.list_frame, fg_color=PANEL_2, corner_radius=8)
+        card = ctk.CTkFrame(self.list_frame, fg_color=theme.PANEL_2, corner_radius=8)
         card.grid(row=row, column=0, sticky="ew", padx=4, pady=4)
         card.grid_columnconfigure(0, weight=1)
 
@@ -210,7 +234,7 @@ class ClipboardManagerModule(ctk.CTkFrame):
         text_label.grid(row=0, column=0, sticky="ew", padx=(12, 8), pady=(10, 2))
 
         meta_label = ctk.CTkLabel(
-            card, text=_format_time(entry.timestamp), text_color=MUTED,
+            card, text=_format_time(entry.timestamp), text_color=theme.MUTED,
             font=ctk.CTkFont(size=11),
         )
         meta_label.grid(row=1, column=0, sticky="w", padx=(12, 8), pady=(0, 10))
@@ -220,44 +244,22 @@ class ClipboardManagerModule(ctk.CTkFrame):
 
         ctk.CTkButton(
             btn_col, text="Copy", width=64, height=26,
-            fg_color=ACCENT, hover_color="#3d8fe0",
+            fg_color=theme.ACCENT, hover_color="#3d8fe0",
             command=lambda e=entry: self._copy_entry(e),
         ).pack(pady=2)
 
         pin_text = "Unpin" if entry.pinned else "Pin"
         ctk.CTkButton(
             btn_col, text=pin_text, width=64, height=26,
-            fg_color=PANEL, hover_color=ACCENT,
+            fg_color=theme.PANEL, hover_color=theme.ACCENT,
             command=lambda e=entry: self._toggle_pin(e),
         ).pack(pady=2)
 
         ctk.CTkButton(
             btn_col, text="Delete", width=64, height=26,
-            fg_color=PANEL, hover_color=DANGER,
+            fg_color=theme.PANEL, hover_color=theme.DANGER,
             command=lambda e=entry: self._delete_entry(e),
         ).pack(pady=2)
-
-    def _open_settings(self) -> None:
-        _ClipboardSettingsDialog(self)
-
-    def _apply_settings(self, *, max_items: int, poll_interval_ms: int, capture_enabled: bool) -> None:
-        self.settings.max_items = max_items
-        self.settings.poll_interval_ms = poll_interval_ms
-        self.settings.capture_enabled = capture_enabled
-        self.settings.save()
-
-        self.store.set_max_items(max_items)
-        self.monitor.set_interval(poll_interval_ms)
-        if capture_enabled and not self.monitor.is_running():
-            self.monitor.start()
-        elif not capture_enabled and self.monitor.is_running():
-            self.monitor.stop()
-
-        self._refresh_list(force=True)
-
-    def _clear_all(self) -> None:
-        self.store.clear_all()
-        self._refresh_list(force=True)
 
     # ------------------------------------------------------------- actions
 
@@ -277,131 +279,3 @@ class ClipboardManagerModule(ctk.CTkFrame):
     def _delete_entry(self, entry: ClipboardEntry) -> None:
         self.store.delete(entry.id)
         self._refresh_list(force=True)
-
-
-class _ClipboardSettingsDialog(ctk.CTkToplevel):
-    """Modal settings panel for the Clipboard Manager module."""
-
-    def __init__(self, parent: ClipboardManagerModule):
-        super().__init__(parent)
-        self.parent = parent
-        self.title("Clipboard Manager Settings")
-        self.geometry("360x360")
-        self.configure(fg_color=BG)
-        self.resizable(False, False)
-        self.transient(parent.winfo_toplevel())
-        self.grab_set()
-
-        settings = parent.settings
-        pad = {"padx": 20, "pady": (12, 0)}
-
-        ctk.CTkLabel(
-            self, text="Clipboard Manager Settings",
-            font=ctk.CTkFont(size=16, weight="bold"), text_color="white",
-        ).pack(anchor="w", padx=20, pady=(20, 4))
-
-        # ---- capture enabled ----
-        self.capture_var = ctk.BooleanVar(value=settings.capture_enabled)
-        ctk.CTkSwitch(
-            self, text="Capture clipboard history",
-            variable=self.capture_var, progress_color=ACCENT,
-        ).pack(anchor="w", **pad)
-
-        # ---- max history size ----
-        ctk.CTkLabel(
-            self, text=f"Max history size ({MIN_MAX_ITEMS}\u2013{MAX_MAX_ITEMS})",
-            text_color=MUTED,
-        ).pack(anchor="w", **pad)
-
-        is_unlimited = settings.max_items == UNLIMITED
-        row = ctk.CTkFrame(self, fg_color="transparent")
-        row.pack(anchor="w", padx=20, pady=(4, 0))
-
-        self.max_items_var = ctk.StringVar(
-            value="" if is_unlimited else str(settings.max_items)
-        )
-        self.max_items_entry = ctk.CTkEntry(
-            row, textvariable=self.max_items_var, width=100, fg_color=PANEL_2,
-        )
-        self.max_items_entry.pack(side="left")
-
-        self.unlimited_var = ctk.BooleanVar(value=is_unlimited)
-        ctk.CTkCheckBox(
-            row, text="Unlimited", variable=self.unlimited_var,
-            fg_color=ACCENT, hover_color=ACCENT,
-            command=self._on_unlimited_toggled,
-        ).pack(side="left", padx=(12, 0))
-
-        self._on_unlimited_toggled()  # sync entry enabled/disabled state on open
-
-        # ---- poll interval ----
-        ctk.CTkLabel(self, text="Check clipboard every", text_color=MUTED).pack(anchor="w", **pad)
-        self.interval_var = ctk.StringVar(value=f"{settings.poll_interval_ms} ms")
-        ctk.CTkOptionMenu(
-            self, values=[f"{ms} ms" for ms in POLL_INTERVAL_CHOICES_MS],
-            variable=self.interval_var,
-            fg_color=PANEL_2, button_color=ACCENT, button_hover_color=ACCENT,
-            width=140,
-        ).pack(anchor="w", padx=20, pady=(4, 0))
-
-        self.error_label = ctk.CTkLabel(self, text="", text_color=DANGER)
-        self.error_label.pack(anchor="w", padx=20, pady=(10, 0))
-
-        # ---- danger zone ----
-        ctk.CTkButton(
-            self, text="Clear ALL history (including pinned)", fg_color=DANGER,
-            hover_color="#e04545", command=self._confirm_clear_all,
-        ).pack(fill="x", padx=20, pady=(16, 0))
-
-        # ---- save / cancel ----
-        btn_row = ctk.CTkFrame(self, fg_color="transparent")
-        btn_row.pack(fill="x", padx=20, pady=20, side="bottom")
-        ctk.CTkButton(
-            btn_row, text="Cancel", fg_color=PANEL_2, hover_color=PANEL,
-            command=self.destroy,
-        ).pack(side="right", padx=(8, 0))
-        ctk.CTkButton(
-            btn_row, text="Save", fg_color=ACCENT, hover_color="#3d8fe0",
-            command=self._save,
-        ).pack(side="right")
-
-    def _on_unlimited_toggled(self) -> None:
-        if self.unlimited_var.get():
-            self.max_items_entry.configure(state="disabled")
-        else:
-            self.max_items_entry.configure(state="normal")
-
-    def _save(self) -> None:
-        if self.unlimited_var.get():
-            max_items = UNLIMITED
-        else:
-            raw = self.max_items_var.get().strip()
-            try:
-                max_items = int(raw)
-            except ValueError:
-                self.error_label.configure(text="Max history size must be a whole number.")
-                return
-            if not (MIN_MAX_ITEMS <= max_items <= MAX_MAX_ITEMS):
-                self.error_label.configure(
-                    text=f"Max history size must be between {MIN_MAX_ITEMS} and {MAX_MAX_ITEMS}."
-                )
-                return
-
-        poll_interval_ms = int(self.interval_var.get().split()[0])
-
-        self.parent._apply_settings(
-            max_items=max_items,
-            poll_interval_ms=poll_interval_ms,
-            capture_enabled=self.capture_var.get(),
-        )
-        self.destroy()
-
-    def _confirm_clear_all(self) -> None:
-        dialog = ctk.CTkInputDialog(
-            text="This deletes ALL history, including pinned items, permanently.\n\nType YES to confirm:",
-            title="Confirm Clear All",
-        )
-        answer = dialog.get_input()
-        if answer is not None and answer.strip() == "YES":
-            self.parent._clear_all()
-            self.destroy()

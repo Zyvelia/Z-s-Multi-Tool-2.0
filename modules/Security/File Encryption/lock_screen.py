@@ -3,16 +3,9 @@ import customtkinter as ctk
 from .ui import FileEncryptorPage
 from core import theme
 
-BG = theme.BG
-PANEL = theme.PANEL
-CARD = theme.PANEL_2
 
-ACCENT = theme.ACCENT
 
-TEXT = theme.TEXT
-MUTED = theme.MUTED
 
-ERROR = theme.ERROR
 
 
 class FileEncryptorLockScreen(ctk.CTkFrame):
@@ -24,7 +17,7 @@ class FileEncryptorLockScreen(ctk.CTkFrame):
 
         self.auth = manager.container.auth_service
 
-        self.configure(fg_color=BG)
+        self.configure(fg_color=theme.BG)
 
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(0, weight=1)
@@ -39,7 +32,7 @@ class FileEncryptorLockScreen(ctk.CTkFrame):
 
         card = ctk.CTkFrame(
             self,
-            fg_color=PANEL,
+            fg_color=theme.PANEL,
             width=500,
             height=350
         )
@@ -54,13 +47,13 @@ class FileEncryptorLockScreen(ctk.CTkFrame):
             card,
             text="🔒 File Encryptor",
             font=("Segoe UI", 28, "bold"),
-            text_color=TEXT
+            text_color=theme.TEXT
         ).pack(pady=(30, 10))
 
         ctk.CTkLabel(
             card,
             text="Enter Master Password",
-            text_color=MUTED
+            text_color=theme.MUTED
         ).pack(pady=(0, 15))
 
         self.password_entry = ctk.CTkEntry(
@@ -75,7 +68,7 @@ class FileEncryptorLockScreen(ctk.CTkFrame):
         self.error_label = ctk.CTkLabel(
             card,
             text="",
-            text_color=ERROR
+            text_color=theme.ERROR
         )
 
         self.error_label.pack(pady=5)
@@ -83,7 +76,7 @@ class FileEncryptorLockScreen(ctk.CTkFrame):
         ctk.CTkButton(
             card,
             text="Unlock",
-            fg_color=ACCENT,
+            fg_color=theme.ACCENT,
             width=250,
             command=self.unlock
         ).pack(pady=(20, 20))

@@ -22,32 +22,24 @@
 import os
 import sqlite3
 import threading
-import queue
 from array import array
 
 from . import cue as cuesheet
-
-AUDIO_EXTS = (
-    # "Big" lossy/lossless formats
-    ".mp3", ".flac", ".wav", ".wave", ".ogg", ".oga", ".m4a", ".aac",
-    ".wma", ".opus", ".aiff", ".aif", ".aifc", ".ape", ".wv",
-    # Containers that commonly hold audio-only streams
-    ".mp4", ".m4b", ".m4p", ".m4r", ".mka", ".webm", ".3gp", ".3g2",
-    # Less common / older / niche formats — still real-world audio files
-    # people have in their libraries, all playable via the ffmpeg
-    # transcode fallback in player.py even where mutagen can't tag them
-    ".mpc", ".mp2", ".mp1", ".tta", ".dsf", ".dff", ".caf", ".w64",
-    ".amr", ".ac3", ".dts", ".spx", ".voc", ".au", ".snd", ".gsm",
-    ".mid", ".midi", ".xm", ".mod", ".s3m", ".it",
+from .db_index import BATCH_SIZE, DirCache, ScanSession, TagReaderPool
+from .media_types import (
+    AUDIO_EXTS,
+    CUE_EXTS,
+    LIBRARY_EXTS,
+    MEDIA_EXTS,
+    PLAYLIST_EXTS,
+    is_media_path,
 )
 
-# Playlist files: text/XML files that list *paths to other audio files*
-# rather than being audio themselves. Handled separately from AUDIO_EXTS —
-# see playlist.py — because they're expanded into a list of tracks rather
-# than indexed as a song in their own right.
-PLAYLIST_EXTS = (".m3u", ".m3u8", ".pls", ".xspf")
-
-CUE_EXTS = (".cue",)
+# Re-export for modules that still import from db.
+__all__ = [
+    "AUDIO_EXTS", "MEDIA_EXTS", "LIBRARY_EXTS", "PLAYLIST_EXTS", "CUE_EXTS",
+    "Library", "is_media_path",
+]
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS songs (
@@ -64,6 +56,22 @@ CREATE TABLE IF NOT EXISTS songs (
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT
+);
+
+CREATE TABLE IF NOT EXISTS dir_index (
+    dir_path    TEXT PRIMARY KEY,
+    dir_mtime   REAL NOT NULL,
+    file_count  INTEGER NOT NULL,
+    names_sig   TEXT NOT NULL,
+    content_sig TEXT NOT NULL DEFAULT '',
+    scanned_at  REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS scan_meta (
+    root_path       TEXT PRIMARY KEY,
+    last_scan_at    REAL,
+    last_scan_found INTEGER,
+    scan_generation INTEGER NOT NULL DEFAULT 0
 );
 """
 
@@ -102,6 +110,16 @@ def default_db_path():
     return os.path.join(d, "library.db")
 
 
+def normalize_path(path: str) -> str:
+    """Canonical path key — prevents duplicate rows for E:/foo vs E:\\foo."""
+    if not path:
+        return path
+    if "::cue" in path:
+        base, _, suffix = path.partition("::cue")
+        return normalize_path(base) + "::cue" + suffix
+    return os.path.normcase(os.path.normpath(path))
+
+
 def _read_tags(path):
     """Read title/artist/album/duration for one file. Never raises."""
     title = artist = album = None
@@ -109,14 +127,20 @@ def _read_tags(path):
     try:
         from mutagen import File as MutagenFile
         audio = MutagenFile(path, easy=True)
+        if audio is None:
+            audio = MutagenFile(path)
         if audio is not None:
-            if audio.tags:
-                if "title" in audio.tags:
-                    title = audio.tags["title"][0]
-                if "artist" in audio.tags:
-                    artist = audio.tags["artist"][0]
-                if "album" in audio.tags:
-                    album = audio.tags["album"][0]
+            tags = getattr(audio, "tags", None)
+            if tags:
+                try:
+                    if "title" in tags:
+                        title = tags["title"][0]
+                    if "artist" in tags:
+                        artist = tags["artist"][0]
+                    if "album" in tags:
+                        album = tags["album"][0]
+                except (TypeError, KeyError, IndexError):
+                    pass
             if audio.info is not None:
                 duration = float(getattr(audio.info, "length", 0) or 0)
     except Exception:
@@ -175,7 +199,27 @@ class Library:
         for col, decl in (("audio_path", "TEXT"), ("cue_start", "REAL"), ("cue_end", "REAL")):
             if col not in existing_cols:
                 conn.execute(f"ALTER TABLE songs ADD COLUMN {col} {decl}")
+        if "scan_gen" not in existing_cols:
+            conn.execute("ALTER TABLE songs ADD COLUMN scan_gen INTEGER")
         conn.commit()
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_songs_sort ON songs("
+            "artist COLLATE NOCASE, album COLLATE NOCASE, title COLLATE NOCASE)"
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_songs_scan_gen ON songs(scan_gen)")
+        conn.commit()
+
+        dir_cols = {row["name"] for row in conn.execute("PRAGMA table_info(dir_index)")}
+        if dir_cols and "content_sig" not in dir_cols:
+            conn.execute("ALTER TABLE dir_index ADD COLUMN content_sig TEXT NOT NULL DEFAULT ''")
+            conn.commit()
+
+        if self.get_setting("library_paths_normalized") != "2":
+            self._dedupe_paths_by_normalization()
+            self.set_setting("library_paths_normalized", "2")
+            conn.execute("DELETE FROM dir_index")
+            conn.commit()
 
         try:
             conn.executescript(FTS_SCHEMA)
@@ -184,6 +228,38 @@ class Library:
             # FTS5 not available in this SQLite build — fall back to LIKE.
             self._has_fts = False
         conn.commit()
+
+    def _dedupe_paths_by_normalization(self):
+        """Merge rows that differ only by slash/case (E:/music vs E:\\music)."""
+        conn = self._conn()
+        rows = conn.execute(
+            "SELECT id, path, scan_gen FROM songs ORDER BY id"
+        ).fetchall()
+        buckets: dict[str, list] = {}
+        for row in rows:
+            key = normalize_path(row["path"])
+            buckets.setdefault(key, []).append(row)
+
+        removed = 0
+        updated = 0
+        for key, group in buckets.items():
+            if len(group) == 1:
+                row = group[0]
+                if row["path"] != key:
+                    conn.execute("UPDATE songs SET path=? WHERE id=?", (key, row["id"]))
+                    updated += 1
+                continue
+            group.sort(key=lambda r: ((r["scan_gen"] or 0), r["id"]), reverse=True)
+            keep = group[0]
+            conn.execute("UPDATE songs SET path=? WHERE id=?", (key, keep["id"]))
+            updated += 1
+            for row in group[1:]:
+                conn.execute("DELETE FROM songs WHERE id=?", (row["id"],))
+                removed += 1
+        if removed or updated:
+            conn.commit()
+            if removed:
+                print(f"[Library] Removed {removed} duplicate path entries")
 
     # ── settings (music folder path, etc.) ──────────────────────
 
@@ -241,7 +317,7 @@ class Library:
             real_name = filenames_lower.get(os.path.basename(ref_name).lower())
             if not real_name:
                 continue  # referenced audio file isn't next to the cue sheet
-            audio_path = os.path.join(dirpath, real_name)
+            audio_path = normalize_path(os.path.join(dirpath, real_name))
             try:
                 st = os.stat(audio_path)
             except OSError:
@@ -272,80 +348,75 @@ class Library:
             conn.commit()
         return indexed_paths, claimed_audio_paths
 
-    def scan(self, root, progress_cb=None, stop_event=None, workers=6):
-        """
-        Incrementally index `root`. Only new/changed files get their tags
-        re-read; unchanged files are skipped after a cheap stat+lookup.
-        After a full (non-aborted) scan, DB entries for files no longer
-        present on disk are removed.
+    def invalidate_dirs_for_paths(self, paths):
+        """Drop dir fingerprint cache so the next scan re-checks those folders."""
+        DirCache(self._conn()).invalidate_for_paths(paths)
 
-        progress_cb(found, updated, current_dir_or_"done") is called
-        periodically from THIS thread — callers updating a GUI must hop
-        back to the GUI thread themselves (e.g. via widget.after(...)).
+    def get_scan_meta(self, root: str):
+        row = self._conn().execute(
+            "SELECT last_scan_at, last_scan_found, scan_generation FROM scan_meta WHERE root_path=?",
+            (os.path.abspath(root),),
+        ).fetchone()
+        return dict(row) if row else None
 
-        Returns (found, updated).
+    def _existing_meta_for_paths(self, conn, paths):
+        if not paths:
+            return {}
+        placeholders = ",".join("?" * len(paths))
+        rows = conn.execute(
+            f"SELECT path, mtime, size FROM songs WHERE path IN ({placeholders})",
+            paths,
+        ).fetchall()
+        return {r["path"]: (r["mtime"], r["size"]) for r in rows}
+
+    def quick_scan(self, root, progress_cb=None, stop_event=None, workers=6):
+        """Fast incremental scan — skips directories whose listing hasn't changed."""
+        return self._run_scan(root, progress_cb, stop_event, workers, use_dir_cache=True)
+
+    def scan(self, root, progress_cb=None, stop_event=None, workers=6, full=False):
         """
+        Index `root`. Default uses directory cache for speed; pass full=True
+        to rebuild the cache and walk every folder (Rescan Now).
+        """
+        return self._run_scan(
+            root, progress_cb, stop_event, workers, use_dir_cache=not full
+        )
+
+    def _run_scan(self, root, progress_cb, stop_event, workers, *, use_dir_cache: bool):
         conn = self._conn()
-        conn.execute("DROP TABLE IF EXISTS temp.scan_seen")
-        conn.execute("CREATE TEMP TABLE scan_seen(path TEXT PRIMARY KEY)")
-        conn.commit()
-
-        work_q = queue.Queue(maxsize=4000)
-        result_q = queue.Queue()
-        SENTINEL = object()
-
-        def tag_worker():
-            while True:
-                item = work_q.get()
-                if item is SENTINEL:
-                    work_q.task_done()
-                    return
-                path, size, mtime = item
-                title, artist, album, duration = _read_tags(path)
-                result_q.put((title, artist, album, duration, size, mtime, path))
-                work_q.task_done()
-
-        threads = [threading.Thread(target=tag_worker, daemon=True)
-                   for _ in range(max(1, workers))]
-        for t in threads:
-            t.start()
-
+        root = normalize_path(os.path.abspath(root))
+        session = ScanSession(conn, root)
+        dir_cache = DirCache(conn)
+        pool = TagReaderPool(workers)
         found = 0
         updated = 0
         aborted = False
 
-        def drain(force=False):
-            nonlocal updated
-            batch = []
-            while True:
-                try:
-                    batch.append(result_q.get_nowait())
-                except queue.Empty:
-                    break
-                if not force and len(batch) >= 500:
-                    break
-            if batch:
-                conn.executemany(
-                    "INSERT INTO songs(path, title, artist, album, duration, size, mtime, audio_path) "
-                    "VALUES (?,?,?,?,?,?,?,?) "
-                    "ON CONFLICT(path) DO UPDATE SET "
-                    "title=excluded.title, artist=excluded.artist, album=excluded.album, "
-                    "duration=excluded.duration, size=excluded.size, mtime=excluded.mtime, "
-                    "audio_path=excluded.audio_path",
-                    [(p, t, ar, al, d, s, m, p) for (t, ar, al, d, s, m, p) in batch]
-                )
-                conn.commit()
-                updated += len(batch)
+        def progress(stage=None):
+            if progress_cb:
+                progress_cb(found, updated, stage or root)
 
         try:
-            for dirpath, dirnames, filenames in os.walk(root):
+            for dirpath, _dirnames, filenames in os.walk(root):
                 if stop_event and stop_event.is_set():
                     aborted = True
                     break
 
-                # ── cue sheets first: they "claim" the audio file(s) they
-                # reference, so those files are indexed per-track instead
-                # of as one single track below.
+                try:
+                    dir_stat = os.stat(dirpath)
+                    dir_mtime = dir_stat.st_mtime
+                except OSError:
+                    continue
+
+                if use_dir_cache and dir_cache.is_unchanged(dirpath, dir_mtime, filenames):
+                    known = dir_cache.paths_known_in_dir(dirpath)
+                    if known:
+                        found += len(known)
+                        session.mark_seen_many(known)
+                    if progress_cb and found % 2000 == 0:
+                        progress(dirpath)
+                    continue
+
                 claimed = set()
                 for fn in filenames:
                     if stop_event and stop_event.is_set():
@@ -358,61 +429,63 @@ class Library:
                     for p in indexed_paths:
                         found += 1
                         updated += 1
-                        conn.execute(
-                            "INSERT OR IGNORE INTO scan_seen(path) VALUES (?)", (p,))
+                        session.mark_seen(p)
                     claimed |= {os.path.basename(p).lower() for p in claimed_audio_paths}
+                session.flush_seen()
                 if aborted:
                     break
 
+                dir_paths = []
+                dir_entries = []
                 for fn in filenames:
+                    if not fn.lower().endswith(LIBRARY_EXTS):
+                        continue
+                    if fn.lower() in claimed:
+                        continue
+                    path = normalize_path(os.path.join(dirpath, fn))
+                    dir_entries.append(path)
+                    dir_paths.append(path)
+
+                existing = self._existing_meta_for_paths(conn, dir_paths)
+
+                for path in dir_entries:
                     if stop_event and stop_event.is_set():
                         aborted = True
                         break
-                    if not fn.lower().endswith(AUDIO_EXTS):
-                        continue
-                    if fn.lower() in claimed:
-                        continue  # already indexed per-track via its .cue sheet
-                    path = os.path.join(dirpath, fn)
                     try:
                         st = os.stat(path)
                     except OSError:
                         continue
 
                     found += 1
-                    conn.execute(
-                        "INSERT OR IGNORE INTO scan_seen(path) VALUES (?)", (path,))
+                    session.mark_seen(path)
 
-                    row = conn.execute(
-                        "SELECT mtime, size FROM songs WHERE path=?", (path,)
-                    ).fetchone()
+                    row = existing.get(path)
                     unchanged = (
                         row is not None
-                        and row["size"] == st.st_size
-                        and abs((row["mtime"] or 0) - st.st_mtime) < 1.0
+                        and row[1] == st.st_size
+                        and abs((row[0] or 0) - st.st_mtime) < 1.0
                     )
                     if not unchanged:
-                        work_q.put((path, st.st_size, st.st_mtime))
+                        pool.submit(path, st.st_size, st.st_mtime)
 
-                    if progress_cb and found % 250 == 0:
-                        progress_cb(found, updated, dirpath)
-                    drain()
-                drain()
+                    if len(session.seen_batch) >= BATCH_SIZE:
+                        session.flush_seen()
+                    if progress_cb and found % 500 == 0:
+                        progress(dirpath)
+
+                updated += pool.pending_results(conn, scan_gen=session.generation)
+                session.flush_seen()
                 if aborted:
                     break
 
-            for _ in threads:
-                work_q.put(SENTINEL)
-            for t in threads:
-                t.join()
-            drain(force=True)
+                dir_cache.save(dirpath, dir_mtime, filenames)
 
-            if not aborted:
-                conn.execute(
-                    "DELETE FROM songs WHERE path NOT IN (SELECT path FROM scan_seen)")
-                conn.commit()
-        finally:
-            conn.execute("DROP TABLE IF EXISTS scan_seen")
-            conn.commit()
+            updated += pool.close(conn, scan_gen=session.generation)
+            session.finish(found=found, updated=updated, aborted=aborted)
+        except Exception:
+            pool.close(conn, scan_gen=session.generation)
+            raise
 
         if progress_cb:
             progress_cb(found, updated, "aborted" if aborted else "done")
@@ -427,15 +500,34 @@ class Library:
 
     def index_paths(self, paths):
         """Add/update specific files by path. Returns count indexed."""
+        paths = [normalize_path(p) for p in paths if is_media_path(p)]
+        if not paths:
+            return 0
+
         conn = self._conn()
-        updated = 0
+        to_read = []
         for path in paths:
-            if not path.lower().endswith(AUDIO_EXTS):
-                continue
             try:
                 st = os.stat(path)
             except OSError:
                 continue
+            row = conn.execute(
+                "SELECT mtime, size FROM songs WHERE path=?", (path,)
+            ).fetchone()
+            unchanged = (
+                row is not None
+                and row["size"] == st.st_size
+                and abs((row["mtime"] or 0) - st.st_mtime) < 1.0
+            )
+            if unchanged:
+                continue
+            to_read.append((path, st.st_size, st.st_mtime))
+
+        if not to_read:
+            return 0
+
+        if len(to_read) == 1:
+            path, size, mtime = to_read[0]
             title, artist, album, duration = _read_tags(path)
             conn.execute(
                 "INSERT INTO songs(path, title, artist, album, duration, size, mtime, audio_path) "
@@ -444,16 +536,21 @@ class Library:
                 "title=excluded.title, artist=excluded.artist, album=excluded.album, "
                 "duration=excluded.duration, size=excluded.size, mtime=excluded.mtime, "
                 "audio_path=excluded.audio_path",
-                (path, title, artist, album, duration, st.st_size, st.st_mtime, path))
-            updated += 1
-        if updated:
+                (path, title, artist, album, duration, size, mtime, path),
+            )
             conn.commit()
+            return 1
+
+        pool = TagReaderPool(workers=min(4, len(to_read)))
+        for path, size, mtime in to_read:
+            pool.submit(path, size, mtime)
+        updated = pool.close(conn)
         return updated
 
     def remove_paths(self, paths):
         """Remove specific files by path (e.g. after a delete/move-away
         event). Returns count removed."""
-        paths = list(paths)
+        paths = [normalize_path(p) for p in paths]
         if not paths:
             return 0
         conn = self._conn()

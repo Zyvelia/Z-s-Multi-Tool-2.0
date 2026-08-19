@@ -15,24 +15,33 @@ from typing import Optional
 from core import theme
 
 # ── palette (matches app theme) ──────────────────────────
-BG          = theme.BG
-BG_PANEL    = theme.PANEL
-BG_RAISED   = theme.PANEL_2
-BORDER      = theme.BORDER
-ACCENT      = theme.ACCENT
-ACCENT_DIM  = theme.ACCENT_DIM
-ACCENT_GLOW = theme.ACCENT_GLOW
-RED         = theme.DANGER
-RED_DIM     = theme.RED_DIM
 GOLD        = "#e6a817"
-PURPLE      = "#a78bfa"
 GREEN       = "#34d399"
 TEAL        = "#2dd4bf"
-TEXT_HI     = theme.TEXT
-TEXT_MID    = theme.MUTED
-TEXT_LOW    = theme.FAINT
-FONT        = theme.FONT_FAMILY
-FONT_MONO   = theme.MONO_FAMILY
+
+_THEME_ALIASES = {
+    "BG": "BG",
+    "BG_PANEL": "PANEL",
+    "BG_RAISED": "PANEL_2",
+    "BORDER": "BORDER",
+    "ACCENT": "ACCENT",
+    "ACCENT_DIM": "ACCENT_DIM",
+    "ACCENT_GLOW": "ACCENT_GLOW",
+    "RED": "DANGER",
+    "RED_DIM": "RED_DIM",
+    "TEXT_HI": "TEXT",
+    "TEXT_MID": "MUTED",
+    "TEXT_LOW": "FAINT",
+    "FONT": "FONT_FAMILY",
+    "FONT_MONO": "MONO_FAMILY",
+}
+
+
+def __getattr__(name: str):
+    key = _THEME_ALIASES.get(name)
+    if key is not None:
+        return getattr(theme, key)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 # ── file type groupings ───────────────────────────────────

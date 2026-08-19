@@ -5,6 +5,132 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+GAME_SERVERS_ROOT = Path.home() / "Documents" / "Game Servers"
+
+_DEFAULT_SERVER_NAMES: dict[str, str] = {
+    "minecraft_java": "My Java Server",
+    "minecraft_bedrock": "My Bedrock Server",
+    "satisfactory": "My Satisfactory Server",
+    "terraria": "My Terraria Server",
+    "terraria_tmodloader": "My tModLoader Server",
+    "valheim": "My Valheim Server",
+    "palworld": "My Palworld Server",
+    "project_zomboid": "My Project Zomboid Server",
+    "rust": "My Rust Server",
+    "ark_evolved": "My ARK Server",
+    "ark_ascended": "My ARK Ascended Server",
+    "cs2": "My CS2 Server",
+    "gmod": "My GMod Server",
+    "l4d2": "My L4D2 Server",
+    "seven_days_to_die": "My 7 Days to Die Server",
+    "factorio": "My Factorio Server",
+    "enshrouded": "My Enshrouded Server",
+    "vrising": "My V Rising Server",
+    "dayz": "My DayZ Server",
+    "sons_of_the_forest": "My Sons of the Forest Server",
+    "the_forest": "My The Forest Server",
+    "core_keeper": "My Core Keeper Server",
+    "space_engineers": "My Space Engineers Server",
+    "scum": "My SCUM Server",
+    "eco": "My Eco Server",
+    "necesse": "My Necesse Server",
+    "raft": "My Raft Server",
+    "icarus": "My Icarus Server",
+    "barotrauma": "My Barotrauma Server",
+    "unturned": "My Unturned Server",
+    "empyrion": "My Empyrion Server",
+    "avorion": "My Avorion Server",
+    "squad": "My Squad Server",
+    "hell_let_loose": "My HLL Server",
+    "post_scriptum": "My Post Scriptum Server",
+    "abiotic_factor": "My Abiotic Factor Server",
+    "sunkenland": "My Sunkenland Server",
+    "aska": "My ASKA Server",
+    "insurgency_sandstorm": "My Sandstorm Server",
+    "mordhau": "My Mordhau Server",
+    "starbound": "My Starbound Server",
+    "bannerlord": "My Bannerlord Server",
+    "smalland": "My Smalland Server",
+    "humanitz": "My HumanitZ Server",
+    "once_human": "My Once Human Server",
+    "holdfast": "My Holdfast Server",
+    "pixark": "My PixARK Server",
+    "atlas": "My Atlas Server",
+    "dst": "My DST Cluster",
+    "conan_exiles": "My Conan Exiles Server",
+    "soulmask": "My Soulmask Server",
+    "steamcmd": "My SteamCMD Server",
+    "custom": "My Custom Server",
+}
+
+
+def _terraria_mode_folder_key(config: dict | None) -> str:
+    if not config:
+        return "terraria"
+    raw = str(config.get("server_mode", "vanilla")).strip().lower().replace(" ", "")
+    if raw in {"tmodloader", "tmod", "modded", "mods"}:
+        return "terraria_tmodloader"
+    return "terraria"
+
+
+def default_server_folder_for(
+    game_type: str,
+    config: dict | None = None,
+) -> tuple[str, str]:
+    """Return (folder_path, suggested_name) under Documents/Game Servers."""
+    if game_type == "terraria":
+        name = _DEFAULT_SERVER_NAMES[_terraria_mode_folder_key(config)]
+        return str(GAME_SERVERS_ROOT / name), name
+    name = _default_folder_name(game_type)
+    return str(GAME_SERVERS_ROOT / name), name
+
+
+def align_terraria_server_folder(srv: dict) -> bool:
+    """Point Terraria servers at the default folder for the current mode (separate vanilla/tModLoader folders)."""
+    if srv.get("game_type") != "terraria":
+        return False
+
+    config = srv.setdefault("config", {})
+    folder, name = default_server_folder_for("terraria", config)
+    current = Path(srv.get("server_dir", "")).resolve()
+    target = Path(folder).resolve()
+    vanilla = Path(default_server_folder_for("terraria", {"server_mode": "Vanilla"})[0]).resolve()
+    tmod = Path(default_server_folder_for("terraria", {"server_mode": "tModLoader"})[0]).resolve()
+
+    if current not in (vanilla, tmod):
+        return False
+
+    changed = False
+    if current != target:
+        target.mkdir(parents=True, exist_ok=True)
+        srv["server_dir"] = str(target)
+        changed = True
+
+    if srv.get("name") != name:
+        srv["name"] = name
+        changed = True
+    return changed
+
+
+def _default_folder_name(game_type: str) -> str:
+    if game_type in _DEFAULT_SERVER_NAMES:
+        return _DEFAULT_SERVER_NAMES[game_type]
+    try:
+        from ..adapters import get_adapter
+
+        adapter = get_adapter(game_type)
+        if adapter:
+            display = adapter.display_name.strip()
+            if display.lower().startswith("my "):
+                return display
+            if display.endswith(" Server"):
+                return f"My {display}"
+            return f"My {display} Server"
+    except ImportError:
+        pass
+    return "My Server"
+
+
 try:
     from core import paths  # type: ignore
 
@@ -32,13 +158,29 @@ def load_servers() -> list[dict]:
         try:
             data = json.loads(f.read_text(encoding="utf-8"))
             if isinstance(data, list):
-                return data
+                return _normalize_minecraft_paths(data)
         except (json.JSONDecodeError, OSError):
             pass
     migrated = _migrate_legacy_minecraft_settings()
     if migrated:
         save_servers(migrated)
     return migrated
+
+
+def _normalize_minecraft_paths(servers: list[dict]) -> list[dict]:
+    """Point Java/Bedrock servers at Documents/Game Servers instead of Minecraft Servers."""
+    changed = False
+    for srv in servers:
+        if srv.get("game_type") not in ("minecraft_java", "minecraft_bedrock"):
+            continue
+        old_dir = srv.get("server_dir", "")
+        if "Minecraft Servers" not in old_dir:
+            continue
+        srv["server_dir"] = old_dir.replace("Minecraft Servers", "Game Servers")
+        changed = True
+    if changed:
+        save_servers(servers)
+    return servers
 
 
 def save_servers(servers: list[dict]) -> None:
@@ -62,10 +204,10 @@ def _migrate_legacy_minecraft_settings() -> list[dict]:
         return []
 
     servers: list[dict] = []
-    default_java = str(Path.home() / "Documents" / "Minecraft Servers" / "My Server")
-    default_bedrock = str(Path.home() / "Documents" / "Minecraft Servers" / "My Bedrock Server")
-    java_dir = old.get("java_server_dir") or old.get("server_dir") or default_java
-    bedrock_dir = old.get("bedrock_server_dir") or default_bedrock
+    java_dir, _ = default_server_folder_for("minecraft_java")
+    bedrock_dir, _ = default_server_folder_for("minecraft_bedrock")
+    java_dir = old.get("java_server_dir") or old.get("server_dir") or java_dir
+    bedrock_dir = old.get("bedrock_server_dir") or bedrock_dir
 
     shared = {
         "min_mb": int(old.get("min_mb", 1024)),

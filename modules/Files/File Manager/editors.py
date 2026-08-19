@@ -12,10 +12,9 @@ from typing import Optional, Callable
 import customtkinter as ctk
 from tkinter import filedialog, messagebox, simpledialog
 
+from core import theme
 from .utils import (
-    BG, BG_PANEL, BG_RAISED, BORDER, ACCENT, ACCENT_DIM, ACCENT_GLOW,
-    RED, RED_DIM, GOLD, PURPLE, GREEN, TEAL,
-    TEXT_HI, TEXT_MID, TEXT_LOW, FONT, FONT_MONO,
+    GOLD, GREEN, TEAL,
     safe_read_text, human_size,
 )
 from .file_handlers import (
@@ -36,7 +35,6 @@ from .icons import (
 
 # ── extra colours shared across editors ──────────────────
 HEX_OFFSET  = "#4a5568"
-HEX_BYTE    = "#9aa4b2"
 HEX_ASCII   = "#2dd4bf"
 HEX_EDITED  = "#e6a817"
 HEX_FOUND   = GOLD
@@ -50,28 +48,28 @@ def _tbtn(parent, text, cmd=None, w=80, active=False) -> ctk.CTkButton:
     """Standard toolbar button."""
     return ctk.CTkButton(
         parent, text=text, command=cmd, width=w, height=28,
-        fg_color=ACCENT_GLOW if active else "transparent",
-        hover_color=BG_RAISED,
-        text_color=ACCENT if active else TEXT_MID,
+        fg_color=theme.ACCENT_GLOW if active else "transparent",
+        hover_color=theme.PANEL_2,
+        text_color=theme.ACCENT if active else theme.MUTED,
         border_width=1 if active else 0,
-        border_color=ACCENT if active else BORDER,
-        corner_radius=5, font=(FONT, 10),
+        border_color=theme.ACCENT if active else theme.BORDER,
+        corner_radius=5, font=(theme.FONT_FAMILY, 10),
     )
 
 
 def _sep(parent):
     """Vertical separator for toolbars."""
-    ctk.CTkFrame(parent, width=1, height=20, fg_color=BORDER).pack(
+    ctk.CTkFrame(parent, width=1, height=20, fg_color=theme.BORDER).pack(
         side="left", padx=6)
 
 
 def _toolbar_frame(parent) -> ctk.CTkFrame:
     """Returns the inner row frame of a toolbar."""
-    bar = ctk.CTkFrame(parent, fg_color=BG_PANEL,
+    bar = ctk.CTkFrame(parent, fg_color=theme.PANEL,
                        corner_radius=0, height=TOOLBAR_H)
     bar.pack(fill="x")
     bar.pack_propagate(False)
-    ctk.CTkFrame(bar, height=1, fg_color=BORDER).pack(fill="x", side="bottom")
+    ctk.CTkFrame(bar, height=1, fg_color=theme.BORDER).pack(fill="x", side="bottom")
     row = ctk.CTkFrame(bar, fg_color="transparent")
     row.pack(fill="both", expand=True, padx=8)
     return row
@@ -79,11 +77,11 @@ def _toolbar_frame(parent) -> ctk.CTkFrame:
 
 def _status_label(parent) -> ctk.CTkLabel:
     """Thin status bar at the bottom of an editor."""
-    ctk.CTkFrame(parent, height=1, fg_color=BORDER).pack(fill="x", side="bottom")
+    ctk.CTkFrame(parent, height=1, fg_color=theme.BORDER).pack(fill="x", side="bottom")
     lbl = ctk.CTkLabel(
         parent, text="", anchor="w",
-        fg_color=BG_PANEL, text_color=TEXT_LOW,
-        font=(FONT, 10), corner_radius=0
+        fg_color=theme.PANEL, text_color=theme.FAINT,
+        font=(theme.FONT_FAMILY, 10), corner_radius=0
     )
     lbl.pack(fill="x", side="bottom", ipady=4, padx=10)
     return lbl
@@ -97,7 +95,7 @@ class TextEditor(ctk.CTkFrame):
 
     def __init__(self, parent, path: str,
                  on_modified: Callable | None = None, **kw):
-        super().__init__(parent, fg_color=BG, **kw)
+        super().__init__(parent, fg_color=theme.BG, **kw)
         self.path        = Path(path)
         self.on_modified = on_modified
         self._encoding   = "utf-8"
@@ -123,19 +121,19 @@ class TextEditor(ctk.CTkFrame):
         self._ro_btn.pack(side="left", padx=1)
 
         self._enc_lbl = ctk.CTkLabel(tb, text="UTF-8",
-                                     text_color=TEXT_LOW, font=(FONT_MONO, 9),
-                                     fg_color=BG_RAISED, corner_radius=4,
+                                     text_color=theme.FAINT, font=(theme.MONO_FAMILY, 9),
+                                     fg_color=theme.PANEL_2, corner_radius=4,
                                      padx=6, pady=2)
         self._enc_lbl.pack(side="right", padx=4)
 
         # ── find bar (hidden) ─────────────────────────────
-        self._find_frame = ctk.CTkFrame(self, fg_color=BG_PANEL,
+        self._find_frame = ctk.CTkFrame(self, fg_color=theme.PANEL,
                                         corner_radius=0, border_width=0)
         self._find_var = tk.StringVar()
         self._repl_var = tk.StringVar()
 
         # ── editor body ───────────────────────────────────
-        body = tk.Frame(self, bg=BG, bd=0, highlightthickness=0)
+        body = tk.Frame(self, bg=theme.BG, bd=0, highlightthickness=0)
         body.pack(fill="both", expand=True)
 
         # line number canvas
@@ -146,26 +144,26 @@ class TextEditor(ctk.CTkFrame):
         self._ln_canvas.pack(side="left", fill="y")
 
         # thin separator
-        tk.Frame(body, width=1, bg=BORDER).pack(side="left", fill="y")
+        tk.Frame(body, width=1, bg=theme.BORDER).pack(side="left", fill="y")
 
         # scrollbars
         self._v_scrollbar = tk.Scrollbar(body, orient="vertical",
-                                         bg=BG_PANEL, troughcolor=BG,
+                                         bg=theme.PANEL, troughcolor=theme.BG,
                                          bd=0, width=10, highlightthickness=0)
         self._v_scrollbar.pack(side="right", fill="y")
         h_sb = tk.Scrollbar(body, orient="horizontal",
-                            bg=BG_PANEL, troughcolor=BG,
+                            bg=theme.PANEL, troughcolor=theme.BG,
                             bd=0, width=10, highlightthickness=0)
         h_sb.pack(side="bottom", fill="x")
 
         self._text = tk.Text(
             body,
             bg="#0d1017", fg="#c9d1d9",
-            insertbackground=ACCENT,
+            insertbackground=theme.ACCENT,
             selectbackground="#264f78",
             selectforeground="#ffffff",
             inactiveselectbackground="#1e3a52",
-            font=(FONT_MONO, 12),
+            font=(theme.MONO_FAMILY, 12),
             wrap="none", undo=True,
             yscrollcommand=self._on_yscroll,
             xscrollcommand=h_sb.set,
@@ -182,7 +180,7 @@ class TextEditor(ctk.CTkFrame):
         self._text.bind("<ButtonRelease>", lambda e: self._update_cursor())
 
         # syntax-like tag colours
-        self._text.tag_configure("found", background=GOLD, foreground=BG)
+        self._text.tag_configure("found", background=GOLD, foreground=theme.BG)
 
         self._status = _status_label(self)
 
@@ -210,7 +208,7 @@ class TextEditor(ctk.CTkFrame):
             self._ln_canvas.create_text(
                 44, y + 6, anchor="ne",
                 text=num, fill="#3d4f63",
-                font=(FONT_MONO, 11)
+                font=(theme.MONO_FAMILY, 11)
             )
             next_i = self._text.index(f"{i}+1line")
             if next_i == i:
@@ -273,8 +271,8 @@ class TextEditor(ctk.CTkFrame):
         self._wrap = not self._wrap
         self._text.configure(wrap="word" if self._wrap else "none")
         self._wrap_btn.configure(
-            text_color=ACCENT if self._wrap else TEXT_MID,
-            fg_color=ACCENT_GLOW if self._wrap else "transparent",
+            text_color=theme.ACCENT if self._wrap else theme.MUTED,
+            fg_color=theme.ACCENT_GLOW if self._wrap else "transparent",
             border_width=1 if self._wrap else 0,
         )
 
@@ -282,8 +280,8 @@ class TextEditor(ctk.CTkFrame):
         self._read_only = not self._read_only
         self._text.configure(state="disabled" if self._read_only else "normal")
         self._ro_btn.configure(
-            text_color=ACCENT if self._read_only else TEXT_MID,
-            fg_color=ACCENT_GLOW if self._read_only else "transparent",
+            text_color=theme.ACCENT if self._read_only else theme.MUTED,
+            fg_color=theme.ACCENT_GLOW if self._read_only else "transparent",
             border_width=1 if self._read_only else 0,
         )
 
@@ -316,11 +314,11 @@ class TextEditor(ctk.CTkFrame):
         row1 = ctk.CTkFrame(self._find_frame, fg_color="transparent")
         row1.pack(fill="x", padx=8, pady=(5, 2))
 
-        ctk.CTkLabel(row1, text="Find", text_color=TEXT_LOW,
-                     font=(FONT, 10, "bold"), width=52).pack(side="left")
+        ctk.CTkLabel(row1, text="Find", text_color=theme.FAINT,
+                     font=(theme.FONT_FAMILY, 10, "bold"), width=52).pack(side="left")
         fe = ctk.CTkEntry(row1, textvariable=self._find_var,
-                          fg_color=BG_RAISED, border_color=BORDER,
-                          text_color=TEXT_HI, font=(FONT, 11),
+                          fg_color=theme.PANEL_2, border_color=theme.BORDER,
+                          text_color=theme.TEXT, font=(theme.FONT_FAMILY, 11),
                           border_width=1, height=28)
         fe.pack(side="left", fill="x", expand=True, padx=(4, 4))
 
@@ -329,18 +327,18 @@ class TextEditor(ctk.CTkFrame):
         _tbtn(row1, "Prev",  lambda: self._do_find(self._find_var.get(), backward=True), w=60
               ).pack(side="left", padx=2)
         ctk.CTkButton(row1, text="✕", width=26, height=26,
-                      fg_color="transparent", hover_color=RED_DIM,
-                      text_color=TEXT_LOW, border_width=0, font=(FONT, 12),
+                      fg_color="transparent", hover_color=theme.RED_DIM,
+                      text_color=theme.FAINT, border_width=0, font=(theme.FONT_FAMILY, 12),
                       command=self._hide_find).pack(side="right", padx=4)
 
         if replace:
             row2 = ctk.CTkFrame(self._find_frame, fg_color="transparent")
             row2.pack(fill="x", padx=8, pady=(0, 5))
-            ctk.CTkLabel(row2, text="Replace", text_color=TEXT_LOW,
-                         font=(FONT, 10, "bold"), width=52).pack(side="left")
+            ctk.CTkLabel(row2, text="Replace", text_color=theme.FAINT,
+                         font=(theme.FONT_FAMILY, 10, "bold"), width=52).pack(side="left")
             ctk.CTkEntry(row2, textvariable=self._repl_var,
-                         fg_color=BG_RAISED, border_color=BORDER,
-                         text_color=TEXT_HI, font=(FONT, 11),
+                         fg_color=theme.PANEL_2, border_color=theme.BORDER,
+                         text_color=theme.TEXT, font=(theme.FONT_FAMILY, 11),
                          border_width=1, height=28).pack(
                 side="left", fill="x", expand=True, padx=(4, 4))
             _tbtn(row2, "Replace",     self._do_replace,     w=76).pack(side="left", padx=2)
@@ -408,7 +406,7 @@ class HexViewer(ctk.CTkFrame):
     ROWS = 512
 
     def __init__(self, parent, path: str, **kw):
-        super().__init__(parent, fg_color=BG, **kw)
+        super().__init__(parent, fg_color=theme.BG, **kw)
         self.path    = Path(path)
         self._offset = 0
         self._size   = self.path.stat().st_size
@@ -429,7 +427,7 @@ class HexViewer(ctk.CTkFrame):
 
         self._edit_count_lbl = ctk.CTkLabel(
             tb, text="", text_color=GOLD,
-            font=(FONT, 10), fg_color="transparent"
+            font=(theme.FONT_FAMILY, 10), fg_color="transparent"
         )
         self._edit_count_lbl.pack(side="right", padx=8)
 
@@ -438,21 +436,21 @@ class HexViewer(ctk.CTkFrame):
         body.pack(fill="both", expand=True)
 
         v_sb = tk.Scrollbar(body, orient="vertical",
-                            bg=BG_PANEL, troughcolor=BG,
+                            bg=theme.PANEL, troughcolor=theme.BG,
                             bd=0, width=10, highlightthickness=0)
         v_sb.pack(side="right", fill="y")
         h_sb = tk.Scrollbar(body, orient="horizontal",
-                            bg=BG_PANEL, troughcolor=BG,
+                            bg=theme.PANEL, troughcolor=theme.BG,
                             bd=0, width=10, highlightthickness=0)
         h_sb.pack(side="bottom", fill="x")
 
         self._text = tk.Text(
             body,
-            bg="#0a0c10", fg=HEX_BYTE,
-            insertbackground=ACCENT,
-            selectbackground=ACCENT_GLOW,
-            selectforeground=TEXT_HI,
-            font=(FONT_MONO, 11),
+            bg="#0a0c10", fg=theme.MUTED,
+            insertbackground=theme.ACCENT,
+            selectbackground=theme.ACCENT_GLOW,
+            selectforeground=theme.TEXT,
+            font=(theme.MONO_FAMILY, 11),
             wrap="none", state="disabled",
             bd=0, highlightthickness=0,
             padx=14, pady=8,
@@ -464,18 +462,18 @@ class HexViewer(ctk.CTkFrame):
         v_sb.config(command=self._text.yview)
         h_sb.config(command=self._text.xview)
 
-        self._text.tag_configure("offset", foreground=HEX_OFFSET, font=(FONT_MONO, 11, "bold"))
-        self._text.tag_configure("hex",    foreground=HEX_BYTE)
-        self._text.tag_configure("sep",    foreground=BORDER)
+        self._text.tag_configure("offset", foreground=HEX_OFFSET, font=(theme.MONO_FAMILY, 11, "bold"))
+        self._text.tag_configure("hex",    foreground=theme.MUTED)
+        self._text.tag_configure("sep",    foreground=theme.BORDER)
         self._text.tag_configure("ascii",  foreground=HEX_ASCII)
-        self._text.tag_configure("edited", foreground=HEX_EDITED, font=(FONT_MONO, 11, "bold"))
-        self._text.tag_configure("found",  background=GOLD, foreground=BG)
+        self._text.tag_configure("edited", foreground=HEX_EDITED, font=(theme.MONO_FAMILY, 11, "bold"))
+        self._text.tag_configure("found",  background=GOLD, foreground=theme.BG)
 
         # page nav
-        nav = ctk.CTkFrame(self, fg_color=BG_PANEL, corner_radius=0, height=34)
+        nav = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=0, height=34)
         nav.pack(fill="x")
         nav.pack_propagate(False)
-        ctk.CTkFrame(nav, height=1, fg_color=BORDER).pack(fill="x", side="top")
+        ctk.CTkFrame(nav, height=1, fg_color=theme.BORDER).pack(fill="x", side="top")
 
         nav_inner = ctk.CTkFrame(nav, fg_color="transparent")
         nav_inner.pack(fill="both", expand=True, padx=8)
@@ -483,7 +481,7 @@ class HexViewer(ctk.CTkFrame):
         _tbtn(nav_inner, "◀  Prev", self._prev_page, w=76).pack(side="left")
         self._page_lbl = ctk.CTkLabel(
             nav_inner, text="",
-            text_color=TEXT_LOW, font=(FONT_MONO, 9)
+            text_color=theme.FAINT, font=(theme.MONO_FAMILY, 9)
         )
         self._page_lbl.pack(side="left", padx=12)
         _tbtn(nav_inner, "Next  ▶", self._next_page, w=76).pack(side="left")
@@ -659,8 +657,8 @@ class ImageViewer(ctk.CTkFrame):
         _tbtn(tb, "Info",      self._show_meta,        w=52).pack(side="left", padx=1)
 
         self._zoom_lbl = ctk.CTkLabel(
-            tb, text="100%", text_color=TEXT_LOW,
-            font=(FONT_MONO, 10), fg_color="transparent"
+            tb, text="100%", text_color=theme.FAINT,
+            font=(theme.MONO_FAMILY, 10), fg_color="transparent"
         )
         self._zoom_lbl.pack(side="right", padx=8)
 
@@ -801,7 +799,7 @@ class ImageViewer(ctk.CTkFrame):
 class AudioPlayer(ctk.CTkFrame):
 
     def __init__(self, parent, path: str, **kw):
-        super().__init__(parent, fg_color=BG, **kw)
+        super().__init__(parent, fg_color=theme.BG, **kw)
         self.path     = Path(path)
         self._playing = False
         self._paused  = False
@@ -814,9 +812,9 @@ class AudioPlayer(ctk.CTkFrame):
         outer.place(relx=0.5, rely=0.5, anchor="center")
 
         # artwork card
-        card = ctk.CTkFrame(outer, fg_color=BG_PANEL,
+        card = ctk.CTkFrame(outer, fg_color=theme.PANEL,
                             corner_radius=16, border_width=1,
-                            border_color=BORDER, width=480)
+                            border_color=theme.BORDER, width=480)
         card.pack(ipadx=24, ipady=20)
 
         top = ctk.CTkFrame(card, fg_color="transparent")
@@ -824,8 +822,8 @@ class AudioPlayer(ctk.CTkFrame):
 
         self._art_lbl = ctk.CTkLabel(
             top, text="🎵",
-            font=(FONT, 52), text_color="#1e2d3d",
-            fg_color=BG_RAISED, corner_radius=10,
+            font=(theme.FONT_FAMILY, 52), text_color="#1e2d3d",
+            fg_color=theme.PANEL_2, corner_radius=10,
             width=110, height=110
         )
         self._art_lbl.pack(side="left")
@@ -835,21 +833,21 @@ class AudioPlayer(ctk.CTkFrame):
 
         self._title_lbl = ctk.CTkLabel(
             meta, text=self.path.stem,
-            text_color=TEXT_HI, font=(FONT, 16, "bold"),
+            text_color=theme.TEXT, font=(theme.FONT_FAMILY, 16, "bold"),
             anchor="w", justify="left", wraplength=280
         )
         self._title_lbl.pack(anchor="w")
 
         self._artist_lbl = ctk.CTkLabel(
             meta, text="",
-            text_color=TEXT_MID, font=(FONT, 12),
+            text_color=theme.MUTED, font=(theme.FONT_FAMILY, 12),
             anchor="w"
         )
         self._artist_lbl.pack(anchor="w", pady=(2, 0))
 
         self._info_lbl = ctk.CTkLabel(
             meta, text="",
-            text_color=TEXT_LOW, font=(FONT, 10),
+            text_color=theme.FAINT, font=(theme.FONT_FAMILY, 10),
             anchor="w"
         )
         self._info_lbl.pack(anchor="w", pady=(4, 0))
@@ -862,18 +860,18 @@ class AudioPlayer(ctk.CTkFrame):
         ctk.CTkSlider(
             seek_area, from_=0, to=100,
             variable=self._seek_var,
-            button_color=ACCENT, button_hover_color=ACCENT_DIM,
-            progress_color=ACCENT, fg_color=BORDER,
+            button_color=theme.ACCENT, button_hover_color=theme.ACCENT_DIM,
+            progress_color=theme.ACCENT, fg_color=theme.BORDER,
             height=4,
         ).pack(fill="x")
 
         time_row = ctk.CTkFrame(seek_area, fg_color="transparent")
         time_row.pack(fill="x", pady=(2, 0))
         self._pos_lbl = ctk.CTkLabel(time_row, text="0:00",
-                                     text_color=TEXT_LOW, font=(FONT_MONO, 9))
+                                     text_color=theme.FAINT, font=(theme.MONO_FAMILY, 9))
         self._pos_lbl.pack(side="left")
         self._dur_lbl = ctk.CTkLabel(time_row, text="0:00",
-                                     text_color=TEXT_LOW, font=(FONT_MONO, 9))
+                                     text_color=theme.FAINT, font=(theme.MONO_FAMILY, 9))
         self._dur_lbl.pack(side="right")
 
         # controls
@@ -884,12 +882,12 @@ class AudioPlayer(ctk.CTkFrame):
             return ctk.CTkButton(
                 ctrl, text=text, command=cmd,
                 width=80, height=34,
-                fg_color=ACCENT_GLOW if accent else BG_RAISED,
-                hover_color="#1a3a5c" if accent else BORDER,
-                text_color=ACCENT if accent else TEXT_MID,
+                fg_color=theme.ACCENT_GLOW if accent else theme.PANEL_2,
+                hover_color="#1a3a5c" if accent else theme.BORDER,
+                text_color=theme.ACCENT if accent else theme.MUTED,
                 border_width=1 if accent else 0,
-                border_color=ACCENT if accent else BORDER,
-                corner_radius=8, font=(FONT, 12)
+                border_color=theme.ACCENT if accent else theme.BORDER,
+                corner_radius=8, font=(theme.FONT_FAMILY, 12)
             )
 
         _ctrl_btn(f"{ICON_STOP} Stop",   self._stop).pack(side="left", padx=4)
@@ -901,13 +899,13 @@ class AudioPlayer(ctk.CTkFrame):
         vol.pack(fill="x", padx=24, pady=(0, 16))
 
         ctk.CTkLabel(vol, text=f"{ICON_VOLUME}",
-                     text_color=TEXT_LOW, font=(FONT, 13)).pack(side="left", padx=(0, 8))
+                     text_color=theme.FAINT, font=(theme.FONT_FAMILY, 13)).pack(side="left", padx=(0, 8))
         self._vol_var = ctk.DoubleVar(value=80)
         ctk.CTkSlider(
             vol, from_=0, to=100,
             variable=self._vol_var,
-            button_color=TEXT_LOW, progress_color=TEXT_LOW,
-            fg_color=BORDER, height=4,
+            button_color=theme.FAINT, progress_color=theme.FAINT,
+            fg_color=theme.BORDER, height=4,
             command=self._on_volume,
         ).pack(fill="x", expand=True)
 
@@ -917,17 +915,17 @@ class AudioPlayer(ctk.CTkFrame):
         ctk.CTkButton(
             btn_row, text="✏  Rename file",
             width=120, height=28,
-            fg_color="transparent", hover_color=BG_RAISED,
-            text_color=TEXT_LOW, border_width=0,
-            font=(FONT, 10), command=self._rename
+            fg_color="transparent", hover_color=theme.PANEL_2,
+            text_color=theme.FAINT, border_width=0,
+            font=(theme.FONT_FAMILY, 10), command=self._rename
         ).pack(side="left", padx=(0, 4))
 
         ctk.CTkButton(
             btn_row, text="🏷  Edit tags",
             width=120, height=28,
-            fg_color="transparent", hover_color=BG_RAISED,
-            text_color=TEXT_LOW, border_width=0,
-            font=(FONT, 10), command=self._edit_tags
+            fg_color="transparent", hover_color=theme.PANEL_2,
+            text_color=theme.FAINT, border_width=0,
+            font=(theme.FONT_FAMILY, 10), command=self._edit_tags
         ).pack(side="left")
 
         self._status = _status_label(self)
@@ -1050,13 +1048,13 @@ class AudioPlayer(ctk.CTkFrame):
         dialog = ctk.CTkToplevel(self)
         dialog.title("Edit Tags")
         dialog.geometry("380x560" if artwork_supported else "360x420")
-        dialog.configure(fg_color=BG_PANEL)
+        dialog.configure(fg_color=theme.PANEL)
         dialog.transient(self.winfo_toplevel())
         dialog.grab_set()  # modal — blocks interaction with the main window
 
         ctk.CTkLabel(
             dialog, text=self.path.name,
-            text_color=TEXT_LOW, font=(FONT, 10),
+            text_color=theme.FAINT, font=(theme.FONT_FAMILY, 10),
             wraplength=340, anchor="w", justify="left"
         ).pack(fill="x", padx=20, pady=(16, 8))
 
@@ -1068,8 +1066,8 @@ class AudioPlayer(ctk.CTkFrame):
             art_row.pack(fill="x", padx=20, pady=(0, 10))
 
             art_preview = ctk.CTkLabel(
-                art_row, text="🎵", font=(FONT, 30), text_color="#1e2d3d",
-                fg_color=BG_RAISED, corner_radius=8, width=72, height=72
+                art_row, text="🎵", font=(theme.FONT_FAMILY, 30), text_color="#1e2d3d",
+                fg_color=theme.PANEL_2, corner_radius=8, width=72, height=72
             )
             art_preview.pack(side="left")
 
@@ -1115,8 +1113,8 @@ class AudioPlayer(ctk.CTkFrame):
 
             ctk.CTkButton(
                 art_btns, text="Choose Image...", height=28,
-                fg_color=BG_RAISED, hover_color=BORDER, text_color=TEXT_MID,
-                font=(FONT, 10), command=_choose_image
+                fg_color=theme.PANEL_2, hover_color=theme.BORDER, text_color=theme.MUTED,
+                font=(theme.FONT_FAMILY, 10), command=_choose_image
             ).pack(anchor="w")
 
         # ── text fields ──────────────────────────────────
@@ -1129,19 +1127,19 @@ class AudioPlayer(ctk.CTkFrame):
         for field in EDITABLE_TAG_FIELDS:
             ctk.CTkLabel(
                 dialog, text=field_labels.get(field, field.capitalize()),
-                text_color=TEXT_MID, font=(FONT, 10, "bold"), anchor="w"
+                text_color=theme.MUTED, font=(theme.FONT_FAMILY, 10, "bold"), anchor="w"
             ).pack(fill="x", padx=20, pady=(6, 2))
 
             entry = ctk.CTkEntry(
-                dialog, height=32, fg_color=BG_RAISED,
-                border_width=1, border_color=BORDER, text_color=TEXT_HI,
-                font=(FONT, 11)
+                dialog, height=32, fg_color=theme.PANEL_2,
+                border_width=1, border_color=theme.BORDER, text_color=theme.TEXT,
+                font=(theme.FONT_FAMILY, 11)
             )
             entry.insert(0, current.get(field_labels.get(field, field.capitalize()), ""))
             entry.pack(fill="x", padx=20)
             entries[field] = entry
 
-        status_lbl = ctk.CTkLabel(dialog, text="", text_color=RED, font=(FONT, 10))
+        status_lbl = ctk.CTkLabel(dialog, text="", text_color=theme.DANGER, font=(theme.FONT_FAMILY, 10))
         status_lbl.pack(fill="x", padx=20, pady=(8, 0))
 
         def _do_save():
@@ -1162,14 +1160,14 @@ class AudioPlayer(ctk.CTkFrame):
 
         ctk.CTkButton(
             btn_row, text="Cancel", width=100, height=32,
-            fg_color=BG_RAISED, hover_color=BORDER, text_color=TEXT_MID,
+            fg_color=theme.PANEL_2, hover_color=theme.BORDER, text_color=theme.MUTED,
             command=dialog.destroy
         ).pack(side="left")
 
         ctk.CTkButton(
             btn_row, text="Save", width=100, height=32,
-            fg_color=ACCENT_GLOW, hover_color="#1a3a5c", text_color=ACCENT,
-            border_width=1, border_color=ACCENT,
+            fg_color=theme.ACCENT_GLOW, hover_color="#1a3a5c", text_color=theme.ACCENT,
+            border_width=1, border_color=theme.ACCENT,
             command=_do_save
         ).pack(side="right")
 
@@ -1187,7 +1185,7 @@ class AudioPlayer(ctk.CTkFrame):
 class ArchiveViewer(ctk.CTkFrame):
 
     def __init__(self, parent, path: str, **kw):
-        super().__init__(parent, fg_color=BG, **kw)
+        super().__init__(parent, fg_color=theme.BG, **kw)
         self.path     = Path(path)
         self._entries = []
         self._build()
@@ -1204,12 +1202,12 @@ class ArchiveViewer(ctk.CTkFrame):
         _tbtn(tb, "↺  Refresh",           self._load,       w=80).pack(side="left", padx=1)
 
         self._entry_count = ctk.CTkLabel(
-            tb, text="", text_color=TEXT_LOW, font=(FONT, 10)
+            tb, text="", text_color=theme.FAINT, font=(theme.FONT_FAMILY, 10)
         )
         self._entry_count.pack(side="right", padx=8)
 
         # tree frame
-        tree_frame = tk.Frame(self, bg=BG_RAISED, bd=0, highlightthickness=0)
+        tree_frame = tk.Frame(self, bg=theme.PANEL_2, bd=0, highlightthickness=0)
         tree_frame.pack(fill="both", expand=True, padx=10, pady=8)
 
         v_sb = ttk.Scrollbar(tree_frame, orient="vertical",
@@ -1263,8 +1261,8 @@ class ArchiveViewer(ctk.CTkFrame):
                 tags=("dir" if entry.is_dir else "file",),
             )
 
-        self._tree.tag_configure("dir",  foreground=ACCENT)
-        self._tree.tag_configure("file", foreground=TEXT_MID)
+        self._tree.tag_configure("dir",  foreground=theme.ACCENT)
+        self._tree.tag_configure("file", foreground=theme.MUTED)
 
         self._entry_count.configure(
             text=f"{files} file{'s' if files != 1 else ''}  ·  {dirs} folder{'s' if dirs != 1 else ''}")

@@ -19,7 +19,7 @@ from .backend import (
     remove_item,
     set_enabled,
 )
-from .style import theme as t
+from core import theme as t
 
 SOURCE_BADGE_COLORS = {
     "Registry (Current User)": t.ACCENT,

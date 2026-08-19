@@ -7,11 +7,15 @@
 import customtkinter as ctk
 import psutil
 
+from core import theme
+
 try:
-    from .style import theme, METRIC_COLORS
-except ImportError:  # pragma: no cover - fallback for standalone use/testing
-    from . import _theme as theme
-    METRIC_COLORS = theme.METRIC_COLORS
+    from .colors import metric_color
+except ImportError:  # pragma: no cover
+    from ._theme import METRIC_COLORS
+
+    def metric_color(key: str) -> str:
+        return METRIC_COLORS[key]
 
 REFRESH_MS = 1500
 
@@ -25,8 +29,8 @@ class SystemMonitorMiniWidget(ctk.CTkFrame):
         self.grid_columnconfigure(1, weight=1)
         self.grid_columnconfigure(2, weight=0)
 
-        self._cpu_bar = self._build_row(0, "CPU", METRIC_COLORS["cpu"])
-        self._ram_bar = self._build_row(1, "RAM", METRIC_COLORS["ram"])
+        self._cpu_bar = self._build_row(0, "CPU", metric_color("cpu"))
+        self._ram_bar = self._build_row(1, "RAM", metric_color("ram"))
 
         self._tick()
 
@@ -61,16 +65,10 @@ class SystemMonitorMiniWidget(ctk.CTkFrame):
         )
         pct_label.grid(row=row, column=2, sticky="e", pady=2)
 
-        # stash the label on the bar so _tick() can update both together
         bar.pct_label = pct_label
         return bar
 
     def _tick(self):
-        # Guard against the app closing / this widget being destroyed by a
-        # catalog re-render (hide, search, category switch) while a
-        # scheduled .after() callback is still pending — without this,
-        # Tkinter raises "invalid command name" trying to touch a dead
-        # widget.
         if not self.winfo_exists():
             return
 

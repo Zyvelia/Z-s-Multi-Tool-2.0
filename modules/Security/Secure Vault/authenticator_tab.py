@@ -11,18 +11,6 @@ from tkinter import messagebox
 
 from core import theme
 
-BG = theme.BG
-PANEL = theme.PANEL
-CARD = theme.PANEL_2
-ACCENT = theme.ACCENT
-TEXT = theme.TEXT
-MUTED = theme.MUTED
-ERROR = theme.ERROR
-DANGER = theme.DANGER
-DANGER_BG = theme.DANGER_BG
-DANGER_HOVER = theme.DANGER_HOVER
-SUCCESS = theme.SUCCESS
-BORDER = theme.BORDER
 
 # How long the "Removed <name> · Undo" toast stays on screen before the
 # undo option disappears (the entry itself is still recoverable from
@@ -89,16 +77,16 @@ class AuthenticatorTab(ctk.CTkFrame):
         super().destroy()
 
     # =====================================================
-    # ADD PANEL
+    # ADD theme.PANEL
     # =====================================================
 
     def _build_add_panel(self):
-        panel = ctk.CTkFrame(self, fg_color=PANEL)
+        panel = ctk.CTkFrame(self, fg_color=theme.PANEL)
         panel.grid(row=0, column=0, sticky="ew", pady=(0, 12))
         panel.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(
-            panel, text="Add authenticator code", font=("Segoe UI", 16, "bold"), text_color=TEXT
+            panel, text="Add authenticator code", font=("Segoe UI", 16, "bold"), text_color=theme.TEXT
         ).grid(row=0, column=0, columnspan=4, sticky="w", padx=15, pady=(15, 8))
 
         self.name_entry = ctk.CTkEntry(panel, placeholder_text="Account name (e.g. Discord)")
@@ -110,7 +98,7 @@ class AuthenticatorTab(ctk.CTkFrame):
         self.secret_entry.grid(row=1, column=1, columnspan=2, sticky="ew", padx=5, pady=(0, 15))
 
         ctk.CTkButton(
-            panel, text="➕ Add", width=90, fg_color=ACCENT, command=self.add_entry
+            panel, text="➕ Add", width=90, fg_color=theme.ACCENT, command=self.add_entry
         ).grid(row=1, column=3, padx=(5, 15), pady=(0, 15))
 
         ctk.CTkLabel(
@@ -119,7 +107,7 @@ class AuthenticatorTab(ctk.CTkFrame):
                  "on Discord it's under Settings → My Account → Enable Authenticator App.\n"
                  "Codes are hidden by default — click one to reveal it for a few seconds. Copying "
                  "still works without revealing.",
-            font=("Segoe UI", 11), text_color=MUTED, anchor="w", justify="left", wraplength=560,
+            font=("Segoe UI", 11), text_color=theme.MUTED, anchor="w", justify="left", wraplength=560,
         ).grid(row=2, column=0, columnspan=4, sticky="ew", padx=15, pady=(0, 15))
 
 
@@ -178,7 +166,7 @@ class AuthenticatorTab(ctk.CTkFrame):
         if not entries:
             ctk.CTkLabel(
                 self.list_frame, text="No authenticator codes yet — add one above.",
-                font=("Segoe UI", 13), text_color=MUTED
+                font=("Segoe UI", 13), text_color=theme.MUTED
             ).grid(row=0, column=0, pady=40)
             return
 
@@ -188,22 +176,22 @@ class AuthenticatorTab(ctk.CTkFrame):
         self._refresh_codes()
 
     def _build_card(self, entry, row):
-        card = ctk.CTkFrame(self.list_frame, fg_color=CARD, corner_radius=10)
+        card = ctk.CTkFrame(self.list_frame, fg_color=theme.PANEL_2, corner_radius=10)
         card.grid(row=row, column=0, sticky="ew", pady=5, padx=2)
         card.grid_columnconfigure(1, weight=1)
 
         title = entry["name"] + (f"  ·  {entry['issuer']}" if entry.get("issuer") else "")
         ctk.CTkLabel(
-            card, text=title, font=("Segoe UI", 14, "bold"), text_color=TEXT, anchor="w"
+            card, text=title, font=("Segoe UI", 14, "bold"), text_color=theme.TEXT, anchor="w"
         ).grid(row=0, column=0, columnspan=2, sticky="ew", padx=15, pady=(12, 0))
 
         code_label = ctk.CTkLabel(
-            card, text="------", font=("Consolas", 26, "bold"), text_color=ACCENT, anchor="w", cursor="hand2",
+            card, text="------", font=("Consolas", 26, "bold"), text_color=theme.ACCENT, anchor="w", cursor="hand2",
         )
         code_label.grid(row=1, column=0, sticky="w", padx=15, pady=(0, 12))
         code_label.bind("<Button-1>", lambda e, eid=entry["id"]: self._reveal_code(eid))
 
-        progress = ctk.CTkProgressBar(card, width=140, height=8, progress_color=ACCENT)
+        progress = ctk.CTkProgressBar(card, width=140, height=8, progress_color=theme.ACCENT)
         progress.set(1)
         progress.grid(row=1, column=1, sticky="e", padx=(0, 10))
 
@@ -211,12 +199,12 @@ class AuthenticatorTab(ctk.CTkFrame):
         btns.grid(row=0, column=2, rowspan=2, padx=15, pady=10)
 
         ctk.CTkButton(
-            btns, text="📋", width=34, height=30, fg_color=PANEL, hover_color=ACCENT,
+            btns, text="📋", width=34, height=30, fg_color=theme.PANEL, hover_color=theme.ACCENT,
             command=lambda e=entry: self.copy_code(e)
         ).pack(side="left", padx=(0, 6))
 
         ctk.CTkButton(
-            btns, text="✕", width=34, height=30, fg_color=PANEL, hover_color=ERROR,
+            btns, text="✕", width=34, height=30, fg_color=theme.PANEL, hover_color=theme.ERROR,
             command=lambda e=entry: self.remove_entry(e)
         ).pack(side="left")
 
@@ -249,7 +237,7 @@ class AuthenticatorTab(ctk.CTkFrame):
         deliberate click on the danger-colored button."""
         dialog = ctk.CTkToplevel(self)
         dialog.title("Remove code?")
-        dialog.configure(fg_color=PANEL)
+        dialog.configure(fg_color=theme.PANEL)
         dialog.resizable(False, False)
         dialog.transient(self.winfo_toplevel())
         dialog.grab_set()
@@ -260,7 +248,7 @@ class AuthenticatorTab(ctk.CTkFrame):
 
         ctk.CTkLabel(
             dialog, text=f"Remove \"{title}\"?", font=("Segoe UI", 15, "bold"),
-            text_color=TEXT,
+            text_color=theme.TEXT,
         ).pack(padx=20, pady=(20, 6), anchor="w")
 
         ctk.CTkLabel(
@@ -268,7 +256,7 @@ class AuthenticatorTab(ctk.CTkFrame):
             text="It'll move to Recently Deleted for 30 days, so you can bring it back if this "
                  "was a mistake. After that it's gone for good — this app can't regenerate a 2FA "
                  "secret on its own, so make sure the account has another way in first.",
-            font=("Segoe UI", 12), text_color=MUTED, justify="left", wraplength=340,
+            font=("Segoe UI", 12), text_color=theme.MUTED, justify="left", wraplength=340,
         ).pack(padx=20, pady=(0, 18), anchor="w")
 
         btns = ctk.CTkFrame(dialog, fg_color="transparent")
@@ -283,14 +271,14 @@ class AuthenticatorTab(ctk.CTkFrame):
             dialog.destroy()
 
         cancel_btn = ctk.CTkButton(
-            btns, text="Cancel", fg_color=PANEL, hover_color=theme.PANEL_HOVER,
-            text_color=TEXT, command=on_cancel,
+            btns, text="Cancel", fg_color=theme.PANEL, hover_color=theme.PANEL_HOVER,
+            text_color=theme.TEXT, command=on_cancel,
         )
         cancel_btn.pack(side="right", padx=(8, 0))
 
         ctk.CTkButton(
-            btns, text="Remove", fg_color=DANGER_BG, hover_color=DANGER_HOVER,
-            text_color=DANGER, command=on_remove,
+            btns, text="Remove", fg_color=theme.DANGER_BG, hover_color=theme.DANGER_HOVER,
+            text_color=theme.DANGER, command=on_remove,
         ).pack(side="right")
 
         dialog.bind("<Escape>", lambda e: on_cancel())
@@ -318,11 +306,11 @@ class AuthenticatorTab(ctk.CTkFrame):
         if self._toast:
             self._toast.destroy()
 
-        toast = ctk.CTkFrame(self, fg_color=CARD, corner_radius=10, border_width=1, border_color=BORDER)
+        toast = ctk.CTkFrame(self, fg_color=theme.PANEL_2, corner_radius=10, border_width=1, border_color=theme.BORDER)
         toast.place(relx=0.5, rely=1.0, anchor="s", y=-16)
 
         ctk.CTkLabel(
-            toast, text=f"Removed \"{entry['name']}\"", font=("Segoe UI", 12), text_color=TEXT,
+            toast, text=f"Removed \"{entry['name']}\"", font=("Segoe UI", 12), text_color=theme.TEXT,
         ).pack(side="left", padx=(16, 10), pady=12)
 
         def on_undo():
@@ -332,7 +320,7 @@ class AuthenticatorTab(ctk.CTkFrame):
             self._dismiss_toast()
 
         ctk.CTkButton(
-            toast, text="Undo", width=60, height=26, fg_color=ACCENT, hover_color=theme.ACCENT_HOVER,
+            toast, text="Undo", width=60, height=26, fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
             text_color="#0b0d10", font=("Segoe UI", 12, "bold"), command=on_undo,
         ).pack(side="left", padx=(0, 16), pady=12)
 
@@ -355,8 +343,8 @@ class AuthenticatorTab(ctk.CTkFrame):
         self.trash_panel.grid_columnconfigure(0, weight=1)
 
         self.trash_toggle_btn = ctk.CTkButton(
-            self.trash_panel, text="", anchor="w", fg_color="transparent", hover_color=PANEL,
-            text_color=MUTED, font=("Segoe UI", 12), command=self._toggle_trash,
+            self.trash_panel, text="", anchor="w", fg_color="transparent", hover_color=theme.PANEL,
+            text_color=theme.MUTED, font=("Segoe UI", 12), command=self._toggle_trash,
         )
         self.trash_toggle_btn.grid(row=0, column=0, sticky="ew")
 
@@ -394,26 +382,26 @@ class AuthenticatorTab(ctk.CTkFrame):
             w.destroy()
 
         for i, entry in enumerate(self.totp.get_trash()):
-            row = ctk.CTkFrame(self.trash_list, fg_color=PANEL, corner_radius=8)
+            row = ctk.CTkFrame(self.trash_list, fg_color=theme.PANEL, corner_radius=8)
             row.grid(row=i, column=0, sticky="ew", pady=3)
             row.grid_columnconfigure(0, weight=1)
 
             title = entry["name"] + (f"  ·  {entry['issuer']}" if entry.get("issuer") else "")
             ctk.CTkLabel(
-                row, text=title, font=("Segoe UI", 12), text_color=MUTED, anchor="w",
+                row, text=title, font=("Segoe UI", 12), text_color=theme.MUTED, anchor="w",
             ).grid(row=0, column=0, sticky="ew", padx=12, pady=8)
 
             btns = ctk.CTkFrame(row, fg_color="transparent")
             btns.grid(row=0, column=1, padx=8, pady=6)
 
             ctk.CTkButton(
-                btns, text="Restore", width=70, height=26, fg_color=PANEL, hover_color=SUCCESS,
-                text_color=TEXT, font=("Segoe UI", 11), command=lambda e=entry: self._restore_from_trash(e),
+                btns, text="Restore", width=70, height=26, fg_color=theme.PANEL, hover_color=theme.SUCCESS,
+                text_color=theme.TEXT, font=("Segoe UI", 11), command=lambda e=entry: self._restore_from_trash(e),
             ).pack(side="left", padx=(0, 6))
 
             ctk.CTkButton(
-                btns, text="Delete forever", width=110, height=26, fg_color=PANEL, hover_color=DANGER_HOVER,
-                text_color=DANGER, font=("Segoe UI", 11), command=lambda e=entry: self._purge_from_trash(e),
+                btns, text="Delete forever", width=110, height=26, fg_color=theme.PANEL, hover_color=theme.DANGER_HOVER,
+                text_color=theme.DANGER, font=("Segoe UI", 11), command=lambda e=entry: self._purge_from_trash(e),
             ).pack(side="left")
 
     def _restore_from_trash(self, entry):

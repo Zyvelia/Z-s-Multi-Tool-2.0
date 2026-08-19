@@ -1,36 +1,12 @@
 # music_player/auto_index.py
 #
-# Keeps the library index automatically in sync with the music folder,
-# so new/changed/removed files show up without the user ever having to
-# click "Rescan Now". Two mechanisms work together:
+# Keeps the library index in sync with the music folder.
 #
-#   1. Live filesystem watching (via the optional `watchdog` package).
-#      When a file is created/modified/deleted/moved under the watched
-#      folder, its path is queued and — after a short debounce, so a
-#      big drag-and-drop of an album doesn't cause a flood of work —
-#      indexed directly via Library.index_paths()/remove_paths(). No
-#      directory walk needed, so this stays cheap even on a
-#      750,000+ file network share.
-#
-#      Cue sheets (album.ape + album.cue) get the same live treatment:
-#      a changed .cue is re-expanded into its per-track rows via
-#      Library.index_cue_sheet(), and a newly-arrived audio file is
-#      checked against any sibling .cue that already claims it before
-#      falling back to indexing it as one whole-file track.
-#
-#   2. A periodic incremental safety-net scan (Library.scan(), which is
-#      itself cheap for unchanged files). This catches anything the
-#      watcher misses — which happens more than you'd like on network
-#      shares/SMB mounts, drives that get disconnected and reconnected,
-#      etc. — and is the *only* mechanism used if `watchdog` isn't
-#      installed at all.
-#
-# Everything here runs on a single background thread (started in
-# start(), stopped in stop()) plus, if available, watchdog's own
-# observer thread. Only one sqlite connection ends up being opened for
-# this module's work, since sqlite3 connections in db.py are cached
-# per-thread and we deliberately avoid spinning up a new thread per
-# event (e.g. threading.Timer would do exactly that).
+#   1. Live filesystem watching (watchdog) — indexes only changed paths.
+#   2. Periodic quick_scan() — walks the tree but skips unchanged
+#      directories via the dir_index cache in db_index.py.
+
+from __future__ import annotations
 
 import os
 import threading
@@ -49,8 +25,10 @@ except ImportError:
     HAS_WATCHDOG = False
 
 
-DEBOUNCE_SECONDS = 3.0                 # let a burst of changes settle
-DEFAULT_SAFETY_SCAN_SECONDS = 15 * 60  # fallback full incremental rescan
+DEBOUNCE_SECONDS = 2.0
+DEFAULT_SAFETY_SCAN_SECONDS = 20 * 60
+WATCHDOG_SAFETY_SCAN_SECONDS = 90 * 60
+SCAN_WORKERS = 6
 
 
 class _Handler(FileSystemEventHandler):
@@ -64,7 +42,7 @@ class _Handler(FileSystemEventHandler):
     @staticmethod
     def _is_relevant(path):
         low = path.lower()
-        return low.endswith(musicdb.AUDIO_EXTS) or low.endswith(musicdb.CUE_EXTS)
+        return low.endswith(musicdb.LIBRARY_EXTS) or low.endswith(musicdb.CUE_EXTS)
 
     def on_created(self, event):
         if not event.is_directory and self._is_relevant(event.src_path):
@@ -91,15 +69,8 @@ class AutoIndexer:
     """
     Keeps `library` automatically in sync with a folder.
 
-    Usage:
-        indexer = AutoIndexer(library)
-        indexer.start(folder, status_cb=lambda text: ...)
-        ...
-        indexer.stop()
-
-    status_cb(text) is called from a background thread whenever the
-    human-readable status changes — hop to the GUI thread yourself
-    (e.g. via widget.after(...)) before touching widgets with it.
+    status_cb(text) is invoked from a background thread.
+    scan_busy_cb() should return True while a manual/full scan is running.
     """
 
     def __init__(self, library, safety_scan_seconds=DEFAULT_SAFETY_SCAN_SECONDS):
@@ -107,47 +78,56 @@ class AutoIndexer:
         self.safety_scan_seconds = safety_scan_seconds
         self.folder = None
         self.status_cb = None
+        self.scan_busy_cb = None
         self.using_watchdog = False
+        self._library_fresh = False
 
         self._observer = None
         self._worker_thread = None
         self._stop_event = threading.Event()
 
         self._pending_lock = threading.Lock()
-        self._pending_changed = set()
-        self._pending_removed = set()
+        self._pending_changed: set[str] = set()
+        self._pending_removed: set[str] = set()
         self._last_event_time = None
+
+        # Per-directory cue lookup cache — avoids re-parsing .cue on every file event.
+        self._cue_dir_cache: dict[str, dict[str, str]] = {}
 
     @property
     def running(self):
         return self._worker_thread is not None and self._worker_thread.is_alive()
 
-    # ── lifecycle ────────────────────────────────────────────────
-
-    def start(self, folder, status_cb=None):
+    def start(self, folder, status_cb=None, scan_busy_cb=None, library_fresh=False):
         self.stop()
         if not folder:
             return
-        self.folder = folder
+        self.folder = os.path.normcase(os.path.normpath(folder)) if folder else None
         self.status_cb = status_cb
+        self.scan_busy_cb = scan_busy_cb
+        self._library_fresh = library_fresh
         self._stop_event.clear()
         self._pending_changed.clear()
         self._pending_removed.clear()
         self._last_event_time = None
+        self._cue_dir_cache.clear()
 
         self.using_watchdog = False
-        if HAS_WATCHDOG and os.path.isdir(folder):
+        if HAS_WATCHDOG and os.path.isdir(self.folder):
             try:
                 handler = _Handler(self._queue_changed, self._queue_removed)
                 self._observer = Observer()
-                self._observer.schedule(handler, folder, recursive=True)
+                self._observer.schedule(handler, self.folder, recursive=True)
                 self._observer.start()
                 self.using_watchdog = True
             except Exception:
-                # Some network filesystems / mounts don't support native
-                # change notifications — fall back to periodic scanning.
                 self._observer = None
                 self.using_watchdog = False
+
+        self.safety_scan_seconds = (
+            WATCHDOG_SAFETY_SCAN_SECONDS if self.using_watchdog
+            else DEFAULT_SAFETY_SCAN_SECONDS
+        )
 
         self._set_status(
             "Watching for changes…" if self.using_watchdog
@@ -169,28 +149,37 @@ class AutoIndexer:
             self._worker_thread.join(timeout=2)
             self._worker_thread = None
 
-    # ── live events (called from the watchdog observer thread) ────
-
     def _queue_changed(self, path):
+        from .db import normalize_path
+        path = normalize_path(path)
         with self._pending_lock:
             self._pending_changed.add(path)
             self._pending_removed.discard(path)
             self._last_event_time = time.monotonic()
 
     def _queue_removed(self, path):
+        from .db import normalize_path
+        path = normalize_path(path)
         with self._pending_lock:
             self._pending_removed.add(path)
             self._pending_changed.discard(path)
             self._last_event_time = time.monotonic()
 
-    # ── single background worker: debounce flush + safety scan ────
-
     def _worker_loop(self):
-        last_safety = time.monotonic()
-        # Stagger the first safety scan a bit so it doesn't collide
-        # with a manual/startup scan already in flight.
-        if self._stop_event.wait(5):
+        if self.using_watchdog:
+            # Watch-only — file events drive indexing; no folder walks on start.
+            while not self._stop_event.is_set():
+                if self._debounce_due():
+                    self._flush_pending()
+                if self._stop_event.wait(0.5):
+                    return
             return
+
+        # No watchdog: periodic quick_scan as a fallback.
+        initial_wait = 30 * 60 if self._library_fresh else 10
+        if self._stop_event.wait(initial_wait):
+            return
+        last_safety = time.monotonic()
         while not self._stop_event.is_set():
             if self._debounce_due():
                 self._flush_pending()
@@ -206,22 +195,18 @@ class AutoIndexer:
         with self._pending_lock:
             if not self._pending_changed and not self._pending_removed:
                 return False
-            return (time.monotonic() - self._last_event_time) >= DEBOUNCE_SECONDS
+            return (time.monotonic() - (self._last_event_time or 0)) >= DEBOUNCE_SECONDS
 
-    def _sibling_cue_claiming(self, audio_path):
-        """
-        If a .cue sheet already sitting next to `audio_path` references
-        it, return that cue sheet's path. Used when a *new* audio file
-        shows up after its .cue sheet was already there (so no event
-        fires for the cue itself) — otherwise the file would get indexed
-        as one whole-file track instead of being split by the cue.
-        """
-        dirpath = os.path.dirname(audio_path)
-        basename_lower = os.path.basename(audio_path).lower()
+    def _cue_map_for_dir(self, dirpath: str) -> dict[str, str]:
+        cached = self._cue_dir_cache.get(dirpath)
+        if cached is not None:
+            return cached
+        mapping: dict[str, str] = {}
         try:
             entries = os.listdir(dirpath)
         except OSError:
-            return None
+            self._cue_dir_cache[dirpath] = mapping
+            return mapping
         for fn in entries:
             if not fn.lower().endswith(musicdb.CUE_EXTS):
                 continue
@@ -230,9 +215,20 @@ class AutoIndexer:
                 tracks = cuesheet.parse_cue(candidate)
             except Exception:
                 continue
-            if any(os.path.basename(t["file"]).lower() == basename_lower for t in tracks):
-                return candidate
-        return None
+            for t in tracks:
+                base = os.path.basename(t["file"]).lower()
+                mapping[base] = candidate
+        self._cue_dir_cache[dirpath] = mapping
+        return mapping
+
+    def _invalidate_cue_cache(self, paths):
+        for p in paths:
+            self._cue_dir_cache.pop(os.path.dirname(os.path.abspath(p)), None)
+
+    def _sibling_cue_claiming(self, audio_path: str) -> str | None:
+        dirpath = os.path.dirname(os.path.abspath(audio_path))
+        base = os.path.basename(audio_path).lower()
+        return self._cue_map_for_dir(dirpath).get(base)
 
     def _flush_pending(self):
         with self._pending_lock:
@@ -243,26 +239,27 @@ class AutoIndexer:
         if not changed and not removed:
             return
 
+        touched = changed + removed
+        self.library.invalidate_dirs_for_paths(touched)
+        self._invalidate_cue_cache(touched)
+
         cue_changed = [p for p in changed if p.lower().endswith(musicdb.CUE_EXTS)]
-        audio_changed = [p for p in changed if not p.lower().endswith(musicdb.CUE_EXTS)]
+        audio_changed = [
+            p for p in changed
+            if musicdb.is_media_path(p) and not p.lower().endswith(musicdb.CUE_EXTS)
+        ]
 
         try:
             if removed:
                 self.library.remove_paths(removed)
 
-            # Cue sheets that were created/edited: (re-)expand into
-            # per-track rows, and drop any stale whole-file row for the
-            # audio they now claim.
-            claimed_this_round = set()
+            claimed_this_round: set[str] = set()
             for cue_path in cue_changed:
                 _indexed, claimed_audio_paths = self.library.index_cue_sheet(cue_path)
                 if claimed_audio_paths:
                     self.library.remove_paths(list(claimed_audio_paths))
                 claimed_this_round.update(os.path.normcase(p) for p in claimed_audio_paths)
 
-            # Audio files that were created/changed: if a sibling .cue
-            # already claims this file, expand via the cue instead of
-            # adding a plain whole-file row.
             plain_audio = []
             for path in audio_changed:
                 if os.path.normcase(path) in claimed_this_round:
@@ -286,9 +283,18 @@ class AutoIndexer:
     def _run_safety_scan(self):
         if not self.folder:
             return
+        if self.scan_busy_cb:
+            try:
+                if self.scan_busy_cb():
+                    return
+            except Exception:
+                pass
         try:
-            self.library.scan(self.folder, workers=3, stop_event=self._stop_event)
+            self.library.quick_scan(
+                self.folder, workers=SCAN_WORKERS, stop_event=self._stop_event)
             if not self._stop_event.is_set():
+                self.library.set_setting("music_last_scan_folder", self.folder)
+                self.library.set_setting("music_last_scan_at", str(time.time()))
                 self._set_status(f"Up to date — {self.library.count():,} songs in library")
         except Exception:
             pass

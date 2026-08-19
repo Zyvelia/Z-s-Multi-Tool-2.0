@@ -220,6 +220,24 @@ class Theme:
 
 _default = Theme()
 
+# Snapshot of factory defaults — used to reset shared theme when leaving
+# a module that temporarily applied its own palette to core.theme.
+_BASELINE = Theme()
+
+
+def apply_theme_tokens(source: Theme) -> None:
+    """Copy every token from `source` onto the shared module API."""
+    g = globals()
+    for name in _TOKEN_NAMES:
+        value = getattr(source, name)
+        g[name] = value
+        setattr(_default, name, value)
+
+
+def restore_default_theme() -> None:
+    """Restore core.theme to the app-wide baseline palette."""
+    apply_theme_tokens(_BASELINE)
+
 
 def font(size: int, weight: str = "normal") -> ctk.CTkFont:
     return _default.font(size, weight)
@@ -251,6 +269,27 @@ def apply_appearance():
 
 def hash_color(key: str) -> str:
     return _default.hash_color(key)
+
+
+def secondary_button_kwargs(**overrides) -> dict:
+    kw = secondary_button_style()
+    kw.setdefault("height", 34)
+    kw.update(overrides)
+    return kw
+
+
+def primary_button_kwargs(**overrides) -> dict:
+    kw = primary_button_style()
+    kw.setdefault("height", 34)
+    kw.update(overrides)
+    return kw
+
+
+def danger_button_kwargs(**overrides) -> dict:
+    kw = danger_button_style()
+    kw.setdefault("height", 34)
+    kw.update(overrides)
+    return kw
 
 
 def make_module_theme(**overrides) -> Theme:

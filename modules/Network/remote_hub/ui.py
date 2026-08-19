@@ -22,6 +22,7 @@
 # servers running (they're harmless; 127.0.0.1 only) so "Go Live" again
 # is instant, but nothing is reachable from your tailnet until you do.
 
+import importlib
 import json
 import os
 import threading
@@ -32,18 +33,6 @@ from tkinter import messagebox
 from core import theme
 from core.services import hub_service
 from core.services.tailscale_service import APP_HTTPS_PORTS
-
-BG = theme.BG
-PANEL = theme.PANEL
-CARD = theme.PANEL_2
-ACCENT = theme.ACCENT
-ACCENT_HOVER = theme.ACCENT_HOVER
-TEXT = theme.TEXT
-MUTED = theme.MUTED
-SUCCESS = theme.SUCCESS
-DANGER = theme.DANGER
-DANGER_BG = theme.DANGER_BG
-DANGER_HOVER = theme.DANGER_HOVER
 
 STATUS_POLL_MS = 4000
 
@@ -88,9 +77,13 @@ class HubController:
         existing = getattr(self.manager, "music_web_server", None)
         if existing:
             return existing
-        from modules.media_player import db as music_db
-        from modules.media_player.web_server import MusicWebServer
-        server = MusicWebServer(library=music_db.Library())
+        # Music Player now lives at modules/Media/Media Player/ — the space
+        # in the folder name means it can't be written as a normal
+        # `from modules.x import y` statement, so we go through
+        # importlib with the dotted path as a plain string instead.
+        music_db = importlib.import_module("modules.Media.Media Player.db")
+        web_server_mod = importlib.import_module("modules.Media.Media Player.web_server")
+        server = web_server_mod.MusicWebServer(library=music_db.Library())
         self.manager.music_web_server = server
         return server
 
@@ -98,8 +91,11 @@ class HubController:
         existing = getattr(self.manager, "yt_web_server", None)
         if existing:
             return existing
-        from modules.yt_downloader import ui as yt_ui
-        from modules.yt_downloader.web_server import YTWebServer
+        # Now at modules/Media/YouTube Downloader/ — same importlib
+        # workaround as Music Player above.
+        yt_ui = importlib.import_module("modules.Media.YouTube Downloader.ui")
+        yt_web_server_mod = importlib.import_module("modules.Media.YouTube Downloader.web_server")
+        YTWebServer = yt_web_server_mod.YTWebServer
         settings = {}
         try:
             if os.path.exists(yt_ui.SETTINGS_FILE):
@@ -124,8 +120,9 @@ class HubController:
         existing = getattr(self.manager, "notes_web_server", None)
         if existing:
             return existing
-        from modules.notes.web_server import NotesWebServer
-        server = NotesWebServer()
+        # Now at modules/Productivity/Notes/
+        web_server_mod = importlib.import_module("modules.Productivity.Notes.web_server")
+        server = web_server_mod.NotesWebServer()
         self.manager.notes_web_server = server
         return server
 
@@ -133,8 +130,10 @@ class HubController:
         existing = getattr(self.manager, "quick_send_web_server", None)
         if existing:
             return existing
-        from modules.quick_send.web_server import QuickSendWebServer
-        server = QuickSendWebServer()
+        # Now at modules/Network/quick_send/ (gained the Network category
+        # prefix, but the folder itself is unchanged)
+        web_server_mod = importlib.import_module("modules.Network.quick_send.web_server")
+        server = web_server_mod.QuickSendWebServer()
         self.manager.quick_send_web_server = server
         return server
 
@@ -146,8 +145,9 @@ class HubController:
         existing = getattr(self.manager, "gaming_hub_web_server", None)
         if existing:
             return existing
-        from modules.gaming_hub.web_server import GamingHubWebServer
-        server = GamingHubWebServer()
+        # Now at modules/Gaming/Gaming Hub/
+        web_server_mod = importlib.import_module("modules.Gaming.Gaming Hub.web_server")
+        server = web_server_mod.GamingHubWebServer()
         self.manager.gaming_hub_web_server = server
         return server
 
@@ -158,17 +158,19 @@ class HubController:
         existing = getattr(self.manager, "soundboard_web_server", None)
         if existing:
             return existing
-        from modules.soundboard.web_server import SoundboardWebServer
-        server = SoundboardWebServer()
+        # Now at modules/Media/soundboard/ (gained the Media category
+        # prefix, but the folder itself is unchanged)
+        web_server_mod = importlib.import_module("modules.Media.soundboard.web_server")
+        server = web_server_mod.SoundboardWebServer()
         self.manager.soundboard_web_server = server
         return server
 
     def _ports(self):
         vault_cfg = self.tailscale.load_config()
-        from modules.media_player import db as music_db
+        music_db = importlib.import_module("modules.Media.Media Player.db")
         music_port = int(music_db.Library().get_setting("remote_port", "8766") or 8766)
 
-        from modules.yt_downloader import ui as yt_ui
+        yt_ui = importlib.import_module("modules.Media.YouTube Downloader.ui")
         yt_settings = {}
         try:
             if os.path.exists(yt_ui.SETTINGS_FILE):
@@ -322,7 +324,7 @@ class HubController:
 class RemoteHubPage(ctk.CTkFrame):
 
     def __init__(self, parent, manager):
-        super().__init__(parent, fg_color=BG)
+        super().__init__(parent, fg_color=theme.BG)
         self.manager = manager
         self.tailscale = manager.container.tailscale_service
         self.controller = HubController(manager)
@@ -353,22 +355,26 @@ class RemoteHubPage(ctk.CTkFrame):
 
     def _build_header(self, parent):
         ctk.CTkLabel(
-            parent, text="📡 Remote Hub", font=("Segoe UI", 22, "bold"), text_color=TEXT
+            parent, text="📡 Remote Hub",
+            font=theme.font(22, "bold"), text_color=theme.TEXT,
         ).pack(anchor="w", pady=(0, 4))
         ctk.CTkLabel(
             parent,
             text="One address for your phone that links to whichever of your apps are live, "
                  "instead of remembering three. Reachable only from devices on your own "
                  "Tailscale network.",
-            font=("Segoe UI", 12), text_color=MUTED, anchor="w", justify="left", wraplength=760,
+            font=theme.font(12), text_color=theme.MUTED, anchor="w", justify="left", wraplength=760,
         ).pack(anchor="w", pady=(0, 16))
 
     def _build_go_live_panel(self, parent):
-        panel = ctk.CTkFrame(parent, fg_color=PANEL, corner_radius=10)
+        panel = ctk.CTkFrame(
+            parent, fg_color=theme.PANEL, corner_radius=theme.RADIUS,
+            border_width=1, border_color=theme.BORDER,
+        )
         panel.pack(fill="x", pady=(0, 12))
 
         self.hub_status_label = ctk.CTkLabel(
-            panel, text="Checking…", font=("Segoe UI", 14), text_color=MUTED,
+            panel, text="Checking…", font=theme.font(14), text_color=theme.MUTED,
             anchor="w", justify="left", wraplength=700,
         )
         self.hub_status_label.pack(fill="x", padx=16, pady=(16, 10))
@@ -377,41 +383,53 @@ class RemoteHubPage(ctk.CTkFrame):
         row.pack(fill="x", padx=16, pady=(0, 16))
 
         self.go_live_btn = ctk.CTkButton(
-            row, text="🟢 Go Live", fg_color=SUCCESS, hover_color="#33b57d",
-            text_color="#0b0d10", height=42, font=("Segoe UI", 14, "bold"),
+            row, text="🟢 Go Live",
+            fg_color=theme.SUCCESS, hover_color=theme.ACCENT_HOVER,
+            text_color="#0b0d10", height=42, font=theme.font(14, "bold"),
+            corner_radius=theme.RADIUS_SM,
             command=self._on_go_live,
         )
         self.go_live_btn.pack(side="left", fill="x", expand=True, padx=(0, 6))
 
         self.go_offline_btn = ctk.CTkButton(
-            row, text="⚪ Go Offline", fg_color=DANGER_BG, hover_color=DANGER_HOVER,
-            text_color=DANGER, height=42, font=("Segoe UI", 14, "bold"),
+            row, text="⚪ Go Offline",
+            fg_color=theme.DANGER_BG, hover_color=theme.DANGER_HOVER,
+            text_color=theme.DANGER, height=42, font=theme.font(14, "bold"),
+            corner_radius=theme.RADIUS_SM,
             command=self._on_go_offline,
         )
         self.go_offline_btn.pack(side="left", fill="x", expand=True, padx=(6, 0))
 
     def _build_status_panel(self, parent):
-        panel = ctk.CTkFrame(parent, fg_color=PANEL, corner_radius=10)
+        panel = ctk.CTkFrame(
+            parent, fg_color=theme.PANEL, corner_radius=theme.RADIUS,
+            border_width=1, border_color=theme.BORDER,
+        )
         panel.pack(fill="x")
 
         ctk.CTkLabel(
-            panel, text="Per-app status", font=("Segoe UI", 14, "bold"), text_color=TEXT
+            panel, text="Per-app status",
+            font=theme.font(14, "bold"), text_color=theme.TEXT,
         ).pack(anchor="w", padx=16, pady=(14, 6))
 
         self._app_labels = {}
         for key, label in APPS:
             row = ctk.CTkFrame(panel, fg_color="transparent")
             row.pack(fill="x", padx=16, pady=4)
-            ctk.CTkLabel(row, text=label, font=("Segoe UI", 13), text_color=TEXT).pack(side="left")
-            lbl = ctk.CTkLabel(row, text="⚪ Off", font=("Segoe UI", 13), text_color=MUTED)
+            ctk.CTkLabel(
+                row, text=label, font=theme.font(13), text_color=theme.TEXT,
+            ).pack(side="left")
+            lbl = ctk.CTkLabel(
+                row, text="⚪ Off", font=theme.font(13), text_color=theme.MUTED,
+            )
             lbl.pack(side="right")
             self._app_labels[key] = lbl
 
         ctk.CTkLabel(
             panel,
             text="Fine-grained on/off for a single app still lives in that app's own "
-                 "Settings tab — this page is for the phone-facing address as a whole.",
-            font=("Segoe UI", 11), text_color=MUTED, anchor="w", justify="left", wraplength=700,
+                 "⚙ settings — this page is for the phone-facing address as a whole.",
+            font=theme.font(11), text_color=theme.MUTED, anchor="w", justify="left", wraplength=700,
         ).pack(fill="x", padx=16, pady=(10, 14))
 
     # =====================================================
@@ -485,30 +503,30 @@ class RemoteHubPage(ctk.CTkFrame):
             if lbl:
                 lbl.configure(
                     text="🟢 Live" if live else "⚪ Off",
-                    text_color=SUCCESS if live else MUTED,
+                    text_color=theme.SUCCESS if live else theme.MUTED,
                 )
 
         if not status["installed"]:
             self.hub_status_label.configure(
                 text="Tailscale isn't installed on this device — install it first "
-                     "(any app's Settings tab has a shortcut).",
-                text_color=MUTED,
+                     "(any app's ⚙ settings has a shortcut).",
+                text_color=theme.MUTED,
             )
         elif not status["running"]:
             self.hub_status_label.configure(
                 text="⚪ Not connected to your tailnet yet. Tap Go Live to connect and "
                      "bring everything up in one step.",
-                text_color=MUTED,
+                text_color=theme.MUTED,
             )
         elif any(live_apps.values()):
             hostname = status.get("hostname") or "this-device"
             self.hub_status_label.configure(
                 text=f"🟢 Live — open https://{hostname}/ on your phone (signed into the "
                      f"same tailnet) to pick an app.",
-                text_color=SUCCESS,
+                text_color=theme.SUCCESS,
             )
         else:
             self.hub_status_label.configure(
                 text="⚪ Connected to Tailscale, but nothing is live yet. Tap Go Live.",
-                text_color=MUTED,
+                text_color=theme.MUTED,
             )

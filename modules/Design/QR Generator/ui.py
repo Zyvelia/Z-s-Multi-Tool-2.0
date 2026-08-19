@@ -15,6 +15,7 @@ from tkinter import filedialog
 import customtkinter as ctk
 from PIL import Image
 
+from core import theme
 from .qr_builder import (
     DEFAULT_ERROR_CORRECTION,
     ERROR_CORRECTION_LEVELS,
@@ -28,12 +29,6 @@ from .qr_builder import (
     generate_image,
 )
 
-BG = "#0f1115"
-PANEL = "#151922"
-PANEL_2 = "#1b2030"
-ACCENT = "#4ea1ff"
-DANGER = "#ff5c5c"
-MUTED = "#7d8494"
 
 PREVIEW_SIZE = 320
 REGENERATE_DELAY_MS = 300
@@ -42,7 +37,7 @@ REGENERATE_DELAY_MS = 300
 class QRGeneratorModule(ctk.CTkFrame):
 
     def __init__(self, master, manager=None, **kwargs):
-        super().__init__(master, fg_color=BG, **kwargs)
+        super().__init__(master, fg_color=theme.BG, **kwargs)
         self.manager = manager
         self.root_widget = manager.container if manager is not None else master
 
@@ -69,18 +64,18 @@ class QRGeneratorModule(ctk.CTkFrame):
         header.grid(row=0, column=0, columnspan=2, sticky="w", padx=16, pady=(16, 4))
 
         # ---- left: controls ----
-        left = ctk.CTkScrollableFrame(self, fg_color=PANEL, corner_radius=10)
+        left = ctk.CTkScrollableFrame(self, fg_color=theme.PANEL, corner_radius=10)
         left.grid(row=1, column=0, sticky="nsew", padx=(16, 8), pady=(0, 16))
         left.grid_columnconfigure(0, weight=1)
         self._left = left
 
-        ctk.CTkLabel(left, text="Type", text_color=MUTED).grid(
+        ctk.CTkLabel(left, text="Type", text_color=theme.MUTED).grid(
             row=0, column=0, sticky="w", padx=12, pady=(12, 2)
         )
         self.type_var = ctk.StringVar(value=QR_TYPES[0])
         ctk.CTkOptionMenu(
             left, values=QR_TYPES, variable=self.type_var,
-            fg_color=PANEL_2, button_color=ACCENT, button_hover_color=ACCENT,
+            fg_color=theme.PANEL_2, button_color=theme.ACCENT, button_hover_color=theme.ACCENT,
             command=lambda _v: self._rebuild_type_fields(),
         ).grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 12))
 
@@ -91,13 +86,13 @@ class QRGeneratorModule(ctk.CTkFrame):
         self._field_widgets_frame.grid_columnconfigure(0, weight=1)
 
         # ---- options ----
-        ctk.CTkLabel(left, text="Error Correction", text_color=MUTED).grid(
+        ctk.CTkLabel(left, text="Error Correction", text_color=theme.MUTED).grid(
             row=3, column=0, sticky="w", padx=12, pady=(16, 2)
         )
         self.ec_var = ctk.StringVar(value=DEFAULT_ERROR_CORRECTION)
         ctk.CTkOptionMenu(
             left, values=list(ERROR_CORRECTION_LEVELS.keys()), variable=self.ec_var,
-            fg_color=PANEL_2, button_color=ACCENT, button_hover_color=ACCENT,
+            fg_color=theme.PANEL_2, button_color=theme.ACCENT, button_hover_color=theme.ACCENT,
             command=lambda _v: self._schedule_regenerate(),
         ).grid(row=4, column=0, sticky="ew", padx=12, pady=(0, 12))
 
@@ -107,23 +102,23 @@ class QRGeneratorModule(ctk.CTkFrame):
 
         fg_col = ctk.CTkFrame(color_row, fg_color="transparent")
         fg_col.grid(row=0, column=0, sticky="w")
-        ctk.CTkLabel(fg_col, text="Foreground", text_color=MUTED).pack(anchor="w")
+        ctk.CTkLabel(fg_col, text="Foreground", text_color=theme.MUTED).pack(anchor="w")
         self.fg_var = ctk.StringVar(value="#000000")
-        ctk.CTkEntry(fg_col, textvariable=self.fg_var, width=90, fg_color=PANEL_2).pack(anchor="w", pady=(2, 0))
+        ctk.CTkEntry(fg_col, textvariable=self.fg_var, width=90, fg_color=theme.PANEL_2).pack(anchor="w", pady=(2, 0))
         self.fg_var.trace_add("write", lambda *_: self._schedule_regenerate())
 
         bg_col = ctk.CTkFrame(color_row, fg_color="transparent")
         bg_col.grid(row=0, column=1, sticky="w")
-        ctk.CTkLabel(bg_col, text="Background", text_color=MUTED).pack(anchor="w")
+        ctk.CTkLabel(bg_col, text="Background", text_color=theme.MUTED).pack(anchor="w")
         self.bg_var = ctk.StringVar(value="#ffffff")
-        ctk.CTkEntry(bg_col, textvariable=self.bg_var, width=90, fg_color=PANEL_2).pack(anchor="w", pady=(2, 0))
+        ctk.CTkEntry(bg_col, textvariable=self.bg_var, width=90, fg_color=theme.PANEL_2).pack(anchor="w", pady=(2, 0))
         self.bg_var.trace_add("write", lambda *_: self._schedule_regenerate())
 
-        self.error_label = ctk.CTkLabel(left, text="", text_color=DANGER, wraplength=300, justify="left")
+        self.error_label = ctk.CTkLabel(left, text="", text_color=theme.DANGER, wraplength=300, justify="left")
         self.error_label.grid(row=6, column=0, sticky="ew", padx=12, pady=(0, 8))
 
         # ---- right: preview ----
-        right = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
+        right = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=10)
         right.grid(row=1, column=1, sticky="nsew", padx=(8, 16), pady=(0, 16))
         right.grid_columnconfigure(0, weight=1)
         right.grid_rowconfigure(0, weight=1)
@@ -136,15 +131,15 @@ class QRGeneratorModule(ctk.CTkFrame):
 
         ctk.CTkButton(
             btn_row, text="Save as PNG…", width=140,
-            fg_color=ACCENT, hover_color="#3d8fe0", command=self._save_png,
+            fg_color=theme.ACCENT, hover_color="#3d8fe0", command=self._save_png,
         ).pack(side="left", padx=6)
 
         ctk.CTkButton(
             btn_row, text="Copy Encoded Text", width=160,
-            fg_color=PANEL_2, hover_color=ACCENT, command=self._copy_payload,
+            fg_color=theme.PANEL_2, hover_color=theme.ACCENT, command=self._copy_payload,
         ).pack(side="left", padx=6)
 
-        self.status_label = ctk.CTkLabel(right, text="", text_color=MUTED)
+        self.status_label = ctk.CTkLabel(right, text="", text_color=theme.MUTED)
         self.status_label.grid(row=2, column=0, pady=(0, 16))
 
     # -------------------------------------------------------- type fields
@@ -159,12 +154,12 @@ class QRGeneratorModule(ctk.CTkFrame):
 
         def add_field(key: str, label: str, *, show: str | None = None) -> ctk.StringVar:
             nonlocal row
-            ctk.CTkLabel(self._field_widgets_frame, text=label, text_color=MUTED).grid(
+            ctk.CTkLabel(self._field_widgets_frame, text=label, text_color=theme.MUTED).grid(
                 row=row, column=0, sticky="w", padx=12, pady=(8, 2)
             )
             row += 1
             var = ctk.StringVar()
-            entry = ctk.CTkEntry(self._field_widgets_frame, textvariable=var, fg_color=PANEL_2, show=show or "")
+            entry = ctk.CTkEntry(self._field_widgets_frame, textvariable=var, fg_color=theme.PANEL_2, show=show or "")
             entry.grid(row=row, column=0, sticky="ew", padx=12, pady=(0, 4))
             row += 1
             var.trace_add("write", lambda *_: self._schedule_regenerate())
@@ -177,14 +172,14 @@ class QRGeneratorModule(ctk.CTkFrame):
         elif qr_type == "Wi-Fi Network":
             add_field("ssid", "Network Name (SSID)")
             add_field("password", "Password", show="*")
-            ctk.CTkLabel(self._field_widgets_frame, text="Security", text_color=MUTED).grid(
+            ctk.CTkLabel(self._field_widgets_frame, text="Security", text_color=theme.MUTED).grid(
                 row=row, column=0, sticky="w", padx=12, pady=(8, 2)
             )
             row += 1
             sec_var = ctk.StringVar(value=WIFI_SECURITY_TYPES[0])
             ctk.CTkOptionMenu(
                 self._field_widgets_frame, values=WIFI_SECURITY_TYPES, variable=sec_var,
-                fg_color=PANEL_2, button_color=ACCENT, button_hover_color=ACCENT,
+                fg_color=theme.PANEL_2, button_color=theme.ACCENT, button_hover_color=theme.ACCENT,
                 command=lambda _v: self._schedule_regenerate(),
             ).grid(row=row, column=0, sticky="ew", padx=12, pady=(0, 4))
             row += 1
@@ -192,7 +187,7 @@ class QRGeneratorModule(ctk.CTkFrame):
             hidden_var = ctk.BooleanVar(value=False)
             ctk.CTkCheckBox(
                 self._field_widgets_frame, text="Hidden network", variable=hidden_var,
-                fg_color=ACCENT, hover_color=ACCENT, command=self._schedule_regenerate,
+                fg_color=theme.ACCENT, hover_color=theme.ACCENT, command=self._schedule_regenerate,
             ).grid(row=row, column=0, sticky="w", padx=12, pady=(4, 4))
             row += 1
             self._field_vars["hidden"] = hidden_var
@@ -298,7 +293,7 @@ class QRGeneratorModule(ctk.CTkFrame):
     def _show_placeholder(self, message: str) -> None:
         self._current_image = None
         self._current_payload = ""
-        self.preview_label.configure(image=None, text=message, text_color=MUTED, wraplength=260)
+        self.preview_label.configure(image=None, text=message, text_color=theme.MUTED, wraplength=260)
         self.preview_label.image = None
         self.status_label.configure(text="")
 

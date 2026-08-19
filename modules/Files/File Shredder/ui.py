@@ -15,14 +15,9 @@ from tkinter import filedialog
 import customtkinter as ctk
 
 from .shredder import PassPattern, ProgressEvent, ShredderWorker, collect_targets
+from core import theme
 
-BG = "#0f1115"
-PANEL = "#151922"
-PANEL_2 = "#1b2030"
-ACCENT = "#4ea1ff"
-DANGER = "#ff5c5c"
 OK_COLOR = "#3ddc84"
-MUTED = "#7d8494"
 
 POLL_MS = 60
 
@@ -32,7 +27,7 @@ class FolderShredderModule(ctk.CTkFrame):
     instance (manager.container is the root, per the shared convention)."""
 
     def __init__(self, master, manager=None, **kwargs):
-        super().__init__(master, fg_color=BG, **kwargs)
+        super().__init__(master, fg_color=theme.BG, **kwargs)
         self.manager = manager
 
         self._targets: list[Path] = []
@@ -61,12 +56,12 @@ class FolderShredderModule(ctk.CTkFrame):
                 "folder. This cannot be undone."
             ),
             font=ctk.CTkFont(size=12),
-            text_color=MUTED,
+            text_color=theme.MUTED,
         )
         subtitle.grid(row=1, column=0, sticky="w", padx=16, pady=(0, 12))
 
         # ---- controls row ----
-        controls = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
+        controls = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=10)
         controls.grid(row=2, column=0, sticky="nsew", padx=16, pady=(0, 8))
         controls.grid_columnconfigure(0, weight=1)
         controls.grid_rowconfigure(1, weight=1)
@@ -76,19 +71,19 @@ class FolderShredderModule(ctk.CTkFrame):
 
         ctk.CTkButton(
             btn_row, text="Add Files", width=110,
-            fg_color=PANEL_2, hover_color=ACCENT,
+            fg_color=theme.PANEL_2, hover_color=theme.ACCENT,
             command=self._add_files,
         ).pack(side="left", padx=(0, 8))
 
         ctk.CTkButton(
             btn_row, text="Add Folder", width=110,
-            fg_color=PANEL_2, hover_color=ACCENT,
+            fg_color=theme.PANEL_2, hover_color=theme.ACCENT,
             command=self._add_folder,
         ).pack(side="left", padx=(0, 8))
 
         ctk.CTkButton(
             btn_row, text="Clear Queue", width=110,
-            fg_color=PANEL_2, hover_color=DANGER,
+            fg_color=theme.PANEL_2, hover_color=theme.DANGER,
             command=self._clear_queue,
         ).pack(side="left")
 
@@ -97,14 +92,14 @@ class FolderShredderModule(ctk.CTkFrame):
             btn_row,
             values=[p.value for p in PassPattern],
             variable=self.pattern_var,
-            fg_color=PANEL_2, button_color=ACCENT, button_hover_color=ACCENT,
+            fg_color=theme.PANEL_2, button_color=theme.ACCENT, button_hover_color=theme.ACCENT,
             width=200,
         )
         pattern_menu.pack(side="right")
 
         # ---- queue list ----
         self.queue_box = ctk.CTkTextbox(
-            controls, fg_color=PANEL_2, text_color="white",
+            controls, fg_color=theme.PANEL_2, text_color="white",
             wrap="none", state="disabled",
         )
         self.queue_box.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 12))
@@ -115,16 +110,16 @@ class FolderShredderModule(ctk.CTkFrame):
         action_row.grid_columnconfigure(1, weight=1)
 
         self.shred_btn = ctk.CTkButton(
-            action_row, text="Shred Queue", fg_color=DANGER, hover_color="#e04545",
+            action_row, text="Shred Queue", fg_color=theme.DANGER, hover_color="#e04545",
             command=self._confirm_and_shred,
         )
         self.shred_btn.grid(row=0, column=0, sticky="w")
 
-        self.progress = ctk.CTkProgressBar(action_row, progress_color=ACCENT)
+        self.progress = ctk.CTkProgressBar(action_row, progress_color=theme.ACCENT)
         self.progress.set(0)
         self.progress.grid(row=0, column=1, sticky="ew", padx=(12, 0))
 
-        self.status_label = ctk.CTkLabel(self, text="", text_color=MUTED, anchor="w")
+        self.status_label = ctk.CTkLabel(self, text="", text_color=theme.MUTED, anchor="w")
         self.status_label.grid(row=4, column=0, sticky="ew", padx=16, pady=(0, 8))
 
         # ---- log ----
@@ -132,7 +127,7 @@ class FolderShredderModule(ctk.CTkFrame):
         log_header.grid(row=5, column=0, sticky="w", padx=16, pady=(4, 4))
 
         self.log_box = ctk.CTkTextbox(
-            self, fg_color=PANEL, text_color=MUTED, height=140, state="disabled",
+            self, fg_color=theme.PANEL, text_color=theme.MUTED, height=140, state="disabled",
         )
         self.log_box.grid(row=6, column=0, sticky="ew", padx=16, pady=(0, 16))
 
@@ -163,7 +158,7 @@ class FolderShredderModule(ctk.CTkFrame):
             self.queue_box.insert("end", f"  [{kind}] {p}\n")
         self.queue_box.configure(state="disabled")
 
-    def _log(self, text: str, color: str = MUTED) -> None:
+    def _log(self, text: str, color: str = theme.MUTED) -> None:
         self.log_box.configure(state="normal")
         self.log_box.insert("end", text + "\n")
         self.log_box.configure(state="disabled")
@@ -236,7 +231,7 @@ class FolderShredderModule(ctk.CTkFrame):
             if r and r.ok:
                 self._log(f"shredded: {r.path}")
             elif r:
-                self._log(f"SKIPPED ({r.error}): {r.path}", color=DANGER)
+                self._log(f"SKIPPED ({r.error}): {r.path}", color=theme.DANGER)
             if event.total_count:
                 self.progress.set(event.done_count / event.total_count)
                 self.status_label.configure(
@@ -250,7 +245,7 @@ class FolderShredderModule(ctk.CTkFrame):
             self._refresh_queue_view()
             self._worker = None
         elif event.kind == "fatal_error":
-            self._log(f"FATAL: {event.message}", color=DANGER)
+            self._log(f"FATAL: {event.message}", color=theme.DANGER)
             self.status_label.configure(text="Error — see log")
             self.shred_btn.configure(state="normal")
             self._worker = None

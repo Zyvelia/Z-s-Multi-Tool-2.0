@@ -12,24 +12,20 @@ from .audio_tab import AudioTagsTab
 from .image_tab import ImageExifTab
 from .timestamp_tab import FileTimestampsTab
 
-BG = theme.BG
-PANEL = theme.PANEL
-PANEL_2 = theme.PANEL_2
-ACCENT = theme.ACCENT
 
 
 class MetadataEditorPage(ctk.CTkFrame):
 
     def __init__(self, parent, manager):
-        super().__init__(parent, fg_color=BG)
+        super().__init__(parent, fg_color=theme.BG)
         self.manager = manager
 
         self.tabview = ctk.CTkTabview(
             self,
-            fg_color=PANEL,
-            segmented_button_fg_color=PANEL_2,
-            segmented_button_selected_color=ACCENT,
-            segmented_button_selected_hover_color=ACCENT,
+            fg_color=theme.PANEL,
+            segmented_button_fg_color=theme.PANEL_2,
+            segmented_button_selected_color=theme.ACCENT,
+            segmented_button_selected_hover_color=theme.ACCENT,
         )
         self.tabview.pack(fill="both", expand=True, padx=12, pady=12)
 

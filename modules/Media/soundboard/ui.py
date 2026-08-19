@@ -9,22 +9,10 @@ from core.remote_access_panel import RemoteAccessPanel
 from core.services.tailscale_service import APP_HTTPS_PORTS
 from .web_server import SoundboardWebServer
 
-# ── Colours (shared app theme) ────────────────────────────────────────────
-BG      = theme.BG
-PANEL   = theme.PANEL
-PANEL_2 = theme.PANEL_2
-ACCENT  = theme.ACCENT
-DANGER  = theme.DANGER
-SUCCESS = theme.SUCCESS
-TEXT    = theme.TEXT
-MUTED   = theme.MUTED
-
-_BTN        = dict(fg_color=PANEL_2, hover_color=ACCENT,      text_color=TEXT,   height=34, corner_radius=8)
-_BTN_ACCENT = dict(fg_color=ACCENT,  hover_color=theme.ACCENT_DIM,   text_color="white", height=34, corner_radius=8)
-_BTN_DANGER = dict(fg_color=DANGER,  hover_color=theme.DANGER_HOVER,   text_color="white", height=34, corner_radius=8)
-
 def _make_btn(parent, text, cmd, **ov):
-    return ctk.CTkButton(parent, text=text, command=cmd, **{**_BTN, **ov})
+    kw = theme.secondary_button_kwargs()
+    kw.update(ov)
+    return ctk.CTkButton(parent, text=text, command=cmd, **kw)
 
 AUDIO_EXT = (".mp3", ".wav", ".flac", ".ogg", ".m4a")
 GRID_COLS  = 4
@@ -150,7 +138,7 @@ class SoundSlot:
 class SoundboardPage(ctk.CTkFrame):
 
     def __init__(self, parent, manager):
-        super().__init__(parent, fg_color=BG)
+        super().__init__(parent, fg_color=theme.BG)
         self.manager        = manager
         self.slots: list[SoundSlot] = []
         self._master_volume = 1.0
@@ -188,39 +176,39 @@ class SoundboardPage(ctk.CTkFrame):
         self._build_board()
 
     def _build_header(self):
-        header = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
+        header = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=10)
         header.pack(fill="x", padx=12, pady=(12, 4))
 
         ctk.CTkLabel(header, text="🔊  Soundboard",
-                     font=("Segoe UI", 22, "bold"), text_color=TEXT
+                     font=("Segoe UI", 22, "bold"), text_color=theme.TEXT
                      ).pack(side="left", padx=14, pady=10)
 
-        self.status = ctk.CTkLabel(header, text="No sounds loaded", text_color=MUTED)
+        self.status = ctk.CTkLabel(header, text="No sounds loaded", text_color=theme.MUTED)
         self.status.pack(side="right", padx=14)
 
     def _build_toolbar(self):
-        bar = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
+        bar = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=10)
         bar.pack(fill="x", padx=12, pady=(0, 4))
 
         inner = ctk.CTkFrame(bar, fg_color="transparent")
         inner.pack(fill="x", padx=10, pady=8)
 
-        _make_btn(inner, "＋ Add Files",  self._add_files,  **_BTN_ACCENT).pack(side="left", padx=(0, 6))
+        _make_btn(inner, "＋ Add Files",  self._add_files,  **theme.primary_button_kwargs()).pack(side="left", padx=(0, 6))
         _make_btn(inner, "📁 Load Folder", self._load_folder).pack(side="left", padx=(0, 6))
-        _make_btn(inner, "🗑  Clear All",  self._clear_all,  **_BTN_DANGER).pack(side="left", padx=(0, 18))
+        _make_btn(inner, "🗑  Clear All",  self._clear_all,  **theme.danger_button_kwargs()).pack(side="left", padx=(0, 18))
         _make_btn(inner, "⏹  Stop All",   self._stop_all,
                   fg_color="#4a2060", hover_color="#6a30a0").pack(side="left")
 
-        ctk.CTkLabel(inner, text="Master Vol", text_color=MUTED,
+        ctk.CTkLabel(inner, text="Master Vol", text_color=theme.MUTED,
                      font=("Segoe UI", 11)).pack(side="right", padx=(12, 4))
         self._master_slider = ctk.CTkSlider(
             inner, from_=0, to=1, width=120,
-            progress_color=ACCENT, command=self._set_master_volume)
+            progress_color=theme.ACCENT, command=self._set_master_volume)
         self._master_slider.set(1.0)
         self._master_slider.pack(side="right")
 
     def _build_device_bar(self):
-        bar = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
+        bar = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=10)
         bar.pack(fill="x", padx=12, pady=(0, 4))
 
         inner = ctk.CTkFrame(bar, fg_color="transparent")
@@ -231,15 +219,15 @@ class SoundboardPage(ctk.CTkFrame):
         col_a.pack(side="left", padx=(0, 16))
 
         ctk.CTkLabel(col_a, text="🎧  You hear (audio card)",
-                     text_color=MUTED, font=("Segoe UI", 11)
+                     text_color=theme.MUTED, font=("Segoe UI", 11)
                      ).pack(anchor="w", pady=(0, 4))
 
         self._device_a_var = ctk.StringVar(value="Default")
         self._device_a_menu = ctk.CTkOptionMenu(
             col_a, variable=self._device_a_var,
             values=["Default"],
-            fg_color=PANEL_2, button_color=ACCENT,
-            button_hover_color="#2f7fd6", text_color=TEXT,
+            fg_color=theme.PANEL_2, button_color=theme.ACCENT,
+            button_hover_color="#2f7fd6", text_color=theme.TEXT,
             command=lambda v: self._on_device_pick("a", v),
             width=260)
         self._device_a_menu.pack()
@@ -249,15 +237,15 @@ class SoundboardPage(ctk.CTkFrame):
         col_b.pack(side="left", padx=(0, 16))
 
         ctk.CTkLabel(col_b, text="🎙  Mic output (Voicemeeter)",
-                     text_color=MUTED, font=("Segoe UI", 11)
+                     text_color=theme.MUTED, font=("Segoe UI", 11)
                      ).pack(anchor="w", pady=(0, 4))
 
         self._device_b_var = ctk.StringVar(value="None")
         self._device_b_menu = ctk.CTkOptionMenu(
             col_b, variable=self._device_b_var,
             values=["None"],
-            fg_color=PANEL_2, button_color="#4a2060",
-            button_hover_color="#6a30a0", text_color=TEXT,
+            fg_color=theme.PANEL_2, button_color="#4a2060",
+            button_hover_color="#6a30a0", text_color=theme.TEXT,
             command=lambda v: self._on_device_pick("b", v),
             width=260)
         self._device_b_menu.pack()
@@ -269,19 +257,19 @@ class SoundboardPage(ctk.CTkFrame):
         _make_btn(col_r, "↺ Refresh", self._refresh_devices, width=90).pack(pady=(18, 0))
 
     def _build_board(self):
-        container = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
+        container = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=10)
         container.pack(fill="both", expand=True, padx=12, pady=(0, 12))
 
         top = ctk.CTkFrame(container, fg_color="transparent")
         top.pack(fill="x", padx=10, pady=(8, 4))
 
         ctk.CTkLabel(top, text="Sounds",
-                     font=("Segoe UI", 15, "bold"), text_color=TEXT).pack(side="left")
-        self._count_label = ctk.CTkLabel(top, text="0 sounds", text_color=MUTED)
+                     font=("Segoe UI", 15, "bold"), text_color=theme.TEXT).pack(side="left")
+        self._count_label = ctk.CTkLabel(top, text="0 sounds", text_color=theme.MUTED)
         self._count_label.pack(side="right")
 
         self._grid_frame = ctk.CTkScrollableFrame(
-            container, fg_color=PANEL_2, corner_radius=8)
+            container, fg_color=theme.PANEL_2, corner_radius=8)
         self._grid_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
         for c in range(GRID_COLS):
@@ -385,7 +373,7 @@ class SoundboardPage(ctk.CTkFrame):
         lbl = ctk.CTkLabel(
             self._grid_frame,
             text="No sounds yet.\nUse  ＋ Add Files  or  📁 Load Folder  above.",
-            text_color=MUTED, font=("Segoe UI", 13), justify="center")
+            text_color=theme.MUTED, font=("Segoe UI", 13), justify="center")
         lbl.grid(row=0, column=0, columnspan=GRID_COLS, pady=60, padx=20)
 
     def _rebuild_grid(self):
@@ -399,41 +387,41 @@ class SoundboardPage(ctk.CTkFrame):
             self._make_sound_card(slot, i, row, col)
 
     def _make_sound_card(self, slot: SoundSlot, idx: int, row: int, col: int):
-        card = ctk.CTkFrame(self._grid_frame, fg_color=PANEL,
-                            corner_radius=10, border_width=1, border_color=PANEL_2)
+        card = ctk.CTkFrame(self._grid_frame, fg_color=theme.PANEL,
+                            corner_radius=10, border_width=1, border_color=theme.PANEL_2)
         card.grid(row=row, column=col, padx=6, pady=6, sticky="nsew")
 
         ctk.CTkLabel(card, text=slot.name,
-                     font=("Segoe UI", 11, "bold"), text_color=TEXT,
+                     font=("Segoe UI", 11, "bold"), text_color=theme.TEXT,
                      wraplength=160, anchor="center", justify="center"
                      ).pack(padx=8, pady=(10, 4))
 
         ctk.CTkButton(card, text="▶  Play",
-                      fg_color=SUCCESS, hover_color="#27ae60",
+                      fg_color=theme.SUCCESS, hover_color="#27ae60",
                       text_color="white", height=38, corner_radius=8,
                       font=("Segoe UI", 13, "bold"),
                       command=lambda s=slot: self._play_sound(s)
                       ).pack(fill="x", padx=10, pady=(2, 2))
 
         ctk.CTkButton(card, text="⏹  Stop",
-                      fg_color=PANEL_2, hover_color=DANGER,
-                      text_color=MUTED, height=30, corner_radius=8,
+                      fg_color=theme.PANEL_2, hover_color=theme.DANGER,
+                      text_color=theme.MUTED, height=30, corner_radius=8,
                       command=lambda s=slot: s.stop_all()
                       ).pack(fill="x", padx=10, pady=(0, 4))
 
         vol_row = ctk.CTkFrame(card, fg_color="transparent")
         vol_row.pack(fill="x", padx=10, pady=(0, 4))
-        ctk.CTkLabel(vol_row, text="Vol", text_color=MUTED,
+        ctk.CTkLabel(vol_row, text="Vol", text_color=theme.MUTED,
                      font=("Segoe UI", 10)).pack(side="left", padx=(0, 4))
         sl = ctk.CTkSlider(vol_row, from_=0, to=1,
-                           progress_color=ACCENT, height=14,
+                           progress_color=theme.ACCENT, height=14,
                            command=lambda v, s=slot: s.set_volume(v))
         sl.set(slot.volume)
         sl.pack(side="left", fill="x", expand=True)
 
         ctk.CTkButton(card, text="✕ Remove",
-                      fg_color="transparent", hover_color=DANGER,
-                      text_color=MUTED, height=24, corner_radius=6,
+                      fg_color="transparent", hover_color=theme.DANGER,
+                      text_color=theme.MUTED, height=24, corner_radius=6,
                       font=("Segoe UI", 10),
                       command=lambda i=idx: self._remove_slot(i)
                       ).pack(pady=(0, 8))

@@ -16,13 +16,8 @@ import customtkinter as ctk
 from PIL import Image
 
 from .palette_math import PaletteError, extract_palette, readable_text_color
+from core import theme
 
-BG = "#0f1115"
-PANEL = "#151922"
-PANEL_2 = "#1b2030"
-ACCENT = "#4ea1ff"
-DANGER = "#ff5c5c"
-MUTED = "#7d8494"
 
 PREVIEW_MAX = 320
 SWATCH_HEIGHT = 64
@@ -31,7 +26,7 @@ SWATCH_HEIGHT = 64
 class ImagePaletteExtractorPage(ctk.CTkFrame):
 
     def __init__(self, master, manager=None, **kwargs):
-        super().__init__(master, fg_color=BG, **kwargs)
+        super().__init__(master, fg_color=theme.BG, **kwargs)
         self.manager = manager
         self.root_widget = manager.container if manager is not None else master
 
@@ -55,29 +50,29 @@ class ImagePaletteExtractorPage(ctk.CTkFrame):
         header.grid(row=0, column=0, columnspan=2, sticky="w", padx=16, pady=(16, 4))
 
         # ---------------------------------------------------------- left
-        left = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
+        left = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=10)
         left.grid(row=1, column=0, sticky="nsew", padx=(16, 8), pady=(0, 16))
         left.grid_columnconfigure(0, weight=1)
 
         self.preview = ctk.CTkLabel(
             left, text="No image loaded", height=PREVIEW_MAX, corner_radius=8,
-            fg_color=PANEL_2, text_color=MUTED,
+            fg_color=theme.PANEL_2, text_color=theme.MUTED,
         )
         self.preview.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 12))
 
         ctk.CTkButton(
-            left, text="Choose Image...", fg_color=ACCENT, hover_color="#3d8fe0",
+            left, text="Choose Image...", fg_color=theme.ACCENT, hover_color="#3d8fe0",
             command=self._choose_image,
         ).grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 12))
 
-        self.file_label = ctk.CTkLabel(left, text="", text_color=MUTED, wraplength=320, justify="left")
+        self.file_label = ctk.CTkLabel(left, text="", text_color=theme.MUTED, wraplength=320, justify="left")
         self.file_label.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 12))
 
         count_row = ctk.CTkFrame(left, fg_color="transparent")
         count_row.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 4))
         count_row.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(count_row, text="Colors", text_color=MUTED, width=50).grid(row=0, column=0)
+        ctk.CTkLabel(count_row, text="Colors", text_color=theme.MUTED, width=50).grid(row=0, column=0)
         self.count_var = ctk.IntVar(value=6)
         self.count_label = ctk.CTkLabel(count_row, text="6", text_color="white", width=24)
         self.count_label.grid(row=0, column=2)
@@ -87,21 +82,21 @@ class ImagePaletteExtractorPage(ctk.CTkFrame):
 
         ctk.CTkSlider(
             count_row, from_=2, to=16, number_of_steps=14, variable=self.count_var,
-            progress_color=ACCENT, button_color=ACCENT, button_hover_color="#3d8fe0",
+            progress_color=theme.ACCENT, button_color=theme.ACCENT, button_hover_color="#3d8fe0",
             command=on_count_change,
         ).grid(row=0, column=1, sticky="ew", padx=8)
 
         self.extract_btn = ctk.CTkButton(
-            left, text="Extract Palette", fg_color=ACCENT, hover_color="#3d8fe0",
+            left, text="Extract Palette", fg_color=theme.ACCENT, hover_color="#3d8fe0",
             command=self._extract_clicked, state="disabled",
         )
         self.extract_btn.grid(row=4, column=0, sticky="ew", padx=12, pady=(8, 4))
 
-        self.status_label = ctk.CTkLabel(left, text="", text_color=MUTED)
+        self.status_label = ctk.CTkLabel(left, text="", text_color=theme.MUTED)
         self.status_label.grid(row=5, column=0, sticky="ew", padx=12, pady=(0, 12))
 
         # --------------------------------------------------------- right
-        right = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
+        right = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=10)
         right.grid(row=1, column=1, sticky="nsew", padx=(8, 16), pady=(0, 16))
         right.grid_columnconfigure(0, weight=1)
         right.grid_rowconfigure(1, weight=1)
@@ -110,11 +105,11 @@ class ImagePaletteExtractorPage(ctk.CTkFrame):
         top_row.grid(row=0, column=0, sticky="ew", padx=16, pady=(16, 8))
         top_row.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(top_row, text="Extracted Palette", text_color=MUTED,
+        ctk.CTkLabel(top_row, text="Extracted Palette", text_color=theme.MUTED,
                      font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, sticky="w")
 
         self.copy_all_btn = ctk.CTkButton(
-            top_row, text="Copy All Hex", width=110, fg_color=PANEL_2, hover_color=ACCENT,
+            top_row, text="Copy All Hex", width=110, fg_color=theme.PANEL_2, hover_color=theme.ACCENT,
             command=self._copy_all, state="disabled",
         )
         self.copy_all_btn.grid(row=0, column=1, sticky="e")
@@ -163,7 +158,7 @@ class ImagePaletteExtractorPage(ctk.CTkFrame):
             return
 
         self.extract_btn.configure(state="disabled", text="Extracting...")
-        self.status_label.configure(text="Extracting palette...", text_color=MUTED)
+        self.status_label.configure(text="Extracting palette...", text_color=theme.MUTED)
         n_colors = int(self.count_var.get())
         path = self.image_path
 
@@ -183,11 +178,11 @@ class ImagePaletteExtractorPage(ctk.CTkFrame):
         self.extract_btn.configure(state="normal", text="Extract Palette")
 
         if error:
-            self.status_label.configure(text=error, text_color=DANGER)
+            self.status_label.configure(text=error, text_color=theme.DANGER)
             return
 
         self._palette = palette
-        self.status_label.configure(text=f"{len(palette)} colors extracted", text_color=MUTED)
+        self.status_label.configure(text=f"{len(palette)} colors extracted", text_color=theme.MUTED)
         self.copy_all_btn.configure(state="normal" if palette else "disabled")
         self._render_palette()
 
@@ -198,7 +193,7 @@ class ImagePaletteExtractorPage(ctk.CTkFrame):
             child.destroy()
         ctk.CTkLabel(
             self.palette_frame, text="Choose an image and hit Extract Palette to see its colors here.",
-            text_color=MUTED, wraplength=420, justify="left",
+            text_color=theme.MUTED, wraplength=420, justify="left",
         ).grid(row=0, column=0, sticky="w", padx=4, pady=8)
 
     def _render_palette(self) -> None:
@@ -241,11 +236,11 @@ class ImagePaletteExtractorPage(ctk.CTkFrame):
         btn_col.grid(row=0, column=2, padx=8)
 
         ctk.CTkButton(
-            btn_col, text="Copy HEX", width=90, height=26, fg_color=PANEL_2, hover_color=ACCENT,
+            btn_col, text="Copy HEX", width=90, height=26, fg_color=theme.PANEL_2, hover_color=theme.ACCENT,
             command=lambda: self._copy_text(hex_color),
         ).pack(pady=(0, 4))
         ctk.CTkButton(
-            btn_col, text="Copy RGB", width=90, height=26, fg_color=PANEL_2, hover_color=ACCENT,
+            btn_col, text="Copy RGB", width=90, height=26, fg_color=theme.PANEL_2, hover_color=theme.ACCENT,
             command=lambda: self._copy_text(rgb_text),
         ).pack()
 
@@ -254,7 +249,7 @@ class ImagePaletteExtractorPage(ctk.CTkFrame):
     def _copy_text(self, text: str) -> None:
         self.root_widget.clipboard_clear()
         self.root_widget.clipboard_append(text)
-        self.status_label.configure(text=f"Copied {text}", text_color=MUTED)
+        self.status_label.configure(text=f"Copied {text}", text_color=theme.MUTED)
 
     def _copy_all(self) -> None:
         if not self._palette:
