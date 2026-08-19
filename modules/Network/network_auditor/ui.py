@@ -7,15 +7,6 @@ from .threat_report import ThreatReporter
 from core import theme
 
 # ── Palette (matches app-wide theme) ─────────────────────
-BG      = theme.BG
-PANEL   = theme.PANEL
-PANEL_2 = theme.PANEL_2
-ACCENT  = theme.ACCENT
-DANGER  = theme.DANGER
-TEXT    = theme.TEXT
-MUTED   = theme.MUTED
-BORDER  = theme.BORDER
-FONT    = theme.FONT_FAMILY
 # ─────────────────────────────────────────────────────────
 
 # Severity → color mapping
@@ -31,7 +22,7 @@ SEVERITY_COLORS = {
 class NetworkAuditorUI(ctk.CTkFrame):
 
     def __init__(self, parent, manager):
-        super().__init__(parent, fg_color=BG)
+        super().__init__(parent, fg_color=theme.BG)
         self.manager = manager
         self.scanner = NetworkScanner()
         self.port_scanner = PortScanner()
@@ -45,26 +36,26 @@ class NetworkAuditorUI(ctk.CTkFrame):
     # ── widget helpers ───────────────────────────────────
 
     def _btn(self, parent, text, cmd=None, width=120,
-             fg=ACCENT, hover="#2f7fd6", tc=BG, **kw):
+             fg=theme.ACCENT, hover="#2f7fd6", tc=theme.BG, **kw):
         return ctk.CTkButton(
             parent, text=text, command=cmd, width=width,
             fg_color=fg, hover_color=hover, text_color=tc,
-            corner_radius=6, font=(FONT, 12, "bold"), **kw
+            corner_radius=6, font=(theme.FONT_FAMILY, 12, "bold"), **kw
         )
 
     def _ghost_btn(self, parent, text, cmd=None, width=100, **kw):
         return ctk.CTkButton(
             parent, text=text, command=cmd, width=width,
-            fg_color=PANEL_2, hover_color=BORDER,
-            text_color=MUTED, border_width=0,
-            corner_radius=6, font=(FONT, 12), **kw
+            fg_color=theme.PANEL_2, hover_color=theme.BORDER,
+            text_color=theme.MUTED, border_width=0,
+            corner_radius=6, font=(theme.FONT_FAMILY, 12), **kw
         )
 
     def _label(self, parent, text, size=13, weight="normal",
-               color=MUTED, **kw):
+               color=theme.MUTED, **kw):
         return ctk.CTkLabel(
             parent, text=text, text_color=color,
-            font=(FONT, size, weight), **kw
+            font=(theme.FONT_FAMILY, size, weight), **kw
         )
 
     def _section_label(self, parent, text):
@@ -72,9 +63,9 @@ class NetworkAuditorUI(ctk.CTkFrame):
         row.pack(fill="x", padx=16, pady=(14, 6))
         ctk.CTkLabel(
             row, text=text.upper(),
-            text_color=MUTED, font=(FONT, 9, "bold")
+            text_color=theme.MUTED, font=(theme.FONT_FAMILY, 9, "bold")
         ).pack(side="left")
-        ctk.CTkFrame(row, height=1, fg_color=BORDER).pack(
+        ctk.CTkFrame(row, height=1, fg_color=theme.BORDER).pack(
             side="left", fill="x", expand=True, padx=(8, 0))
 
     # ── layout ───────────────────────────────────────────
@@ -87,9 +78,9 @@ class NetworkAuditorUI(ctk.CTkFrame):
         self._build_status_bar()
 
     def _build_header(self):
-        bar = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=0)
+        bar = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=0)
         bar.grid(row=0, column=0, sticky="ew")
-        ctk.CTkFrame(bar, height=1, fg_color=BORDER).pack(
+        ctk.CTkFrame(bar, height=1, fg_color=theme.BORDER).pack(
             fill="x", side="bottom")
 
         inner = ctk.CTkFrame(bar, fg_color="transparent")
@@ -97,7 +88,7 @@ class NetworkAuditorUI(ctk.CTkFrame):
 
         ctk.CTkLabel(
             inner, text="Network Auditor",
-            text_color=TEXT, font=(FONT, 20, "bold")
+            text_color=theme.TEXT, font=(theme.FONT_FAMILY, 20, "bold")
         ).pack(side="left", padx=14)
 
         # Right: network entry + controls
@@ -107,9 +98,9 @@ class NetworkAuditorUI(ctk.CTkFrame):
         self.network_entry = ctk.CTkEntry(
             right, width=200,
             placeholder_text="e.g. 192.168.1.0/24",
-            fg_color=PANEL_2, border_color=BORDER,
-            text_color=TEXT, placeholder_text_color=MUTED,
-            font=(FONT, 12)
+            fg_color=theme.PANEL_2, border_color=theme.BORDER,
+            text_color=theme.TEXT, placeholder_text_color=theme.MUTED,
+            font=(theme.FONT_FAMILY, 12)
         )
         self.network_entry.pack(side="left", padx=(0, 8))
 
@@ -124,7 +115,7 @@ class NetworkAuditorUI(ctk.CTkFrame):
         ).pack(side="left")
 
     def _build_main(self):
-        main = ctk.CTkFrame(self, fg_color=BG)
+        main = ctk.CTkFrame(self, fg_color=theme.BG)
         main.grid(row=1, column=0, sticky="nsew", padx=14, pady=12)
         main.grid_columnconfigure(0, weight=1)
         main.grid_columnconfigure(1, weight=2)
@@ -136,13 +127,13 @@ class NetworkAuditorUI(ctk.CTkFrame):
     # ── left: device list ────────────────────────────────
 
     def _build_left(self, parent):
-        panel = ctk.CTkFrame(parent, fg_color=PANEL,
+        panel = ctk.CTkFrame(parent, fg_color=theme.PANEL,
                              corner_radius=10, border_width=1,
-                             border_color=BORDER)
+                             border_color=theme.BORDER)
         panel.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
 
         self._label(panel, "Devices",
-                    size=15, weight="bold", color=TEXT).pack(
+                    size=15, weight="bold", color=theme.TEXT).pack(
             anchor="w", padx=16, pady=(16, 2))
         self._label(panel, "Discovered devices on the network.",
                     size=11).pack(anchor="w", padx=16)
@@ -151,11 +142,11 @@ class NetworkAuditorUI(ctk.CTkFrame):
 
         self.device_dropdown = ctk.CTkOptionMenu(
             panel, values=["No Devices Found"],
-            fg_color=PANEL_2, button_color=PANEL_2,
-            button_hover_color=BORDER,
-            dropdown_fg_color=PANEL,
-            dropdown_hover_color=PANEL_2,
-            text_color=TEXT, font=(FONT, 12)
+            fg_color=theme.PANEL_2, button_color=theme.PANEL_2,
+            button_hover_color=theme.BORDER,
+            dropdown_fg_color=theme.PANEL,
+            dropdown_hover_color=theme.PANEL_2,
+            text_color=theme.TEXT, font=(theme.FONT_FAMILY, 12)
         )
         self.device_dropdown.pack(fill="x", padx=16, pady=(0, 10))
 
@@ -174,15 +165,15 @@ class NetworkAuditorUI(ctk.CTkFrame):
     # ── right: results ───────────────────────────────────
 
     def _build_right(self, parent):
-        panel = ctk.CTkFrame(parent, fg_color=PANEL,
+        panel = ctk.CTkFrame(parent, fg_color=theme.PANEL,
                              corner_radius=10, border_width=1,
-                             border_color=BORDER)
+                             border_color=theme.BORDER)
         panel.grid(row=0, column=1, sticky="nsew")
         panel.grid_rowconfigure(1, weight=1)
         panel.grid_columnconfigure(0, weight=1)
 
         self._label(panel, "Scan Results",
-                    size=15, weight="bold", color=TEXT).pack(
+                    size=15, weight="bold", color=theme.TEXT).pack(
             anchor="w", padx=16, pady=(16, 2))
         self._label(panel, "Open ports and threat analysis for the selected device.",
                     size=11).pack(anchor="w", padx=16)
@@ -190,8 +181,8 @@ class NetworkAuditorUI(ctk.CTkFrame):
         # Scrollable results area
         self.results_scroll = ctk.CTkScrollableFrame(
             panel, fg_color="transparent",
-            scrollbar_button_color=BORDER,
-            scrollbar_button_hover_color=ACCENT
+            scrollbar_button_color=theme.BORDER,
+            scrollbar_button_hover_color=theme.ACCENT
         )
         self.results_scroll.pack(fill="both", expand=True,
                                  padx=12, pady=(8, 12))
@@ -221,21 +212,21 @@ class NetworkAuditorUI(ctk.CTkFrame):
         else:
             for port in ports:
                 row = ctk.CTkFrame(
-                    self.results_scroll, fg_color=PANEL_2,
-                    corner_radius=6, border_width=1, border_color=BORDER
+                    self.results_scroll, fg_color=theme.PANEL_2,
+                    corner_radius=6, border_width=1, border_color=theme.BORDER
                 )
                 row.pack(fill="x", padx=4, pady=3)
 
                 ctk.CTkLabel(
                     row, text=str(port.port),
-                    text_color=ACCENT, font=(FONT, 12, "bold"),
+                    text_color=theme.ACCENT, font=(theme.FONT_FAMILY, 12, "bold"),
                     width=60, anchor="center",
-                    fg_color=BG, corner_radius=4
+                    fg_color=theme.BG, corner_radius=4
                 ).pack(side="left", padx=(8, 10), pady=8)
 
                 ctk.CTkLabel(
                     row, text=port.service,
-                    text_color=TEXT, font=(FONT, 12),
+                    text_color=theme.TEXT, font=(theme.FONT_FAMILY, 12),
                     anchor="w"
                 ).pack(side="left", fill="x", expand=True, pady=8)
 
@@ -244,22 +235,22 @@ class NetworkAuditorUI(ctk.CTkFrame):
 
         if not threats:
             row = ctk.CTkFrame(
-                self.results_scroll, fg_color=PANEL_2,
-                corner_radius=6, border_width=1, border_color=BORDER
+                self.results_scroll, fg_color=theme.PANEL_2,
+                corner_radius=6, border_width=1, border_color=theme.BORDER
             )
             row.pack(fill="x", padx=4, pady=3)
             ctk.CTkLabel(
                 row, text="✓  No threats detected.",
-                text_color="#34d399", font=(FONT, 12, "bold")
+                text_color="#34d399", font=(theme.FONT_FAMILY, 12, "bold")
             ).pack(anchor="w", padx=14, pady=12)
         else:
             for threat in threats:
                 sev = threat.severity.lower()
-                color = SEVERITY_COLORS.get(sev, MUTED)
+                color = SEVERITY_COLORS.get(sev, theme.MUTED)
 
                 card = ctk.CTkFrame(
-                    self.results_scroll, fg_color=PANEL_2,
-                    corner_radius=8, border_width=1, border_color=BORDER
+                    self.results_scroll, fg_color=theme.PANEL_2,
+                    corner_radius=8, border_width=1, border_color=theme.BORDER
                 )
                 card.pack(fill="x", padx=4, pady=5)
 
@@ -275,7 +266,7 @@ class NetworkAuditorUI(ctk.CTkFrame):
 
                 ctk.CTkLabel(
                     title_row, text=threat.title,
-                    text_color=TEXT, font=(FONT, 13, "bold"),
+                    text_color=theme.TEXT, font=(theme.FONT_FAMILY, 13, "bold"),
                     anchor="w"
                 ).pack(side="left")
 
@@ -283,28 +274,28 @@ class NetworkAuditorUI(ctk.CTkFrame):
                     title_row,
                     text=threat.severity.upper(),
                     text_color=color,
-                    fg_color=BG, corner_radius=4,
-                    font=(FONT, 9, "bold"),
+                    fg_color=theme.BG, corner_radius=4,
+                    font=(theme.FONT_FAMILY, 9, "bold"),
                     padx=7, pady=2
                 ).pack(side="right")
 
                 ctk.CTkLabel(
                     body, text=threat.description,
-                    text_color=MUTED, font=(FONT, 11),
+                    text_color=theme.MUTED, font=(theme.FONT_FAMILY, 11),
                     anchor="w", wraplength=380, justify="left"
                 ).pack(fill="x", pady=(4, 0))
 
     # ── status bar ───────────────────────────────────────
 
     def _build_status_bar(self):
-        bar = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=0)
+        bar = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=0)
         bar.grid(row=2, column=0, sticky="ew")
-        ctk.CTkFrame(bar, height=1, fg_color=BORDER).pack(
+        ctk.CTkFrame(bar, height=1, fg_color=theme.BORDER).pack(
             fill="x", side="top")
 
         self.status = ctk.CTkLabel(
             bar, text="Ready",
-            text_color=MUTED, font=(FONT, 11)
+            text_color=theme.MUTED, font=(theme.FONT_FAMILY, 11)
         )
         self.status.pack(side="left", padx=18, pady=8)
 

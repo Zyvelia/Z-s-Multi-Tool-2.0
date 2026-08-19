@@ -210,6 +210,7 @@ class VLCMusicEngine:
         self._current_path = None
         self._cue_start = None
         self._cue_end = None
+        self._loaded_index = -1
         self._retry_done = False
         # Guards the Ended/Error poll below from firing more than once
         # per playback attempt (reset every time a new attempt starts).
@@ -305,6 +306,8 @@ class VLCMusicEngine:
         self.db       = None
         self.playlist = [os.path.abspath(f) for f in (files or [])]
         self.index    = 0 if self.playlist else -1
+        self._loaded_index = -1
+        self._current_path = None
 
     def load_ids(self, db, ids, start_index=0):
         """
@@ -315,14 +318,37 @@ class VLCMusicEngine:
         self.db       = db
         self.playlist = LazyPlaylist(db, ids)
         self.index    = start_index if len(self.playlist) else -1
+        self._loaded_index = -1
+        self._current_path = None
 
     # ── Playback ──────────────────────────────────────────────
+
+    def _can_resume(self):
+        """True when paused mid-track on the same playlist index."""
+        if self.index < 0 or self._loaded_index != self.index or not self._current_path:
+            return False
+        if self.player.get_state() != vlc.State.Paused:
+            return False
+        try:
+            path = self.playlist[self.index]
+        except Exception:
+            return False
+        return (
+            os.path.normcase(os.path.abspath(path))
+            == os.path.normcase(os.path.abspath(self._current_path))
+        )
 
     def play(self):
         if not self.playlist:
             return
         if self.index < 0:
             self.index = 0
+        if self._can_resume():
+            try:
+                self.player.set_pause(0)
+            except Exception:
+                self.player.play()
+            return
         self.play_at(self.index)
 
     def play_at(self, i):
@@ -331,6 +357,7 @@ class VLCMusicEngine:
 
         self.index      = i
         self._retry_done = False
+        self._loaded_index = i
 
         path = self.playlist[i]
         if not os.path.exists(path):
@@ -355,9 +382,12 @@ class VLCMusicEngine:
                            force_transcode=(ext in _ALWAYS_TRANSCODE_EXTS))
 
     def pause(self):
-        # libvlc_media_player_pause() toggles play/pause on its own —
-        # matches the old engine's toggle-on-second-press behavior.
-        self.player.pause()
+        """Pause playback without losing the current position."""
+        if self.player.get_state() == vlc.State.Playing:
+            try:
+                self.player.set_pause(1)
+            except Exception:
+                self.player.pause()
 
     def seek(self, seconds):
         """Jumps to an absolute position (in seconds) in the current track.
@@ -370,6 +400,7 @@ class VLCMusicEngine:
 
     def stop(self):
         self.player.stop()
+        self._loaded_index = -1
 
     # ── Volume ────────────────────────────────────────────────
 
@@ -467,6 +498,9 @@ class VLCMusicEngine:
 
     def is_playing(self):
         return self.player.get_state() == vlc.State.Playing
+
+    def is_paused(self):
+        return self.player.get_state() == vlc.State.Paused
 
     def get_state(self):
         """Returns a vlc.State value — same enum ui.py already checks against."""

@@ -55,16 +55,11 @@ def _patch_ctkimage_master():
 _patch_ctkimage_master()
 
 
-def open_metadata_editor(manager):
-    # manager.container is your actual CTk root/app
-    return MetadataEditorPage(manager.container, manager)
-
-
 def register(manager):
     manager.register({
         "name": "Media Metadata Editor",
         "category": "Media",
         "desc": "Edit audio tags, image EXIF fields, and file timestamps",
         "icon": "🏷️",
-        "open": open_metadata_editor,
+        "page_class": MetadataEditorPage,
     })

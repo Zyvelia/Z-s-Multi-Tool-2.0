@@ -16,14 +16,9 @@ import customtkinter as ctk
 from PIL import Image
 
 from .generator import HTML_SNIPPET, IconGeneratorError, generate
+from core import theme
 
-BG = "#0f1115"
-PANEL = "#151922"
-PANEL_2 = "#1b2030"
-ACCENT = "#4ea1ff"
-DANGER = "#ff5c5c"
 SUCCESS = "#4caf7d"
-MUTED = "#7d8494"
 
 PREVIEW_MAX = 220
 
@@ -31,7 +26,7 @@ PREVIEW_MAX = 220
 class IconFaviconGeneratorPage(ctk.CTkFrame):
 
     def __init__(self, master, manager=None, **kwargs):
-        super().__init__(master, fg_color=BG, **kwargs)
+        super().__init__(master, fg_color=theme.BG, **kwargs)
         self.manager = manager
         self.root_widget = manager.container if manager is not None else master
 
@@ -56,25 +51,25 @@ class IconFaviconGeneratorPage(ctk.CTkFrame):
         header.grid(row=0, column=0, columnspan=2, sticky="w", padx=16, pady=(16, 4))
 
         # ---------------------------------------------------------- left
-        left = ctk.CTkScrollableFrame(self, fg_color=PANEL, corner_radius=10)
+        left = ctk.CTkScrollableFrame(self, fg_color=theme.PANEL, corner_radius=10)
         left.grid(row=1, column=0, sticky="nsew", padx=(16, 8), pady=(0, 16))
         left.grid_columnconfigure(0, weight=1)
 
         self.preview = ctk.CTkLabel(
             left, text="No image loaded", height=PREVIEW_MAX, corner_radius=8,
-            fg_color=PANEL_2, text_color=MUTED,
+            fg_color=theme.PANEL_2, text_color=theme.MUTED,
         )
         self.preview.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 8))
 
         ctk.CTkButton(
-            left, text="Choose Source Image...", fg_color=ACCENT, hover_color="#3d8fe0",
+            left, text="Choose Source Image...", fg_color=theme.ACCENT, hover_color="#3d8fe0",
             command=self._choose_source,
         ).grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 4))
 
-        self.source_label = ctk.CTkLabel(left, text="", text_color=MUTED, wraplength=320, justify="left")
+        self.source_label = ctk.CTkLabel(left, text="", text_color=theme.MUTED, wraplength=320, justify="left")
         self.source_label.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 10))
 
-        ctk.CTkLabel(left, text="Non-square images", text_color=MUTED,
+        ctk.CTkLabel(left, text="Non-square images", text_color=theme.MUTED,
                      font=ctk.CTkFont(weight="bold")).grid(row=3, column=0, sticky="w", padx=12, pady=(4, 2))
 
         self.fit_mode_var = ctk.StringVar(value="fit")
@@ -82,14 +77,14 @@ class IconFaviconGeneratorPage(ctk.CTkFrame):
         mode_row.grid(row=4, column=0, sticky="ew", padx=12, pady=(0, 10))
         ctk.CTkRadioButton(
             mode_row, text="Fit (pad with transparency)", variable=self.fit_mode_var, value="fit",
-            fg_color=ACCENT,
+            fg_color=theme.ACCENT,
         ).pack(anchor="w", pady=2)
         ctk.CTkRadioButton(
             mode_row, text="Fill (crop to square)", variable=self.fit_mode_var, value="fill",
-            fg_color=ACCENT,
+            fg_color=theme.ACCENT,
         ).pack(anchor="w", pady=2)
 
-        ctk.CTkLabel(left, text="Outputs", text_color=MUTED,
+        ctk.CTkLabel(left, text="Outputs", text_color=theme.MUTED,
                      font=ctk.CTkFont(weight="bold")).grid(row=5, column=0, sticky="w", padx=12, pady=(4, 2))
 
         self.make_png_var = ctk.BooleanVar(value=True)
@@ -98,39 +93,39 @@ class IconFaviconGeneratorPage(ctk.CTkFrame):
 
         ctk.CTkCheckBox(
             left, text="PNG set (16 to 512px, incl. apple-touch-icon)",
-            variable=self.make_png_var, fg_color=ACCENT,
+            variable=self.make_png_var, fg_color=theme.ACCENT,
         ).grid(row=6, column=0, sticky="w", padx=12, pady=2)
         ctk.CTkCheckBox(
             left, text="favicon.ico (16/32/48px multi-size)",
-            variable=self.make_ico_var, fg_color=ACCENT,
+            variable=self.make_ico_var, fg_color=theme.ACCENT,
         ).grid(row=7, column=0, sticky="w", padx=12, pady=2)
         ctk.CTkCheckBox(
             left, text="site.webmanifest",
-            variable=self.make_manifest_var, fg_color=ACCENT,
+            variable=self.make_manifest_var, fg_color=theme.ACCENT,
         ).grid(row=8, column=0, sticky="w", padx=12, pady=(2, 10))
 
-        self.app_name_entry = ctk.CTkEntry(left, placeholder_text="App name (used in manifest)", fg_color=PANEL_2)
+        self.app_name_entry = ctk.CTkEntry(left, placeholder_text="App name (used in manifest)", fg_color=theme.PANEL_2)
         self.app_name_entry.grid(row=9, column=0, sticky="ew", padx=12, pady=(0, 10))
 
         ctk.CTkButton(
-            left, text="Choose Output Folder...", fg_color=PANEL_2, hover_color=ACCENT,
+            left, text="Choose Output Folder...", fg_color=theme.PANEL_2, hover_color=theme.ACCENT,
             command=self._choose_output,
         ).grid(row=10, column=0, sticky="ew", padx=12, pady=(0, 4))
 
-        self.output_label = ctk.CTkLabel(left, text="", text_color=MUTED, wraplength=320, justify="left")
+        self.output_label = ctk.CTkLabel(left, text="", text_color=theme.MUTED, wraplength=320, justify="left")
         self.output_label.grid(row=11, column=0, sticky="ew", padx=12, pady=(0, 10))
 
         self.generate_btn = ctk.CTkButton(
-            left, text="Generate", fg_color=ACCENT, hover_color="#3d8fe0",
+            left, text="Generate", fg_color=theme.ACCENT, hover_color="#3d8fe0",
             command=self._generate_clicked, state="disabled",
         )
         self.generate_btn.grid(row=12, column=0, sticky="ew", padx=12, pady=(4, 4))
 
-        self.status_label = ctk.CTkLabel(left, text="", text_color=MUTED, wraplength=320, justify="left")
+        self.status_label = ctk.CTkLabel(left, text="", text_color=theme.MUTED, wraplength=320, justify="left")
         self.status_label.grid(row=13, column=0, sticky="ew", padx=12, pady=(0, 12))
 
         # --------------------------------------------------------- right
-        right = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
+        right = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=10)
         right.grid(row=1, column=1, sticky="nsew", padx=(8, 16), pady=(0, 16))
         right.grid_columnconfigure(0, weight=1)
         right.grid_rowconfigure(1, weight=1)
@@ -139,11 +134,11 @@ class IconFaviconGeneratorPage(ctk.CTkFrame):
         top_row.grid(row=0, column=0, sticky="ew", padx=16, pady=(16, 8))
         top_row.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(top_row, text="Generated Files", text_color=MUTED,
+        ctk.CTkLabel(top_row, text="Generated Files", text_color=theme.MUTED,
                      font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, sticky="w")
 
         self.open_folder_btn = ctk.CTkButton(
-            top_row, text="Open Folder", width=110, fg_color=PANEL_2, hover_color=ACCENT,
+            top_row, text="Open Folder", width=110, fg_color=theme.PANEL_2, hover_color=theme.ACCENT,
             command=self._open_output_folder, state="disabled",
         )
         self.open_folder_btn.grid(row=0, column=1, sticky="e")
@@ -156,17 +151,17 @@ class IconFaviconGeneratorPage(ctk.CTkFrame):
 
         snippet_label = ctk.CTkLabel(
             right, text="HTML <head> snippet (copied files use these exact names):",
-            text_color=MUTED, anchor="w",
+            text_color=theme.MUTED, anchor="w",
         )
         snippet_label.grid(row=2, column=0, sticky="ew", padx=16, pady=(4, 2))
 
-        self.snippet_box = ctk.CTkTextbox(right, height=110, fg_color=PANEL_2, text_color=MUTED)
+        self.snippet_box = ctk.CTkTextbox(right, height=110, fg_color=theme.PANEL_2, text_color=theme.MUTED)
         self.snippet_box.grid(row=3, column=0, sticky="ew", padx=16, pady=(0, 16))
         self.snippet_box.insert("1.0", HTML_SNIPPET)
         self.snippet_box.configure(state="disabled")
 
         ctk.CTkButton(
-            right, text="Copy Snippet", width=110, fg_color=PANEL_2, hover_color=ACCENT,
+            right, text="Copy Snippet", width=110, fg_color=theme.PANEL_2, hover_color=theme.ACCENT,
             command=lambda: self._copy_text(HTML_SNIPPET),
         ).grid(row=4, column=0, sticky="e", padx=16, pady=(0, 16))
 
@@ -220,11 +215,11 @@ class IconFaviconGeneratorPage(ctk.CTkFrame):
             return
 
         if not (self.make_png_var.get() or self.make_ico_var.get() or self.make_manifest_var.get()):
-            self.status_label.configure(text="Pick at least one output.", text_color=DANGER)
+            self.status_label.configure(text="Pick at least one output.", text_color=theme.DANGER)
             return
 
         self.generate_btn.configure(state="disabled", text="Generating...")
-        self.status_label.configure(text="Generating...", text_color=MUTED)
+        self.status_label.configure(text="Generating...", text_color=theme.MUTED)
 
         source_path = self.source_path
         output_dir = self.output_dir
@@ -255,7 +250,7 @@ class IconFaviconGeneratorPage(ctk.CTkFrame):
         self.generate_btn.configure(state="normal", text="Generate")
 
         if error:
-            self.status_label.configure(text=error, text_color=DANGER)
+            self.status_label.configure(text=error, text_color=theme.DANGER)
             return
 
         self._last_written = written
@@ -271,7 +266,7 @@ class IconFaviconGeneratorPage(ctk.CTkFrame):
         ctk.CTkLabel(
             self.results_frame,
             text="Choose a source image and an output folder, then hit Generate.",
-            text_color=MUTED, wraplength=420, justify="left",
+            text_color=theme.MUTED, wraplength=420, justify="left",
         ).grid(row=0, column=0, sticky="w", padx=4, pady=8)
 
     def _render_results(self, written: list[str]) -> None:
@@ -286,7 +281,7 @@ class IconFaviconGeneratorPage(ctk.CTkFrame):
             size_kb = os.path.getsize(path) / 1024
             ctk.CTkLabel(
                 self.results_frame, text=f"✅ {os.path.basename(path)}   ({size_kb:.1f} KB)",
-                text_color=MUTED, anchor="w",
+                text_color=theme.MUTED, anchor="w",
             ).grid(row=row, column=0, sticky="w", padx=4, pady=3)
 
     # --------------------------------------------------------------- actions
@@ -307,4 +302,4 @@ class IconFaviconGeneratorPage(ctk.CTkFrame):
     def _copy_text(self, text: str) -> None:
         self.root_widget.clipboard_clear()
         self.root_widget.clipboard_append(text)
-        self.status_label.configure(text="Snippet copied.", text_color=MUTED)
+        self.status_label.configure(text="Snippet copied.", text_color=theme.MUTED)

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .. import backend as mc
 from ..core.events import ServerEvent
-from .base import ConfigField, ConfigSection, GameServerAdapter, LogTagRule
+from .base import ConfigField, GameServerAdapter, LogTagRule
 
 _DIFFICULTIES = ["peaceful", "easy", "normal", "hard"]
 _GAMEMODES = ["survival", "creative", "adventure", "spectator"]
@@ -67,32 +67,41 @@ class MinecraftJavaAdapter(GameServerAdapter):
         return rules
 
     def quick_commands(self) -> list[tuple[str, str]]:
-        return [("list", "list"), ("save-all", "save-all"), ("weather clear", "weather clear")]
-
-    def config_sections(self, server_dir: Path) -> list[ConfigSection]:
-        props = mc.read_server_properties(server_dir)
         return [
-            ConfigSection(
-                title="Gameplay",
-                fields=[
-                    ConfigField("motd", "MOTD", "text", props.get("motd", "A Minecraft Server"), width=200),
-                    ConfigField("difficulty", "Difficulty", "menu", props.get("difficulty", "easy"), _DIFFICULTIES),
-                    ConfigField("gamemode", "Gamemode", "menu", props.get("gamemode", "survival"), _GAMEMODES),
-                    ConfigField("max-players", "Max players", "text", props.get("max-players", "20"), width=100),
-                ],
-            ),
-            ConfigSection(
-                title="Network & Access",
-                fields=[
-                    ConfigField("server-port", "Port", "text", props.get("server-port", "25565"), width=100),
-                    ConfigField("online-mode", "Online mode", "checkbox", props.get("online-mode", "true")),
-                    ConfigField("white-list", "Whitelist only", "checkbox", props.get("white-list", "false")),
-                ],
-            ),
+            ("list", "list"),
+            ("save-all", "save-all"),
+            ("save-off", "save-off"),
+            ("save-on", "save-on"),
+            ("weather clear", "weather clear"),
+            ("weather rain", "weather rain"),
+            ("time day", "time set day"),
+            ("time night", "time set night"),
+            ("difficulty easy", "difficulty easy"),
+            ("difficulty normal", "difficulty normal"),
+            ("difficulty hard", "difficulty hard"),
+            ("gm survival", "defaultgamemode survival"),
+            ("gm creative", "defaultgamemode creative"),
+            ("gm adventure", "defaultgamemode adventure"),
+            ("gm spectator", "defaultgamemode spectator"),
+            ("whitelist on", "whitelist on"),
+            ("whitelist off", "whitelist off"),
+            ("whitelist list", "whitelist list"),
+            ("say Hello!", "say Hello!"),
+            ("banlist", "banlist"),
+            ("banlist players", "banlist players"),
         ]
 
     def config_fields(self, server_dir: Path) -> list[ConfigField]:
-        return [f for sec in self.config_sections(server_dir) for f in sec.fields]
+        props = mc.read_server_properties(server_dir)
+        return [
+            ConfigField("server-port", "Port", "text", props.get("server-port", "25565"), width=100),
+            ConfigField("max-players", "Max players", "text", props.get("max-players", "20"), width=100),
+            ConfigField("motd", "MOTD", "text", props.get("motd", "A Minecraft Server"), width=160),
+            ConfigField("difficulty", "Difficulty", "menu", props.get("difficulty", "easy"), _DIFFICULTIES),
+            ConfigField("gamemode", "Gamemode", "menu", props.get("gamemode", "survival"), _GAMEMODES),
+            ConfigField("online-mode", "Online mode", "checkbox", props.get("online-mode", "true")),
+            ConfigField("white-list", "Whitelist only", "checkbox", props.get("white-list", "false")),
+        ]
 
     def read_config(self, server_dir: Path) -> dict[str, str]:
         return mc.read_server_properties(server_dir)
@@ -105,30 +114,58 @@ class MinecraftJavaAdapter(GameServerAdapter):
             return f"kick {player}"
         if action == "op":
             return f"op {player}"
+        if action.startswith("gamemode_"):
+            mode = action.removeprefix("gamemode_")
+            return f"gamemode {mode} {player}"
         return None
 
     def player_actions(self) -> list[tuple[str, str]]:
-        return [("Kick", "kick"), ("OP", "op")]
+        return [
+            ("Kick", "kick"),
+            ("OP", "op"),
+            ("Creative", "gamemode_creative"),
+            ("Survival", "gamemode_survival"),
+            ("Adventure", "gamemode_adventure"),
+            ("Spectator", "gamemode_spectator"),
+        ]
 
     def supports_mods(self) -> bool:
         return True
 
     def mods_directory(self, server_dir: Path) -> Path | None:
-        mods = server_dir / "mods"
-        return mods if mods.exists() or self.is_installed(server_dir) else None
+        return server_dir / "mods"
+
+    def mod_file_extensions(self) -> tuple[str, ...] | None:
+        return (".jar",)
+
+    def mods_browser_urls(self) -> dict[str, str]:
+        return {
+            "modrinth": "https://modrinth.com/mods?q=minecraft",
+            "curseforge": "https://www.curseforge.com/minecraft/mc-mods",
+        }
+
+    def mods_empty_message(self) -> str:
+        return "No mods installed yet.\nDrop .jar files into the mods folder or browse Modrinth / CurseForge."
 
     def supports_install(self) -> bool:
         return True
 
     def setup_panel_hints(self) -> list[str]:
         return [
+            "Installs server.jar directly into your Game Servers folder.",
             "Requires Java 21+ for current releases.",
             "Pick a version from Mojang's official manifest — downloads are SHA1-verified.",
             "Accept Mojang's EULA before installing.",
         ]
 
-    def overview_rows(self, server_dir: Path, config: dict) -> list[tuple[str, str]]:
-        rows = super().overview_rows(server_dir, config)
+    def overview_rows(
+        self,
+        server_dir: Path,
+        config: dict,
+        *,
+        running: bool = False,
+    ) -> list[tuple[str, str]]:
+        rows = super().overview_rows(server_dir, config, running=running)
         if mc.eula_accepted(server_dir):
             rows.append(("EULA", "Accepted"))
         version = config.get("installed_version")

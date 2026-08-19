@@ -44,6 +44,13 @@ class PageManager:
         self.current = page
         page.tkraise()
 
+        if name in ("catalog", "settings"):
+            try:
+                from core.theme import restore_default_theme
+                restore_default_theme()
+            except Exception:
+                pass
+
         # Optional lifecycle hook: pages can define on_show() to refresh
         # themselves whenever they're navigated to (e.g. picking up state
         # that changed while another page was visible).

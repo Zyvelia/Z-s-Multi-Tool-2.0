@@ -8,9 +8,12 @@ import subprocess
 import threading
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from .events import ServerEvent
-from ..adapters.base import GameServerAdapter
+
+if TYPE_CHECKING:
+    from ..adapters.base import GameServerAdapter
 
 _CREATE_NO_WINDOW = 0x08000000
 
@@ -18,19 +21,20 @@ _CREATE_NO_WINDOW = 0x08000000
 class ServerProcess:
     """One running (or most-recently-run) server process."""
 
-    def __init__(self, adapter: GameServerAdapter | None = None):
+    def __init__(self, adapter: Any = None):
         self.adapter = adapter
         self.config: dict = {}
         self.proc: subprocess.Popen | None = None
         self.events: queue.Queue[ServerEvent] = queue.Queue()
         self.players: set[str] = set()
+        self.player_join_times: dict[str, float] = {}
         self.started_at: float | None = None
 
     @property
     def running(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
 
-    def start(self, server_dir: Path, config: dict, adapter: GameServerAdapter) -> str:
+    def start(self, server_dir: Path, config: dict, adapter: Any) -> str:
         if self.running:
             return "Server is already running."
 
@@ -65,7 +69,9 @@ class ServerProcess:
 
         self.adapter = adapter
         self.config = dict(config)
+        self.server_dir: Path | None = server_dir.resolve()
         self.players.clear()
+        self.player_join_times.clear()
         self.started_at = time.time()
         threading.Thread(target=self._read_loop, daemon=True).start()
         return ""
@@ -87,9 +93,11 @@ class ServerProcess:
                         self.events.put(parsed)
                     elif parsed.kind == "player_join" and parsed.player:
                         self.players.add(parsed.player)
+                        self.player_join_times[parsed.player] = time.time()
                         self.events.put(parsed)
                     elif parsed.kind == "player_leave" and parsed.player:
                         self.players.discard(parsed.player)
+                        self.player_join_times.pop(parsed.player, None)
                         self.events.put(parsed)
 
         exit_code = proc.wait() if proc else None
@@ -101,7 +109,12 @@ class ServerProcess:
         if not self.running or self.proc.stdin is None:
             return False
         try:
-            self.proc.stdin.write(command.rstrip("\n") + "\n")
+            formatter = getattr(self.adapter, "console_command_line", None)
+            if formatter is not None:
+                line = formatter(command)
+            else:
+                line = command.rstrip("\n") + "\n"
+            self.proc.stdin.write(line)
             self.proc.stdin.flush()
             return True
         except OSError:
@@ -111,10 +124,22 @@ class ServerProcess:
         if not self.running:
             return
         if graceful and self.adapter is not None:
+            remote_stop = getattr(self.adapter, "graceful_stop_remote", None)
+            if remote_stop is not None and self.server_dir is not None:
+                result = remote_stop(self.config, self.server_dir)
+                if result is not None:
+                    ok, _msg = result
+                    if ok:
+                        return
             cmd = str(self.config.get("stop_command", "")).strip()
             if not cmd:
                 cmd = self.adapter.graceful_stop_command()
             if cmd:
-                self.send(cmd)
-                return
+                remote = getattr(self.adapter, "execute_remote_command", None)
+                if remote is not None and self.server_dir is not None:
+                    result = remote(cmd, self.config, self.server_dir)
+                    if result is not None and result[0]:
+                        return
+                if self.send(cmd):
+                    return
         self.proc.kill()

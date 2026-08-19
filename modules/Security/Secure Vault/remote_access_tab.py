@@ -1,26 +1,7 @@
 # modules/password_vault/remote_access_tab.py
 #
-# The "Settings" tab inside the Vault page. Lets you reach your
-# passwords + authenticator codes from your phone over your own
-# Tailscale network:
-#
-#   1. "Connect" joins your tailnet (`tailscale up`), same as running
-#      it from a terminal.
-#   2. "Start Remote Access" starts a small local-only web server
-#      (127.0.0.1, never exposed on your LAN) and points Tailscale's
-#      `serve` feature at it, so https://<this-device>.<tailnet>:8443/
-#      shows a mobile-friendly vault + authenticator view, protected
-#      by your master password, reachable only from your own devices.
-#      Port 8443 is this app's own fixed address (see APP_HTTPS_PORTS in
-#      core/services/tailscale_service.py) — Music Player and YouTube
-#      Downloader each have their own, so all three can be live at once.
-#      The Remote Hub module gives you a single landing page that links
-#      to whichever of the three are currently up.
-#   3. Auto-off closes remote access again after N minutes so it isn't
-#      left open indefinitely.
-#
-# Everything here is editable and persisted via TailscaleService's
-# settings.json (hostname, auth key, port, auto-off minutes, etc).
+# Remote access settings for Secure Vault — mounted in the module ⚙
+# settings screen (Tailscale + phone vault access).
 
 import threading
 
@@ -29,18 +10,6 @@ from tkinter import messagebox
 
 from core import theme
 
-BG = theme.BG
-PANEL = theme.PANEL
-CARD = theme.PANEL_2
-ACCENT = theme.ACCENT
-ACCENT_HOVER = theme.ACCENT_HOVER
-TEXT = theme.TEXT
-MUTED = theme.MUTED
-SUCCESS = theme.SUCCESS
-DANGER = theme.DANGER
-DANGER_BG = theme.DANGER_BG
-DANGER_HOVER = theme.DANGER_HOVER
-BORDER = theme.BORDER
 
 STATUS_POLL_MS = 4000
 COUNTDOWN_TICK_MS = 1000
@@ -55,19 +24,16 @@ class RemoteAccessTab(ctk.CTkFrame):
         self.tailscale = manager.container.tailscale_service
         self.web_server = manager.container.vault_web_server
 
-        self.grid_rowconfigure(0, weight=1)
-        self.grid_columnconfigure(0, weight=1)
-
         self._poll_job = None
         self._countdown_job = None
 
-        scroll = ctk.CTkScrollableFrame(self, fg_color="transparent")
-        scroll.grid(row=0, column=0, sticky="nsew")
-        scroll.grid_columnconfigure(0, weight=1)
+        content = ctk.CTkFrame(self, fg_color="transparent")
+        content.pack(fill="x")
+        content.grid_columnconfigure(0, weight=1)
 
-        self._build_tailscale_panel(scroll)
-        self._build_remote_access_panel(scroll)
-        self._build_config_panel(scroll)
+        self._build_tailscale_panel(content)
+        self._build_remote_access_panel(content)
+        self._build_config_panel(content)
 
         self._load_config_into_fields()
         self._refresh_status()
@@ -87,38 +53,38 @@ class RemoteAccessTab(ctk.CTkFrame):
         super().destroy()
 
     # =====================================================
-    # TAILSCALE PANEL
+    # TAILSCALE theme.PANEL
     # =====================================================
 
     def _build_tailscale_panel(self, parent):
-        panel = ctk.CTkFrame(parent, fg_color=PANEL)
+        panel = ctk.CTkFrame(parent, fg_color=theme.PANEL)
         panel.grid(row=0, column=0, sticky="ew", pady=(0, 12))
         panel.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(
-            panel, text="Tailscale network", font=("Segoe UI", 16, "bold"), text_color=TEXT
+            panel, text="Tailscale network", font=("Segoe UI", 16, "bold"), text_color=theme.TEXT
         ).grid(row=0, column=0, columnspan=3, sticky="w", padx=15, pady=(15, 4))
 
         self.ts_status_label = ctk.CTkLabel(
-            panel, text="Checking…", font=("Segoe UI", 13), text_color=MUTED, anchor="w", justify="left"
+            panel, text="Checking…", font=("Segoe UI", 13), text_color=theme.MUTED, anchor="w", justify="left"
         )
         self.ts_status_label.grid(row=1, column=0, columnspan=3, sticky="ew", padx=15, pady=(0, 10))
 
         self.ts_connect_btn = ctk.CTkButton(
-            panel, text="Connect", fg_color=ACCENT, hover_color=ACCENT_HOVER,
+            panel, text="Connect", fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
             text_color="#0b0d10", command=self._on_connect_clicked,
         )
         self.ts_connect_btn.grid(row=2, column=0, sticky="ew", padx=(15, 5), pady=(0, 15))
 
         self.ts_disconnect_btn = ctk.CTkButton(
-            panel, text="Disconnect", fg_color=DANGER_BG, hover_color=DANGER_HOVER,
-            text_color=DANGER, command=self._on_disconnect_clicked,
+            panel, text="Disconnect", fg_color=theme.DANGER_BG, hover_color=theme.DANGER_HOVER,
+            text_color=theme.DANGER, command=self._on_disconnect_clicked,
         )
         self.ts_disconnect_btn.grid(row=2, column=1, sticky="ew", padx=5, pady=(0, 15))
 
         ctk.CTkButton(
-            panel, text="Install Tailscale…", fg_color=CARD, hover_color=PANEL,
-            text_color=TEXT, command=self._open_install_page,
+            panel, text="Install Tailscale…", fg_color=theme.PANEL_2, hover_color=theme.PANEL,
+            text_color=theme.TEXT, command=self._open_install_page,
         ).grid(row=2, column=2, sticky="ew", padx=(5, 15), pady=(0, 15))
 
     def _open_install_page(self):
@@ -168,43 +134,43 @@ class RemoteAccessTab(ctk.CTkFrame):
         self._refresh_status()
 
     # =====================================================
-    # REMOTE ACCESS PANEL
+    # REMOTE ACCESS theme.PANEL
     # =====================================================
 
     def _build_remote_access_panel(self, parent):
-        panel = ctk.CTkFrame(parent, fg_color=PANEL)
+        panel = ctk.CTkFrame(parent, fg_color=theme.PANEL)
         panel.grid(row=1, column=0, sticky="ew", pady=(0, 12))
         panel.grid_columnconfigure(0, weight=1)
         panel.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(
-            panel, text="Remote access (view on phone)", font=("Segoe UI", 16, "bold"), text_color=TEXT
+            panel, text="Remote access (view on phone)", font=("Segoe UI", 16, "bold"), text_color=theme.TEXT
         ).grid(row=0, column=0, columnspan=2, sticky="w", padx=15, pady=(15, 4))
 
         self.ra_status_label = ctk.CTkLabel(
-            panel, text="Off", font=("Segoe UI", 13), text_color=MUTED, anchor="w", justify="left", wraplength=520,
+            panel, text="Off", font=("Segoe UI", 13), text_color=theme.MUTED, anchor="w", justify="left", wraplength=520,
         )
         self.ra_status_label.grid(row=1, column=0, columnspan=2, sticky="ew", padx=15, pady=(0, 10))
 
         self.ra_start_btn = ctk.CTkButton(
-            panel, text="▶ Start Remote Access", fg_color=SUCCESS, hover_color="#33b57d",
+            panel, text="▶ Start Remote Access", fg_color=theme.SUCCESS, hover_color="#33b57d",
             text_color="#0b0d10", command=self._on_start_remote_access,
         )
         self.ra_start_btn.grid(row=2, column=0, sticky="ew", padx=(15, 5), pady=(0, 8))
 
         self.ra_stop_btn = ctk.CTkButton(
-            panel, text="■ Stop Remote Access", fg_color=DANGER_BG, hover_color=DANGER_HOVER,
-            text_color=DANGER, command=self._on_stop_remote_access,
+            panel, text="■ Stop Remote Access", fg_color=theme.DANGER_BG, hover_color=theme.DANGER_HOVER,
+            text_color=theme.DANGER, command=self._on_stop_remote_access,
         )
         self.ra_stop_btn.grid(row=2, column=1, sticky="ew", padx=(5, 15), pady=(0, 8))
 
         ctk.CTkButton(
-            panel, text="🔍 Diagnose", fg_color=CARD, hover_color=PANEL,
-            text_color=TEXT, command=self._on_diagnose_clicked,
+            panel, text="🔍 Diagnose", fg_color=theme.PANEL_2, hover_color=theme.PANEL,
+            text_color=theme.TEXT, command=self._on_diagnose_clicked,
         ).grid(row=3, column=0, columnspan=2, sticky="ew", padx=15, pady=(0, 8))
 
         self.ra_countdown_label = ctk.CTkLabel(
-            panel, text="", font=("Segoe UI", 12), text_color=MUTED, anchor="w",
+            panel, text="", font=("Segoe UI", 12), text_color=theme.MUTED, anchor="w",
         )
         self.ra_countdown_label.grid(row=4, column=0, columnspan=2, sticky="ew", padx=15, pady=(0, 15))
 
@@ -217,7 +183,7 @@ class RemoteAccessTab(ctk.CTkFrame):
 
         ctk.CTkLabel(
             popup, text="Raw output from the Tailscale CLI — copy/paste this if you need help.",
-            font=("Segoe UI", 12), text_color=MUTED, anchor="w",
+            font=("Segoe UI", 12), text_color=theme.MUTED, anchor="w",
         ).grid(row=0, column=0, sticky="ew", padx=15, pady=(15, 5))
 
         box = ctk.CTkTextbox(popup, wrap="word")
@@ -290,26 +256,26 @@ class RemoteAccessTab(ctk.CTkFrame):
         self._refresh_status()
 
     # =====================================================
-    # CONFIG PANEL (editable fields)
+    # CONFIG theme.PANEL (editable fields)
     # =====================================================
 
     def _build_config_panel(self, parent):
-        panel = ctk.CTkFrame(parent, fg_color=PANEL)
+        panel = ctk.CTkFrame(parent, fg_color=theme.PANEL)
         panel.grid(row=2, column=0, sticky="ew")
         panel.grid_columnconfigure(0, weight=1)
         panel.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(
-            panel, text="Settings", font=("Segoe UI", 16, "bold"), text_color=TEXT
+            panel, text="Settings", font=("Segoe UI", 16, "bold"), text_color=theme.TEXT
         ).grid(row=0, column=0, columnspan=2, sticky="w", padx=15, pady=(15, 4))
 
-        ctk.CTkLabel(panel, text="Device name (optional)", font=("Segoe UI", 12), text_color=MUTED).grid(
+        ctk.CTkLabel(panel, text="Device name (optional)", font=("Segoe UI", 12), text_color=theme.MUTED).grid(
             row=1, column=0, sticky="w", padx=(15, 5)
         )
         self.hostname_entry = ctk.CTkEntry(panel, placeholder_text="e.g. my-desktop")
         self.hostname_entry.grid(row=2, column=0, sticky="ew", padx=(15, 5), pady=(0, 10))
 
-        ctk.CTkLabel(panel, text="Local port", font=("Segoe UI", 12), text_color=MUTED).grid(
+        ctk.CTkLabel(panel, text="Local port", font=("Segoe UI", 12), text_color=theme.MUTED).grid(
             row=1, column=1, sticky="w", padx=(5, 15)
         )
         self.port_entry = ctk.CTkEntry(panel, placeholder_text="8765")
@@ -317,7 +283,7 @@ class RemoteAccessTab(ctk.CTkFrame):
 
         ctk.CTkLabel(
             panel, text="Auth key (optional — for unattended reconnects)",
-            font=("Segoe UI", 12), text_color=MUTED
+            font=("Segoe UI", 12), text_color=theme.MUTED
         ).grid(row=3, column=0, columnspan=2, sticky="w", padx=15)
         self.authkey_entry = ctk.CTkEntry(panel, placeholder_text="tskey-auth-…", show="•")
         self.authkey_entry.grid(row=4, column=0, columnspan=2, sticky="ew", padx=15, pady=(0, 10))
@@ -325,7 +291,7 @@ class RemoteAccessTab(ctk.CTkFrame):
         self.accept_routes_var = ctk.BooleanVar(value=True)
         ctk.CTkCheckBox(
             panel, text="Accept subnet routes from tailnet", variable=self.accept_routes_var,
-            fg_color=ACCENT, hover_color=ACCENT_HOVER,
+            fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
         ).grid(row=5, column=0, columnspan=2, sticky="w", padx=15, pady=(0, 10))
 
         auto_off_row = ctk.CTkFrame(panel, fg_color="transparent")
@@ -335,18 +301,18 @@ class RemoteAccessTab(ctk.CTkFrame):
         self.auto_off_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(
             auto_off_row, text="Auto turn off remote access after", variable=self.auto_off_var,
-            fg_color=ACCENT, hover_color=ACCENT_HOVER,
+            fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
         ).grid(row=0, column=0, sticky="w")
 
         self.auto_off_minutes_entry = ctk.CTkEntry(auto_off_row, width=70, placeholder_text="30")
         self.auto_off_minutes_entry.grid(row=0, column=1, sticky="w", padx=(10, 5))
 
-        ctk.CTkLabel(auto_off_row, text="minutes", font=("Segoe UI", 12), text_color=MUTED).grid(
+        ctk.CTkLabel(auto_off_row, text="minutes", font=("Segoe UI", 12), text_color=theme.MUTED).grid(
             row=0, column=2, sticky="w"
         )
 
         ctk.CTkButton(
-            panel, text="💾 Save Settings", fg_color=ACCENT, hover_color=ACCENT_HOVER,
+            panel, text="💾 Save Settings", fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
             text_color="#0b0d10", command=self._on_save_settings,
         ).grid(row=7, column=0, columnspan=2, sticky="ew", padx=15, pady=(4, 15))
 
@@ -356,7 +322,7 @@ class RemoteAccessTab(ctk.CTkFrame):
                  "devices signed into your tailnet, never from the open internet. Logging in "
                  "from your phone uses the same master password as this app, and unlocks the "
                  "same vault.",
-            font=("Segoe UI", 11), text_color=MUTED, anchor="w", justify="left", wraplength=560,
+            font=("Segoe UI", 11), text_color=theme.MUTED, anchor="w", justify="left", wraplength=560,
         ).grid(row=8, column=0, columnspan=2, sticky="ew", padx=15, pady=(0, 15))
 
     def _on_save_settings(self):
@@ -438,7 +404,7 @@ class RemoteAccessTab(ctk.CTkFrame):
 
         if not status["installed"]:
             self.ts_status_label.configure(
-                text="Tailscale isn't installed on this device.", text_color=MUTED
+                text="Tailscale isn't installed on this device.", text_color=theme.MUTED
             )
             self.ts_connect_btn.configure(state="disabled")
             self.ts_disconnect_btn.configure(state="disabled")
@@ -446,12 +412,12 @@ class RemoteAccessTab(ctk.CTkFrame):
             ip_bit = f"  ·  {status['tailscale_ip']}" if status["tailscale_ip"] else ""
             self.ts_status_label.configure(
                 text=f"🟢 Connected as {status['hostname'] or 'this device'}{ip_bit}",
-                text_color=SUCCESS,
+                text_color=theme.SUCCESS,
             )
             self.ts_connect_btn.configure(state="normal", text="Reconnect")
             self.ts_disconnect_btn.configure(state="normal")
         else:
-            self.ts_status_label.configure(text="⚪ Not connected.", text_color=MUTED)
+            self.ts_status_label.configure(text="⚪ Not connected.", text_color=theme.MUTED)
             self.ts_connect_btn.configure(state="normal", text="Connect")
             self.ts_disconnect_btn.configure(state="disabled")
 
@@ -464,11 +430,11 @@ class RemoteAccessTab(ctk.CTkFrame):
                     f"the Remote Hub page — https://{hostname}/ — if Music Player or "
                     f"YouTube Downloader are also live). Serving locally on 127.0.0.1:{port}."
                 ),
-                text_color=SUCCESS,
+                text_color=theme.SUCCESS,
             )
             self.ra_start_btn.configure(state="disabled")
             self.ra_stop_btn.configure(state="normal")
         else:
-            self.ra_status_label.configure(text="⚪ Off.", text_color=MUTED)
+            self.ra_status_label.configure(text="⚪ Off.", text_color=theme.MUTED)
             self.ra_start_btn.configure(state="normal")
             self.ra_stop_btn.configure(state="disabled")

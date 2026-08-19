@@ -17,31 +17,10 @@ from PIL import Image
 from core import theme
 from . import audio_backend as backend
 
-BG = theme.BG
-PANEL = theme.PANEL
-PANEL_2 = theme.PANEL_2
-ACCENT = theme.ACCENT
-ACCENT_HOVER = theme.ACCENT_HOVER
-TEXT = theme.TEXT
-MUTED = theme.MUTED
-DANGER = theme.DANGER
-DANGER_HOVER = theme.DANGER_HOVER
-PANEL_HOVER = theme.PANEL_HOVER
-
-_BTN = dict(fg_color=PANEL_2, hover_color=PANEL_HOVER, text_color=TEXT,
-            height=32, corner_radius=8)
-_BTN_ACCENT = dict(fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color="white",
-                    height=32, corner_radius=8)
-_BTN_DANGER = dict(fg_color=PANEL_2, hover_color=DANGER_HOVER, text_color=TEXT,
-                    height=32, corner_radius=8)
-
-# Bulk fields exclude Title (near-always unique per track) and Track #
-# (handled separately via the auto-number control below).
-BULK_FIELDS = [(k, l) for k, l in backend.TAG_FIELDS if k not in ("title", "tracknumber")]
-
 
 def _make_btn(parent, text, cmd, **overrides):
-    kw = {**_BTN, **overrides}
+    kw = theme.secondary_button_kwargs(height=32)
+    kw.update(overrides)
     return ctk.CTkButton(parent, text=text, command=cmd, **kw)
 
 
@@ -49,7 +28,7 @@ class _FileRow(ctk.CTkFrame):
     """One row in the batch list: checkbox + filename + short tag preview."""
 
     def __init__(self, parent, path, on_toggle):
-        super().__init__(parent, fg_color=PANEL_2, corner_radius=6)
+        super().__init__(parent, fg_color=theme.PANEL_2, corner_radius=6)
         self.path = path
         self.audio_obj = None
         self.kind = None
@@ -58,13 +37,13 @@ class _FileRow(ctk.CTkFrame):
 
         self.selected = ctk.BooleanVar(value=True)
         ctk.CTkCheckBox(self, text="", variable=self.selected, width=20,
-                         command=on_toggle, fg_color=ACCENT, hover_color=ACCENT_HOVER
+                         command=on_toggle, fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER
                          ).grid(row=0, column=0, rowspan=2, padx=(8, 4), pady=6)
 
-        self.name_label = ctk.CTkLabel(self, text=os.path.basename(path), text_color=TEXT, anchor="w")
+        self.name_label = ctk.CTkLabel(self, text=os.path.basename(path), text_color=theme.TEXT, anchor="w")
         self.name_label.grid(row=0, column=1, sticky="ew", padx=(0, 8), pady=(6, 0))
 
-        self.preview_label = ctk.CTkLabel(self, text="Loading...", text_color=MUTED, anchor="w", font=theme.font(11))
+        self.preview_label = ctk.CTkLabel(self, text="Loading...", text_color=theme.MUTED, anchor="w", font=theme.font(11))
         self.preview_label.grid(row=1, column=1, sticky="ew", padx=(0, 8), pady=(0, 6))
 
         self._try_load()
@@ -75,9 +54,9 @@ class _FileRow(ctk.CTkFrame):
             artist = backend.get_field_value(self.audio_obj, self.kind, "artist")
             title = backend.get_field_value(self.audio_obj, self.kind, "title")
             preview = f"{artist} - {title}" if artist or title else "(no tags)"
-            self.preview_label.configure(text=preview, text_color=MUTED)
+            self.preview_label.configure(text=preview, text_color=theme.MUTED)
         except Exception as e:
-            self.preview_label.configure(text=f"Failed to read: {e}", text_color=DANGER)
+            self.preview_label.configure(text=f"Failed to read: {e}", text_color=theme.DANGER)
             self.audio_obj = None
             self.kind = None
 
@@ -88,7 +67,7 @@ class MultiAudioWindow(ctk.CTkToplevel):
         super().__init__(parent)
         self.title("Batch Audio Tag Editor")
         self.geometry("760x540")
-        self.configure(fg_color=BG)
+        self.configure(fg_color=theme.BG)
         self.minsize(640, 420)
 
         self.rows = []  # list of _FileRow
@@ -104,17 +83,17 @@ class MultiAudioWindow(ctk.CTkToplevel):
         self.grid_rowconfigure(1, weight=1)
 
         # --- top bar ---
-        top = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
+        top = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=10)
         top.grid(row=0, column=0, columnspan=2, sticky="ew", padx=10, pady=(10, 6))
 
-        _make_btn(top, "Add Files...", self._add_files, **_BTN_ACCENT).pack(side="left", padx=(10, 6), pady=10)
+        _make_btn(top, "Add Files...", self._add_files, **theme.primary_button_kwargs(height=32)).pack(side="left", padx=(10, 6), pady=10)
         _make_btn(top, "Add Folder...", self._add_folder).pack(side="left", padx=6, pady=10)
-        _make_btn(top, "Clear List", self._clear_list, **_BTN_DANGER).pack(side="left", padx=6, pady=10)
-        self.count_label = ctk.CTkLabel(top, text="0 files", text_color=MUTED)
+        _make_btn(top, "Clear List", self._clear_list, **theme.danger_button_kwargs(height=32)).pack(side="left", padx=6, pady=10)
+        self.count_label = ctk.CTkLabel(top, text="0 files", text_color=theme.MUTED)
         self.count_label.pack(side="right", padx=10)
 
         # --- left: scrollable file list ---
-        list_panel = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
+        list_panel = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=10)
         list_panel.grid(row=1, column=0, sticky="nsew", padx=(10, 5), pady=6)
         list_panel.grid_columnconfigure(0, weight=1)
         list_panel.grid_rowconfigure(1, weight=1)
@@ -131,21 +110,21 @@ class MultiAudioWindow(ctk.CTkToplevel):
         # --- right: bulk edit panel (scrollable so it never gets clipped
         # as fields are added) ---
         edit_panel = ctk.CTkScrollableFrame(
-            self, fg_color=PANEL, corner_radius=10, width=260,
-            scrollbar_button_color=PANEL_2, scrollbar_button_hover_color=PANEL_HOVER,
+            self, fg_color=theme.PANEL, corner_radius=10, width=260,
+            scrollbar_button_color=theme.PANEL_2, scrollbar_button_hover_color=theme.PANEL_HOVER,
         )
         edit_panel.grid(row=1, column=1, sticky="nsew", padx=(5, 10), pady=6)
 
-        ctk.CTkLabel(edit_panel, text="Apply to Selected", text_color=TEXT, font=theme.font(13)).pack(
+        ctk.CTkLabel(edit_panel, text="Apply to Selected", text_color=theme.TEXT, font=theme.font(13)).pack(
             padx=14, pady=(14, 4), anchor="w")
-        ctk.CTkLabel(edit_panel, text="Blank fields are left unchanged.", text_color=MUTED,
+        ctk.CTkLabel(edit_panel, text="Blank fields are left unchanged.", text_color=theme.MUTED,
                      font=theme.font(11)).pack(padx=14, pady=(0, 10), anchor="w")
 
         self.field_vars = {}
         for key, label in BULK_FIELDS:
-            ctk.CTkLabel(edit_panel, text=label, text_color=MUTED, anchor="w").pack(padx=14, pady=(4, 0), anchor="w")
+            ctk.CTkLabel(edit_panel, text=label, text_color=theme.MUTED, anchor="w").pack(padx=14, pady=(4, 0), anchor="w")
             var = ctk.StringVar()
-            ctk.CTkEntry(edit_panel, fg_color=PANEL_2, border_color=PANEL_2, textvariable=var).pack(
+            ctk.CTkEntry(edit_panel, fg_color=theme.PANEL_2, border_color=theme.PANEL_2, textvariable=var).pack(
                 padx=14, pady=(2, 0), fill="x")
             self.field_vars[key] = var
 
@@ -154,34 +133,34 @@ class MultiAudioWindow(ctk.CTkToplevel):
         track_row.pack(padx=14, pady=(14, 0), fill="x")
         self.auto_number = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(track_row, text="Auto-number tracks, starting at:", variable=self.auto_number,
-                         fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=TEXT,
+                         fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER, text_color=theme.TEXT,
                          font=theme.font(11)).pack(anchor="w")
         self.track_start_var = ctk.StringVar(value="1")
-        ctk.CTkEntry(edit_panel, fg_color=PANEL_2, border_color=PANEL_2, width=60,
+        ctk.CTkEntry(edit_panel, fg_color=theme.PANEL_2, border_color=theme.PANEL_2, width=60,
                      textvariable=self.track_start_var).pack(padx=14, pady=(4, 0), anchor="w")
         ctk.CTkLabel(edit_panel, text="Numbers assigned in list order, top to bottom.",
-                     text_color=MUTED, font=theme.font(10), justify="left", wraplength=220).pack(
+                     text_color=theme.MUTED, font=theme.font(10), justify="left", wraplength=220).pack(
             padx=14, pady=(2, 0), anchor="w")
 
         # --- cover art ---
-        ctk.CTkLabel(edit_panel, text="Cover Art", text_color=TEXT, font=theme.font(13)).pack(
+        ctk.CTkLabel(edit_panel, text="Cover Art", text_color=theme.TEXT, font=theme.font(13)).pack(
             padx=14, pady=(20, 4), anchor="w")
         _make_btn(edit_panel, "Set Cover for Selected...", self._pick_cover_for_all).pack(padx=14, pady=4, fill="x")
-        _make_btn(edit_panel, "Remove Cover from Selected", self._remove_cover_for_all, **_BTN_DANGER).pack(
+        _make_btn(edit_panel, "Remove Cover from Selected", self._remove_cover_for_all, **theme.danger_button_kwargs(height=32)).pack(
             padx=14, pady=4, fill="x")
         self._bulk_cover_path = None
 
         # --- apply / close ---
-        _make_btn(edit_panel, "Apply to Selected", self._apply_to_selected, **_BTN_ACCENT).pack(
+        _make_btn(edit_panel, "Apply to Selected", self._apply_to_selected, **theme.primary_button_kwargs(height=32)).pack(
             padx=14, pady=(20, 4), fill="x")
         _make_btn(edit_panel, "Close", self.destroy).pack(padx=14, pady=4, fill="x")
 
         # --- status bar ---
-        self.status_label = ctk.CTkLabel(self, text="", text_color=MUTED, anchor="w")
+        self.status_label = ctk.CTkLabel(self, text="", text_color=theme.MUTED, anchor="w")
         self.status_label.grid(row=2, column=0, columnspan=2, sticky="ew", padx=14, pady=(0, 10))
 
     def _set_status(self, msg, error=False):
-        self.status_label.configure(text=msg, text_color=(DANGER if error else MUTED))
+        self.status_label.configure(text=msg, text_color=(theme.DANGER if error else theme.MUTED))
 
     def _update_count(self):
         self.count_label.configure(text=f"{len(self.rows)} files")

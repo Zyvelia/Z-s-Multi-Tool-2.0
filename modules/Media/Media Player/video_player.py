@@ -15,26 +15,16 @@ from tkinter import filedialog
 import vlc
 
 from core import theme
-
-# ── Colours (matches the app's shared dark theme) ─────────────────────────
-BG = theme.BG
-PANEL = theme.PANEL
-PANEL_2 = theme.PANEL_2
-ACCENT = theme.ACCENT
-TEXT = theme.TEXT
-MUTED = theme.MUTED
-
-_BTN = dict(fg_color=PANEL_2, hover_color=theme.PANEL_HOVER, text_color=TEXT, height=34, corner_radius=8)
-_BTN_ACCENT = dict(fg_color=ACCENT, hover_color=theme.ACCENT_DIM, text_color="white", height=34, corner_radius=8)
-_ICON_BTN = dict(
-    fg_color=PANEL_2, hover_color="#232a3a", text_color=TEXT,
-    width=46, height=40, corner_radius=10, font=("Segoe UI", 15),
+from .media_types import file_dialog_video_types
+from ._buttons import (
+    cool_button_kwargs, make_btn as _make_btn, icon_btn_kwargs as _icon_btn_kwargs,
+    cool_accent, cool_accent_hover, selected_track_kwargs, highlight_fill_hover,
+    highlight_border, play_button_kwargs,
 )
-_ICON_BTN_ACCENT = {**_ICON_BTN, "fg_color": ACCENT, "hover_color": "#2f7fd6", "text_color": "white"}
 
 
-def _make_btn(parent, text, cmd, **overrides):
-    return ctk.CTkButton(parent, text=text, command=cmd, **{**_BTN, **overrides})
+def _icon_btn_accent_kwargs(**overrides):
+    return play_button_kwargs(width=52, **overrides)
 
 
 # =====================================================
@@ -193,7 +183,7 @@ class VLCMediaEngine:
 class VideoPlayerPage(ctk.CTkFrame):
 
     def __init__(self, parent, manager):
-        super().__init__(parent, fg_color=BG)
+        super().__init__(parent, fg_color=theme.BG)
         self.manager = manager
 
         if hasattr(manager, "media_engine"):
@@ -252,23 +242,34 @@ class VideoPlayerPage(ctk.CTkFrame):
         self._build_playlist()
 
     def _build_header(self):
-        self.header = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
+        self.header = ctk.CTkFrame(
+            self, fg_color=theme.PANEL, corner_radius=10,
+            border_width=1, border_color=theme.BORDER,
+        )
         self.header.pack(side="top", fill="x", padx=15, pady=(15, 8))
 
         ctk.CTkLabel(
-            self.header, text="🎬  Video Player", font=("Segoe UI", 22, "bold"), text_color=TEXT,
+            self.header, text="🎬  Video Player",
+            font=("Segoe UI", 22, "bold"), text_color=theme.TEXT,
         ).pack(side="left", padx=10)
 
-        self.status = ctk.CTkLabel(self.header, text="Ready", text_color=MUTED)
+        self.status = ctk.CTkLabel(
+            self.header, text="Ready", text_color=theme.TEXT,
+            font=("Segoe UI", 12, "bold"),
+        )
         self.status.pack(side="right", padx=15)
 
     def _build_video_panel(self):
-        self.video_frame = ctk.CTkFrame(self, fg_color="black", corner_radius=10, height=320)
+        self.video_frame = ctk.CTkFrame(
+            self, fg_color="black", corner_radius=10, height=320,
+            border_width=2, border_color=theme.BORDER,
+        )
         self.video_frame.pack(side="top", fill="x", padx=15, pady=(0, 8))
         self.video_frame.pack_propagate(False)
 
         self.video_label = ctk.CTkLabel(
-            self.video_frame, text="No Video Loaded", text_color=MUTED, font=("Segoe UI", 14),
+            self.video_frame, text="No Video Loaded",
+            text_color=theme.MUTED, font=("Segoe UI", 15),
         )
         self.video_label.pack(expand=True)
 
@@ -278,84 +279,126 @@ class VideoPlayerPage(ctk.CTkFrame):
         # Shown in the video_frame's spot instead of the video itself while
         # popped out (see toggle_popout below) - keeps the layout from
         # jumping around and makes it obvious where the video went.
-        self.popout_placeholder = ctk.CTkFrame(self, fg_color=PANEL_2, corner_radius=10, height=60)
+        self.popout_placeholder = ctk.CTkFrame(
+            self, fg_color=theme.PANEL_2, corner_radius=10, height=60,
+            border_width=1, border_color=theme.ACCENT_DIM,
+        )
         self.popout_placeholder.pack_propagate(False)
         ctk.CTkLabel(
             self.popout_placeholder, text="🗗  Video is playing in its own window",
-            text_color=MUTED, font=("Segoe UI", 13),
+            text_color=theme.TEXT, font=("Segoe UI", 13, "bold"),
         ).pack(expand=True)
 
     def _build_playlist(self):
-        self.playlist_frame = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
+        self.playlist_frame = ctk.CTkFrame(
+            self, fg_color=theme.PANEL, corner_radius=10,
+            border_width=1, border_color=theme.BORDER,
+        )
         self.playlist_frame.pack(side="top", fill="both", expand=True, padx=15, pady=8)
 
-        ctk.CTkLabel(
-            self.playlist_frame, text="Playlist", font=("Segoe UI", 15, "bold"), text_color=TEXT,
-        ).pack(anchor="w", padx=12, pady=(10, 4))
+        top = ctk.CTkFrame(self.playlist_frame, fg_color="transparent")
+        top.pack(fill="x", padx=12, pady=(10, 4))
 
-        self.song_frame = ctk.CTkScrollableFrame(self.playlist_frame, fg_color=PANEL_2, corner_radius=8)
+        ctk.CTkLabel(
+            top, text="Playlist", font=("Segoe UI", 16, "bold"), text_color=theme.TEXT,
+        ).pack(side="left")
+
+        self.playlist_count = ctk.CTkLabel(
+            top, text="0 files", text_color=theme.TEXT, font=("Segoe UI", 12, "bold"),
+        )
+        self.playlist_count.pack(side="right")
+
+        self.song_frame = ctk.CTkScrollableFrame(
+            self.playlist_frame, fg_color=theme.BG, corner_radius=8,
+            border_width=1, border_color=theme.BORDER,
+            scrollbar_button_color=theme.PANEL_2,
+            scrollbar_button_hover_color=theme.PANEL_HOVER,
+        )
         self.song_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
     def _build_progress(self):
-        self.progress_row = ctk.CTkFrame(self, fg_color="transparent")
+        self.progress_card = ctk.CTkFrame(
+            self, fg_color=theme.PANEL_2, corner_radius=10,
+            border_width=1, border_color=theme.BORDER,
+        )
+        self.progress_card.pack(side="bottom", fill="x", padx=15, pady=(0, 6))
 
-        self.progress = ctk.CTkProgressBar(self.progress_row, progress_color=ACCENT)
+        self.time_label = ctk.CTkLabel(
+            self.progress_card, text="00:00 / 00:00",
+            text_color=theme.TEXT, font=("Consolas", 12),
+        )
+        self.time_label.pack(anchor="w", padx=12, pady=(8, 2))
+
+        self.progress = ctk.CTkProgressBar(
+            self.progress_card, progress_color=cool_accent(),
+            fg_color=theme.BORDER, corner_radius=4, height=10,
+        )
         self.progress.set(0)
-        self.progress.pack(fill="x")
-
-        self.time_label = ctk.CTkLabel(self, text="00:00 / 00:00", text_color=MUTED, font=("Segoe UI", 11))
-
-        # Pack bottommost-first within this pair so the progress bar ends
-        # up above the time text, matching the original visual order.
-        self.time_label.pack(side="bottom", pady=(2, 8))
-        self.progress_row.pack(side="bottom", fill="x", padx=15, pady=(0, 4))
+        self.progress.pack(fill="x", padx=12, pady=(0, 10))
 
     def _build_controls(self):
-        self.controls = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
+        self.controls = ctk.CTkFrame(
+            self, fg_color=theme.PANEL, corner_radius=10,
+            border_width=1, border_color=theme.BORDER,
+        )
         self.controls.pack(side="bottom", pady=(0, 8))
 
         inner = ctk.CTkFrame(self.controls, fg_color="transparent")
         inner.pack(padx=10, pady=10)
 
-        ctk.CTkButton(inner, text="⏮", command=self.prev, **_ICON_BTN).grid(row=0, column=0, padx=4)
-        ctk.CTkButton(inner, text="▶", command=self.play, **_ICON_BTN_ACCENT).grid(row=0, column=1, padx=4)
-        ctk.CTkButton(inner, text="⏸", command=self.pause, **_ICON_BTN).grid(row=0, column=2, padx=4)
-        ctk.CTkButton(inner, text="⏭", command=self.next, **_ICON_BTN).grid(row=0, column=3, padx=4)
+        ctk.CTkButton(inner, text="⏮", command=self.prev, **_icon_btn_kwargs()).grid(row=0, column=0, padx=4)
+        ctk.CTkButton(inner, text="▶", command=self.play, **_icon_btn_accent_kwargs()).grid(row=0, column=1, padx=4)
+        ctk.CTkButton(inner, text="⏸", command=self.pause, **_icon_btn_kwargs()).grid(row=0, column=2, padx=4)
+        ctk.CTkButton(inner, text="⏭", command=self.next, **_icon_btn_kwargs()).grid(row=0, column=3, padx=4)
 
+        fs_kw = cool_button_kwargs(width=140)
         self.fullscreen_btn = ctk.CTkButton(
-            inner, text="⛶ Fullscreen", command=self.toggle_fullscreen, **{**_BTN, "width": 140},
+            inner, text="⛶ Fullscreen", command=self.toggle_fullscreen, **fs_kw,
         )
         self.fullscreen_btn.grid(row=0, column=4, padx=(16, 4))
 
+        pop_kw = cool_button_kwargs(width=130)
         self.popout_btn = ctk.CTkButton(
-            inner, text="🗗 Pop Out", command=self.toggle_popout, **{**_BTN, "width": 130},
+            inner, text="🗗 Pop Out", command=self.toggle_popout, **pop_kw,
         )
         self.popout_btn.grid(row=0, column=5, padx=4)
 
     def _build_load_button(self):
+        load_kw = theme.primary_button_kwargs()
+        load_kw["font"] = ("Segoe UI", 13, "bold")
         self.load_btn = ctk.CTkButton(
             self, text="📂  Open Media Files", command=self.load_files,
-            font=("Segoe UI", 13, "bold"), **_BTN_ACCENT,
+            **load_kw,
         )
-        self.load_btn.pack(side="bottom", pady=(0, 8))
+        self.load_btn.pack(side="bottom", fill="x", padx=15, pady=(0, 8))
 
     def _build_volume(self):
-        self.volume_frame = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10)
+        self.volume_frame = ctk.CTkFrame(
+            self, fg_color=theme.PANEL, corner_radius=10,
+            border_width=1, border_color=theme.BORDER,
+        )
         self.volume_frame.pack(side="bottom", fill="x", padx=15, pady=(0, 15))
 
         inner = ctk.CTkFrame(self.volume_frame, fg_color="transparent")
         inner.pack(fill="x", padx=12, pady=10)
 
-        ctk.CTkLabel(inner, text="🔈", text_color=MUTED, font=("Segoe UI", 14)).pack(side="left", padx=(0, 10))
+        ctk.CTkLabel(
+            inner, text="Volume", text_color=theme.TEXT,
+            font=("Segoe UI", 12, "bold"),
+        ).pack(side="left", padx=(0, 10))
 
         self.volume = ctk.CTkSlider(
-            inner, from_=0, to=1, progress_color=ACCENT,
-            button_color=ACCENT, button_hover_color="#2f7fd6", command=self.set_volume,
+            inner, from_=0, to=1, progress_color=cool_accent(),
+            button_color=cool_accent(), button_hover_color=cool_accent_hover(),
+            fg_color=theme.BORDER, command=self.set_volume, corner_radius=4, height=16,
         )
         self.volume.set(0.5)
         self.volume.pack(side="left", fill="x", expand=True)
 
-        self.volume_pct = ctk.CTkLabel(inner, text="50%", text_color=MUTED, width=40)
+        self.volume_pct = ctk.CTkLabel(
+            inner, text="50%", text_color=theme.TEXT, width=44,
+            font=("Segoe UI", 12, "bold"),
+        )
         self.volume_pct.pack(side="left", padx=(10, 0))
 
     # =====================================================
@@ -363,11 +406,7 @@ class VideoPlayerPage(ctk.CTkFrame):
     # =====================================================
 
     def load_files(self):
-        files = filedialog.askopenfilenames(
-            filetypes=[
-                ("Media Files", "*.mp3 *.wav *.flac *.ogg *.m4a *.mp4 *.mkv *.avi *.mov *.webm")
-            ]
-        )
+        files = filedialog.askopenfilenames(filetypes=file_dialog_video_types())
         if not files:
             return
 
@@ -379,21 +418,30 @@ class VideoPlayerPage(ctk.CTkFrame):
         self.song_names = [os.path.basename(f) for f in files]
 
         for i, name in enumerate(self.song_names):
+            row = ctk.CTkFrame(
+                self.song_frame, fg_color=theme.PANEL_2, corner_radius=6,
+                border_width=1, border_color=theme.BORDER,
+            )
+            row.pack(fill="x", padx=4, pady=2)
+
             btn = ctk.CTkButton(
-                self.song_frame,
+                row,
                 text=self._track_label(i, name, active=False),
                 anchor="w",
-                fg_color=PANEL,
-                hover_color="#232a3a",
-                text_color=TEXT,
+                fg_color="transparent",
+                hover_color=highlight_fill_hover(),
+                text_color=theme.TEXT,
+                font=("Segoe UI", 13),
                 corner_radius=6,
-                height=32,
+                height=34,
                 command=lambda idx=i: self.play_song(idx),
             )
-            btn.pack(fill="x", padx=2, pady=2)
+            btn.pack(side="left", fill="x", expand=True, padx=2, pady=1)
             self.song_buttons.append(btn)
 
-        self.status.configure(text=f"{len(files)} file(s) loaded")
+        count = len(files)
+        self.playlist_count.configure(text=f"{count} file{'s' if count != 1 else ''}")
+        self.status.configure(text=f"{count} file(s) loaded", text_color=theme.TEXT)
 
     @staticmethod
     def _track_label(index, name, active):
@@ -445,9 +493,14 @@ class VideoPlayerPage(ctk.CTkFrame):
             active = i == self.active_index
             button.configure(
                 text=self._track_label(i, self.song_names[i], active),
-                fg_color=ACCENT if active else PANEL,
-                text_color="white" if active else TEXT,
+                **(selected_track_kwargs() if active else dict(
+                    fg_color="transparent",
+                    hover_color=highlight_fill_hover(),
+                    text_color=theme.TEXT,
+                    font=("Segoe UI", 13),
+                )),
             )
+            button.master.configure(border_color=highlight_border() if active else theme.BORDER)
 
     def setup_video_output(self):
         # Renders into the popout window's frame instead of the embedded
@@ -499,8 +552,7 @@ class VideoPlayerPage(ctk.CTkFrame):
         # Hide everything except the video panel so it can take over the window.
         self.header.pack_forget()
         self.playlist_frame.pack_forget()
-        self.progress_row.pack_forget()
-        self.time_label.pack_forget()
+        self.progress_card.pack_forget()
         self.controls.pack_forget()
         self.load_btn.pack_forget()
         self.volume_frame.pack_forget()
@@ -544,10 +596,9 @@ class VideoPlayerPage(ctk.CTkFrame):
         self.video_frame.pack(side="top", fill="x", padx=15, pady=(0, 8))
 
         self.volume_frame.pack(side="bottom", fill="x", padx=15, pady=(0, 15))
-        self.load_btn.pack(side="bottom", pady=(0, 8))
+        self.load_btn.pack(side="bottom", fill="x", padx=15, pady=(0, 8))
         self.controls.pack(side="bottom", pady=(0, 8))
-        self.time_label.pack(side="bottom", pady=(2, 8))
-        self.progress_row.pack(side="bottom", fill="x", padx=15, pady=(0, 4))
+        self.progress_card.pack(side="bottom", fill="x", padx=15, pady=(0, 6))
 
         self.playlist_frame.pack(side="top", fill="both", expand=True, padx=15, pady=8)
 
@@ -649,6 +700,22 @@ class VideoPlayerPage(ctk.CTkFrame):
             )
 
         state = self.engine.get_state()
+
+        if self.engine.is_playing():
+            name = ""
+            if 0 <= self.active_index < len(self.song_names):
+                name = self.song_names[self.active_index]
+            self.status.configure(
+                text=f"Playing ▶  {name}" if name else "Playing ▶",
+                text_color=theme.ACCENT,
+            )
+            self.video_label.configure(text="")
+        elif state == vlc.State.Paused:
+            self.status.configure(text="Paused ⏸", text_color=theme.MUTED)
+        elif self.engine.playlist:
+            self.status.configure(text="Stopped", text_color=theme.TEXT)
+        else:
+            self.status.configure(text="Ready", text_color=theme.TEXT)
 
         if state in (vlc.State.Ended, vlc.State.Stopped):
             if self.engine.index + 1 < len(self.engine.playlist):
