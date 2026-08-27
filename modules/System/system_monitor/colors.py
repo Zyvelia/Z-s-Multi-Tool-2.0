@@ -14,6 +14,11 @@ CHART_METRIC_COLORS: dict[str, str] = {
     "ram": "#a78bfa",   # purple
     "disk": "#fb923c",  # orange
     "swap": "#34d399",  # teal
+    "net_down": "#38bdf8",
+    "net_up": "#22d3ee",
+    "disk_read": "#fbbf24",
+    "disk_write": "#f97316",
+    "gpu": "#c084fc",
 }
 
 # Per-core bars cycle through a wide hue set (not theme accent hashes).

@@ -131,8 +131,9 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(404, {"error": "file not found"})
             return
         size = os.path.getsize(full)
+        mime = storage._mime_type(full)
         self.send_response(200)
-        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Type", mime)
         self.send_header("Content-Length", str(size))
         self.send_header(
             "Content-Disposition",
@@ -273,9 +274,10 @@ _PAGE_SHELL = """<!doctype html>
 <div class="wrap">
   <h2>Send to PC</h2>
   <div class="dropzone" id="drop">
-    Tap to choose a file, or drag one here
+    Tap to choose a photo or file, or drag one here
     <div><button class="pickbtn" id="pickBtn">Choose file</button></div>
-    <input type="file" id="fileInput" multiple>
+    <div><button class="pickbtn" id="photoBtn" style="background:#3ddc84;margin-left:8px;">Choose photo</button></div>
+    <input type="file" id="fileInput" multiple accept="image/*,video/*,*/*">
   </div>
 
   <h2>Get from PC</h2>
@@ -287,6 +289,7 @@ _PAGE_SHELL = """<!doctype html>
 const drop = document.getElementById('drop');
 const fileInput = document.getElementById('fileInput');
 const pickBtn = document.getElementById('pickBtn');
+const photoBtn = document.getElementById('photoBtn');
 const outbox = document.getElementById('outbox');
 const toast = document.getElementById('toast');
 
@@ -303,7 +306,8 @@ function fmtSize(bytes) {
 }
 function escapeHtml(s){return (s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 
-pickBtn.onclick = () => fileInput.click();
+pickBtn.onclick = () => { fileInput.removeAttribute('capture'); fileInput.accept = '*/*'; fileInput.click(); };
+photoBtn.onclick = () => { fileInput.removeAttribute('capture'); fileInput.accept = 'image/*,video/*'; fileInput.click(); };
 fileInput.onchange = () => sendFiles(fileInput.files);
 
 ['dragover','dragenter'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('drag'); }));
@@ -332,11 +336,14 @@ async function loadOutbox() {
     outbox.innerHTML = '<div class="muted-msg">Nothing shared yet — drop a file in your Quick Send Shared folder on the PC.</div>';
     return;
   }
-  outbox.innerHTML = data.files.map(f => `
+  outbox.innerHTML = data.files.map(f => {
+    const icon = f.kind === 'image' ? '🖼️' : (f.kind === 'video' ? '🎬' : '📄');
+    return `
     <div class="file">
-      <div><div class="fname">${escapeHtml(f.name)}</div><div class="fmeta">${fmtSize(f.size)}</div></div>
+      <div><div class="fname">${icon} ${escapeHtml(f.name)}</div><div class="fmeta">${fmtSize(f.size)}</div></div>
       <a class="dl" href="/api/outbox/${encodeURIComponent(f.name)}" download>Download</a>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 }
 
 loadOutbox();

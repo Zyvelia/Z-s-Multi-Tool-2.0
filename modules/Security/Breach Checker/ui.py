@@ -1,6 +1,9 @@
 import threading
 import webbrowser
 
+import importlib.util
+from pathlib import Path
+
 import customtkinter as ctk
 
 try:
@@ -12,6 +15,15 @@ from core import theme
 
 from .hibp_api import check_password, check_account, HIBPError
 from .security import InMemorySecret
+
+_vap_spec = importlib.util.spec_from_file_location(
+    "vault_audit_panel",
+    Path(__file__).resolve().parent.parent / "vault_audit_panel.py",
+)
+_vap_mod = importlib.util.module_from_spec(_vap_spec)
+assert _vap_spec.loader is not None
+_vap_spec.loader.exec_module(_vap_mod)
+VaultAuditPanel = _vap_mod.VaultAuditPanel
 
 
 def _btn(parent, text, cmd, **kw):
@@ -33,12 +45,12 @@ class BreachCheckerPage(ctk.CTkFrame):
         header.pack(fill="x", padx=12, pady=(12, 6))
 
         ctk.CTkLabel(
-            header, text="🕵️  Breach Checker",
+            header, text="🛡  Security Center",
             font=("Segoe UI", 22, "bold"), text_color=theme.TEXT
         ).pack(side="left", padx=10, pady=10)
 
         ctk.CTkLabel(
-            header, text="Powered by Have I Been Pwned",
+            header, text="HIBP checks + Secure Vault audit",
             font=("Segoe UI", 11), text_color=theme.MUTED
         ).pack(side="left", padx=(0, 10))
 
@@ -47,9 +59,16 @@ class BreachCheckerPage(ctk.CTkFrame):
 
         self.tabs.add("Password Check")
         self.tabs.add("Email Lookup")
+        self.tabs.add("Vault audit")
 
         self._build_password_tab()
         self._build_email_tab()
+        self._vault_panel = VaultAuditPanel(self.tabs.tab("Vault audit"), self.manager)
+        self._vault_panel.pack(fill="both", expand=True)
+
+    def on_show(self):
+        if hasattr(self, "_vault_panel"):
+            self._vault_panel.on_show()
 
     # ── Password Check tab (free, no API key, k-anonymity) ────
 

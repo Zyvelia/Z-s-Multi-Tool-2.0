@@ -49,7 +49,10 @@ class VaultService:
         site,
         username,
         password,
-        category="General"
+        category="General",
+        url="",
+        notes="",
+        totp_link_id="",
     ):
 
         data = self.load()
@@ -62,6 +65,9 @@ class VaultService:
             "username": username,
             "password": self.crypto.encrypt(password),
             "category": category,
+            "url": (url or "").strip(),
+            "notes": self.crypto.encrypt(notes) if notes else "",
+            "totp_link_id": (totp_link_id or "").strip(),
             "favorite": False,
             "created": now,
             "updated": now,
@@ -96,7 +102,10 @@ class VaultService:
         site,
         username,
         password,
-        category="General"
+        category="General",
+        url="",
+        notes="",
+        totp_link_id="",
     ):
 
         data = self.load()
@@ -114,6 +123,9 @@ class VaultService:
                 item["username"] = username
                 item["password"] = self.crypto.encrypt(password)
                 item["category"] = category
+                item["url"] = (url or "").strip()
+                item["notes"] = self.crypto.encrypt(notes) if notes else ""
+                item["totp_link_id"] = (totp_link_id or "").strip()
                 item["updated"] = datetime.now().isoformat()
 
                 break
@@ -165,6 +177,14 @@ class VaultService:
                         "date": hist_item["date"]
                     })
 
+                notes_raw = item.get("notes", "")
+                notes_decrypted = ""
+                if notes_raw:
+                    try:
+                        notes_decrypted = self.crypto.decrypt(notes_raw)
+                    except Exception:
+                        notes_decrypted = notes_raw
+
                 results.append({
                     "id": item.get("id"),
                     "site": item.get("site", ""),
@@ -174,6 +194,9 @@ class VaultService:
                         "category",
                         "General"
                     ),
+                    "url": item.get("url", ""),
+                    "notes": notes_decrypted,
+                    "totp_link_id": item.get("totp_link_id", ""),
                     "favorite": item.get(
                         "favorite",
                         False
@@ -314,13 +337,47 @@ class VaultService:
 
     def get_weak_passwords(self):
         """
-        Identifies and returns entries with weak passwords (length < 10 characters).
+        Entries with weak passwords (short or low character variety).
         """
         weak = []
         for entry in self.get_entries():
-            if len(entry["password"]) < 10:
+            if self._is_weak_password(entry["password"]):
                 weak.append(entry)
         return weak
+
+    @staticmethod
+    def _is_weak_password(password: str) -> bool:
+        if len(password) < 12:
+            return True
+        classes = 0
+        if any(c.isupper() for c in password):
+            classes += 1
+        if any(c.islower() for c in password):
+            classes += 1
+        if any(c.isdigit() for c in password):
+            classes += 1
+        if any(not c.isalnum() for c in password):
+            classes += 1
+        return classes < 3
+
+    def get_weak_entry_ids(self) -> set[str]:
+        return {e["id"] for e in self.get_weak_passwords()}
+
+    def get_reused_entry_ids(self) -> set[str]:
+        return {e["id"] for e in self.find_duplicates()}
+
+    def audit_summary(self) -> dict:
+        weak_ids = self.get_weak_entry_ids()
+        reused_ids = self.get_reused_entry_ids()
+        security = self.security_score()
+        return {
+            "score": security["score"],
+            "weak_count": len(weak_ids),
+            "reused_count": len(reused_ids),
+            "weak_ids": weak_ids,
+            "reused_ids": reused_ids,
+            "total": len(self.get_entries()),
+        }
 
     def find_duplicates(self):
         """
@@ -463,4 +520,4 @@ class VaultService:
         """
         Clears all entries from the vault.
         """
-        self.save([])
+        self.save([])

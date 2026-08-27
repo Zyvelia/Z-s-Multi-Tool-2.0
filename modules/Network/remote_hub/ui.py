@@ -30,6 +30,9 @@ import threading
 import customtkinter as ctk
 from tkinter import messagebox
 
+import qrcode
+from PIL import Image
+
 from core import theme
 from core.services import hub_service
 from core.services.tailscale_service import APP_HTTPS_PORTS
@@ -44,6 +47,7 @@ APPS = [
     ("games", "🎮 Gaming Hub"),
     ("soundboard", "🔊 Soundboard"),
     ("send", "📤 Quick Send"),
+    ("arcade", "🕹️ Arcade"),
 ]
 
 
@@ -165,6 +169,15 @@ class HubController:
         self.manager.soundboard_web_server = server
         return server
 
+    def _get_arcade_web_server(self):
+        existing = getattr(self.manager, "arcade_web_server", None)
+        if existing:
+            return existing
+        web_server_mod = importlib.import_module("modules.Gaming.Arcade.web_server")
+        server = web_server_mod.ArcadeWebServer()
+        self.manager.arcade_web_server = server
+        return server
+
     def _ports(self):
         vault_cfg = self.tailscale.load_config()
         music_db = importlib.import_module("modules.Media.Media Player.db")
@@ -196,6 +209,7 @@ class HubController:
             "games": APP_HTTPS_PORTS["games"],
             # Same deal for Soundboard (modules/soundboard/ui.py).
             "soundboard": APP_HTTPS_PORTS["soundboard"],
+            "arcade": APP_HTTPS_PORTS["arcade"],
         }
 
     # =====================================================
@@ -298,8 +312,18 @@ class HubController:
             if not ok:
                 errors.append(f"Soundboard Tailscale: {msg}")
 
+        arcade_srv = self._get_arcade_web_server()
+        if not arcade_srv.is_running():
+            ok, msg = arcade_srv.start(ports["arcade"])
+            if not ok:
+                errors.append(f"Arcade server: {msg}")
+        if arcade_srv.is_running():
+            ok, msg = self.tailscale.enable_app_serve("arcade", ports["arcade"])
+            if not ok:
+                errors.append(f"Arcade Tailscale: {msg}")
+
         live_apps = [key for key in ("vault", "music", "yt", "notes", "games", "soundboard",
-                                      "send")
+                                      "send", "arcade")
                      if self.tailscale.is_app_serving(key)]
         hostname = status.get("hostname") or "this-device"
         hub_path = hub_service.write_hub_html(hostname, live_apps)
@@ -336,6 +360,8 @@ class RemoteHubPage(ctk.CTkFrame):
 
         self._build_header(wrap)
         self._build_go_live_panel(wrap)
+        self._build_qr_panel(wrap)
+        self._build_inbox_panel(wrap)
         self._build_status_panel(wrap)
 
         self._refresh_status()
@@ -399,6 +425,114 @@ class RemoteHubPage(ctk.CTkFrame):
             command=self._on_go_offline,
         )
         self.go_offline_btn.pack(side="left", fill="x", expand=True, padx=(6, 0))
+
+    def _hub_url(self, hostname: str) -> str:
+        return f"https://{hostname}/"
+
+    def _build_qr_panel(self, parent):
+        panel = ctk.CTkFrame(
+            parent, fg_color=theme.PANEL, corner_radius=theme.RADIUS,
+            border_width=1, border_color=theme.BORDER,
+        )
+        panel.pack(fill="x", pady=(0, 12))
+        panel.grid_columnconfigure(1, weight=1)
+
+        self._qr_image_label = ctk.CTkLabel(panel, text="", width=160, height=160)
+        self._qr_image_label.grid(row=0, column=0, rowspan=3, padx=16, pady=16)
+
+        ctk.CTkLabel(
+            panel, text="Scan on your phone",
+            font=theme.font(14, "bold"), text_color=theme.TEXT, anchor="w",
+        ).grid(row=0, column=1, sticky="w", padx=(0, 16), pady=(16, 4))
+
+        self._qr_url_label = ctk.CTkLabel(
+            panel, text="Go Live to generate a QR code for your hub URL.",
+            font=theme.font(12), text_color=theme.MUTED, anchor="w", justify="left", wraplength=480,
+        )
+        self._qr_url_label.grid(row=1, column=1, sticky="ew", padx=(0, 16), pady=(0, 10))
+
+        ctk.CTkButton(
+            panel, text="Copy hub link", width=130, height=32,
+            command=self._copy_hub_link, **theme.secondary_button_style(),
+        ).grid(row=2, column=1, sticky="w", padx=(0, 16), pady=(0, 16))
+
+        self._hub_link = ""
+
+    def _copy_hub_link(self):
+        if not self._hub_link:
+            messagebox.showinfo("Remote Hub", "Go Live first — then the hub link will be ready to copy.")
+            return
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(self._hub_link)
+            messagebox.showinfo("Remote Hub", "Hub link copied to clipboard.")
+        except Exception:
+            messagebox.showerror("Remote Hub", "Could not copy link.")
+
+    def _set_qr(self, url: str | None):
+        self._hub_link = url or ""
+        if not url:
+            self._qr_image_label.configure(image=None, text="")
+            self._qr_url_label.configure(text="Go Live to generate a QR code for your hub URL.")
+            return
+        self._qr_url_label.configure(text=url)
+        qr = qrcode.QRCode(box_size=4, border=2)
+        qr.add_data(url)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="#0f1115", back_color="#e8ecf1").convert("RGB")
+        img = img.resize((150, 150), Image.NEAREST)
+        self._qr_ctk = ctk.CTkImage(light_image=img, dark_image=img, size=(150, 150))
+        self._qr_image_label.configure(image=self._qr_ctk, text="")
+
+    def _build_inbox_panel(self, parent):
+        panel = ctk.CTkFrame(
+            parent, fg_color=theme.PANEL, corner_radius=theme.RADIUS,
+            border_width=1, border_color=theme.BORDER,
+        )
+        panel.pack(fill="x", pady=(0, 12))
+        panel.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            panel, text="Unified inbox",
+            font=theme.font(14, "bold"), text_color=theme.TEXT,
+        ).pack(anchor="w", padx=16, pady=(14, 4))
+
+        ctk.CTkLabel(
+            panel,
+            text="Recent files from Quick Send — same list appears on the phone hub page when Send is live.",
+            font=theme.font(11), text_color=theme.MUTED, anchor="w", justify="left", wraplength=700,
+        ).pack(anchor="w", padx=16, pady=(0, 8))
+
+        self._inbox_frame = ctk.CTkFrame(panel, fg_color="transparent")
+        self._inbox_frame.pack(fill="x", padx=16, pady=(0, 14))
+
+    def _refresh_inbox(self, live_apps: dict):
+        for w in self._inbox_frame.winfo_children():
+            w.destroy()
+        if not live_apps.get("send"):
+            ctk.CTkLabel(
+                self._inbox_frame, text="Quick Send is off — start it from Go Live or the Quick Send module.",
+                font=theme.font(11), text_color=theme.FAINT, anchor="w",
+            ).pack(anchor="w")
+            return
+        entries = hub_service._recent_quick_send(8)
+        if not entries:
+            ctk.CTkLabel(
+                self._inbox_frame, text="No files received yet.",
+                font=theme.font(11), text_color=theme.FAINT, anchor="w",
+            ).pack(anchor="w")
+            return
+        for entry in entries:
+            row = ctk.CTkFrame(self._inbox_frame, fg_color=theme.PANEL_2, corner_radius=theme.RADIUS_SM)
+            row.pack(fill="x", pady=3)
+            name = entry.get("filename") or "file"
+            when = hub_service._time_ago(entry.get("received_at", 0))
+            ctk.CTkLabel(row, text=name, font=theme.font(12), text_color=theme.TEXT, anchor="w").pack(
+                side="left", padx=10, pady=8,
+            )
+            ctk.CTkLabel(row, text=when, font=theme.font(11), text_color=theme.MUTED).pack(
+                side="right", padx=10, pady=8,
+            )
 
     def _build_status_panel(self, parent):
         panel = ctk.CTkFrame(
@@ -512,21 +646,27 @@ class RemoteHubPage(ctk.CTkFrame):
                      "(any app's ⚙ settings has a shortcut).",
                 text_color=theme.MUTED,
             )
+            self._set_qr(None)
         elif not status["running"]:
             self.hub_status_label.configure(
                 text="⚪ Not connected to your tailnet yet. Tap Go Live to connect and "
                      "bring everything up in one step.",
                 text_color=theme.MUTED,
             )
+            self._set_qr(None)
         elif any(live_apps.values()):
             hostname = status.get("hostname") or "this-device"
+            url = self._hub_url(hostname)
             self.hub_status_label.configure(
-                text=f"🟢 Live — open https://{hostname}/ on your phone (signed into the "
-                     f"same tailnet) to pick an app.",
+                text=f"🟢 Live — open {url} on your phone (same tailnet) or scan the QR below.",
                 text_color=theme.SUCCESS,
             )
+            self._set_qr(url)
         else:
             self.hub_status_label.configure(
                 text="⚪ Connected to Tailscale, but nothing is live yet. Tap Go Live.",
                 text_color=theme.MUTED,
             )
+            self._set_qr(None)
+
+        self._refresh_inbox(live_apps)

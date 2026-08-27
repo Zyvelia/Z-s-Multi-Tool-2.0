@@ -1,9 +1,8 @@
 import customtkinter as ctk
-import random
-import string
 import datetime
 import tkinter as tk
-from tkinter import filedialog
+import webbrowser
+from tkinter import filedialog, messagebox
 
 try:
     import pyperclip
@@ -12,7 +11,11 @@ except ImportError:
 
 from core import theme
 from core.services.auth_service import AuthService
+from core.services import totp_service as totp_mod
 from .authenticator_tab import AuthenticatorTab
+from .audit_tab import SecurityAuditTab
+from .emergency_kit import export_emergency_kit
+from .generator import PasswordGenerator, MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH
 
 
 
@@ -30,10 +33,16 @@ class PasswordVaultPage(ctk.CTkFrame):
 
         self.manager = manager
         self.vault = manager.container.vault_service
+        self.totp = manager.container.totp_service
         self.auth = manager.container.auth_service
+        self.hw = manager.container.hardware_key_service
 
         self.visible_passwords = set()
         self._lock_overlay_visible = False
+        self._breach_cache: dict[str, int] = {}
+        self._card_totp_labels: dict[str, tuple[ctk.CTkLabel, str]] = {}
+        self._totp_tick_job = None
+        self.audit_tab = None
 
         self.configure(fg_color=theme.BG)
 
@@ -46,7 +55,8 @@ class PasswordVaultPage(ctk.CTkFrame):
         self.lower_var = ctk.BooleanVar(value=True)
         self.number_var = ctk.BooleanVar(value=True)
         self.symbol_var = ctk.BooleanVar(value=True)
-        self.gen_length_var = ctk.IntVar(value=20)
+        self.exclude_ambiguous_var = ctk.BooleanVar(value=False)
+        self.gen_length_var = ctk.IntVar(value=MAX_PASSWORD_LENGTH)
 
         self.show_favorites_only = False
 
@@ -138,6 +148,11 @@ class PasswordVaultPage(ctk.CTkFrame):
         ).pack(side="left", padx=(0, 6))
 
         ctk.CTkButton(
+            actions, text="🆘 Kit", width=70, height=34, command=self.export_emergency_kit_dialog,
+            **theme.secondary_button_style()
+        ).pack(side="left", padx=(0, 6))
+
+        ctk.CTkButton(
             actions, text="🔑 Master Password", command=self.open_change_password_dialog,
             width=150, height=34, **theme.secondary_button_style()
         ).pack(side="left", padx=(0, 6))
@@ -160,6 +175,7 @@ class PasswordVaultPage(ctk.CTkFrame):
 
         passwords_tab = self.tabview.add("🔐 Passwords")
         authenticator_tab = self.tabview.add("🔑 Authenticator")
+        audit_tab_frame = self.tabview.add("🛡 Audit")
 
         passwords_tab.grid_rowconfigure(2, weight=1)
         passwords_tab.grid_columnconfigure(0, weight=1)
@@ -167,7 +183,12 @@ class PasswordVaultPage(ctk.CTkFrame):
         authenticator_tab.grid_rowconfigure(0, weight=1)
         authenticator_tab.grid_columnconfigure(0, weight=1)
 
+        audit_tab_frame.grid_rowconfigure(0, weight=1)
+        audit_tab_frame.grid_columnconfigure(0, weight=1)
+
         AuthenticatorTab(authenticator_tab, self.manager).grid(row=0, column=0, sticky="nsew")
+        self.audit_tab = SecurityAuditTab(audit_tab_frame, self)
+        self.audit_tab.grid(row=0, column=0, sticky="nsew")
 
         # ---------------- STATS ----------------
 
@@ -249,6 +270,14 @@ class PasswordVaultPage(ctk.CTkFrame):
             font=theme.font(12), text_color=theme.MUTED
         ).pack(pady=(4, 18))
 
+        ctk.CTkLabel(
+            inner,
+            text="Or use your registered security key if enabled in Settings.",
+            font=theme.font(11),
+            text_color=theme.FAINT,
+            wraplength=280,
+        ).pack(pady=(0, 10))
+
         self.relock_entry = ctk.CTkEntry(
             inner, show="•", height=38, width=280,
             fg_color=theme.PANEL_2, border_color=theme.BORDER, corner_radius=theme.RADIUS_SM,
@@ -271,12 +300,37 @@ class PasswordVaultPage(ctk.CTkFrame):
                 self.relock_entry.delete(0, "end")
                 self.relock_entry.focus_set()
 
+        def do_hw_unlock():
+            self.relock_error.configure(text="")
+            try:
+                if self.hw.verify_and_unlock():
+                    self.relock_entry.delete(0, "end")
+                    self._hide_lock_overlay()
+                    self.render()
+                else:
+                    self.relock_error.configure(text="Security key verification failed.")
+            except Exception as exc:
+                self.relock_error.configure(text=str(exc))
+
         self.relock_entry.bind("<Return>", lambda e: do_unlock())
 
         ctk.CTkButton(
             inner, text="Unlock", height=38, width=280,
             command=do_unlock, **theme.primary_button_style()
         ).pack(pady=(6, 0))
+
+        self._relock_hw_btn = ctk.CTkButton(
+            inner, text="Unlock with security key", height=36, width=280,
+            command=do_hw_unlock, **theme.secondary_button_style(),
+        )
+        self._relock_hw_btn.pack(pady=(8, 0))
+        self._update_relock_hw_button()
+
+    def _update_relock_hw_button(self):
+        if not hasattr(self, "_relock_hw_btn"):
+            return
+        state = "normal" if self.hw.is_enabled() else "disabled"
+        self._relock_hw_btn.configure(state=state)
 
     def _show_lock_overlay(self):
         if self._lock_overlay_visible:
@@ -286,6 +340,7 @@ class PasswordVaultPage(ctk.CTkFrame):
         self.visible_passwords = set()
         self.lock_overlay.grid(row=0, column=0, rowspan=2, sticky="nsew")
         self.lock_overlay.lift()
+        self._update_relock_hw_button()
         self.relock_entry.focus_set()
 
     def _hide_lock_overlay(self):
@@ -320,78 +375,178 @@ class PasswordVaultPage(ctk.CTkFrame):
     # =====================================================
 
     def get_strength(self, password):
-        score = 0
-        if len(password) >= 8:
-            score += 1
-        if len(password) >= 12:
-            score += 1
-        if any(c.isupper() for c in password):
-            score += 1
-        if any(c.isdigit() for c in password):
-            score += 1
-        if any(not c.isalnum() for c in password):
-            score += 1
-
-        if score <= 2:
-            return "Weak"
-        if score <= 4:
-            return "Strong"
-        return "Very Strong"
+        return PasswordGenerator.get_strength(password)
 
     def _strength_color(self, strength):
-        if strength == "Strong":
-            return "#f1c40f"
-        if strength == "Very Strong":
-            return theme.SUCCESS
-        return theme.ERROR
+        return {
+            "Weak": theme.ERROR,
+            "Medium": "#e0803f",
+            "Strong": "#f1c40f",
+            "Very Strong": theme.SUCCESS,
+        }.get(strength, theme.MUTED)
 
-    # =====================================================
-    # ADD ENTRY (modal, with a bigger generator)
-    # =====================================================
+    def _generate_password(self) -> str:
+        return PasswordGenerator.generate(
+            length=self.gen_length_var.get(),
+            uppercase=self.upper_var.get(),
+            lowercase=self.lower_var.get(),
+            numbers=self.number_var.get(),
+            symbols=self.symbol_var.get(),
+            exclude_ambiguous=self.exclude_ambiguous_var.get(),
+        )
+
+    def _copy_to_clipboard(self, widget, text: str, on_done=None) -> bool:
+        if not text:
+            return False
+        try:
+            if pyperclip:
+                pyperclip.copy(text)
+            else:
+                widget.clipboard_clear()
+                widget.clipboard_append(text)
+            if on_done:
+                on_done()
+            return True
+        except Exception:
+            return False
+
+    def set_breach_cache(self, cache: dict[str, int]) -> None:
+        self._breach_cache = dict(cache)
+
+    def _totp_link_options(self) -> tuple[list[str], dict[str, str]]:
+        """Returns (labels for combobox, label -> totp entry id)."""
+        mapping = {"— None —": ""}
+        for entry in self.totp.get_entries():
+            label = entry["name"]
+            if entry.get("issuer"):
+                label = f"{label} ({entry['issuer']})"
+            mapping[label] = entry["id"]
+        return list(mapping.keys()), mapping
+
+    def _selected_totp_id(self, combo: ctk.CTkComboBox, mapping: dict[str, str]) -> str:
+        return mapping.get(combo.get(), "")
+
+    def _open_url(self, url: str) -> None:
+        url = (url or "").strip()
+        if not url:
+            return
+        if not url.startswith(("http://", "https://")):
+            url = "https://" + url
+        webbrowser.open(url)
+
+    def _security_badges(self, entry_id: str) -> list[tuple[str, str]]:
+        badges = []
+        if entry_id in self.vault.get_weak_entry_ids():
+            badges.append(("Weak", theme.ERROR))
+        if entry_id in self.vault.get_reused_entry_ids():
+            badges.append(("Reused", "#f1c40f"))
+        breach_count = self._breach_cache.get(entry_id, 0)
+        if breach_count > 0:
+            badges.append(("Breached", theme.DANGER))
+        return badges
+
+    def _schedule_totp_card_tick(self) -> None:
+        if self._totp_tick_job is not None:
+            try:
+                self.after_cancel(self._totp_tick_job)
+            except Exception:
+                pass
+        if self._card_totp_labels:
+            self._totp_tick_job = self.after(1000, self._totp_card_tick)
+
+    def _totp_card_tick(self) -> None:
+        self._totp_tick_job = None
+        for _eid, (lbl, secret) in list(self._card_totp_labels.items()):
+            if not lbl.winfo_exists():
+                continue
+            code = totp_mod.generate_code(secret)
+            rem = totp_mod.seconds_remaining()
+            lbl.configure(text=f"2FA {code} · {rem}s")
+        self._schedule_totp_card_tick()
 
     def open_add_entry_dialog(self):
         dialog = ctk.CTkToplevel(self)
         dialog.title("Add Entry")
-        dialog.geometry("460x760")
+        dialog.geometry("480x680")
+        dialog.minsize(440, 520)
+        dialog.resizable(True, True)
         dialog.transient(self.master)
         dialog.configure(fg_color=theme.PANEL)
+        dialog.grid_columnconfigure(0, weight=1)
+        dialog.grid_rowconfigure(0, weight=1)
         dialog.grab_set()
 
+        body = ctk.CTkScrollableFrame(
+            dialog, fg_color=theme.PANEL,
+            scrollbar_button_color=theme.PANEL_2,
+            scrollbar_button_hover_color=theme.PANEL_HOVER,
+        )
+        body.grid(row=0, column=0, sticky="nsew")
+        body.grid_columnconfigure(0, weight=1)
+
+        footer = ctk.CTkFrame(dialog, fg_color=theme.PANEL)
+        footer.grid(row=1, column=0, sticky="ew", padx=24, pady=(4, 16))
+        footer.grid_columnconfigure(0, weight=1)
+
         ctk.CTkLabel(
-            dialog, text="➕ Add New Entry", font=theme.font(19, "bold"), text_color=theme.TEXT
+            body, text="➕ Add New Entry", font=theme.font(19, "bold"), text_color=theme.TEXT
         ).pack(pady=(20, 16), padx=24, anchor="w")
 
         def field_label(text):
-            ctk.CTkLabel(dialog, text=text, anchor="w", font=theme.font(12), text_color=theme.MUTED).pack(
+            ctk.CTkLabel(body, text=text, anchor="w", font=theme.font(12), text_color=theme.MUTED).pack(
                 fill="x", padx=24, pady=(0, 3)
             )
 
         field_label("Website / Service")
         site_entry = ctk.CTkEntry(
-            dialog, placeholder_text="e.g. github.com", height=38,
+            body, placeholder_text="e.g. github.com", height=38,
             fg_color=theme.PANEL_2, border_color=theme.BORDER, corner_radius=theme.RADIUS_SM
         )
         site_entry.pack(fill="x", padx=24, pady=(0, 12))
 
         field_label("Username")
         user_entry = ctk.CTkEntry(
-            dialog, height=38, fg_color=theme.PANEL_2, border_color=theme.BORDER, corner_radius=theme.RADIUS_SM
+            body, height=38, fg_color=theme.PANEL_2, border_color=theme.BORDER, corner_radius=theme.RADIUS_SM
         )
         user_entry.pack(fill="x", padx=24, pady=(0, 12))
 
         field_label("Category")
         category_menu = ctk.CTkComboBox(
-            dialog, values=self._all_categories(), height=38, fg_color=theme.PANEL_2,
+            body, values=self._all_categories(), height=38, fg_color=theme.PANEL_2,
             border_color=theme.BORDER, button_color=theme.PANEL_2, button_hover_color=theme.PANEL_HOVER,
             corner_radius=theme.RADIUS_SM
         )
         category_menu.set("General")
-        category_menu.pack(fill="x", padx=24, pady=(0, 16))
+        category_menu.pack(fill="x", padx=24, pady=(0, 12))
+
+        field_label("Website URL (optional)")
+        url_entry = ctk.CTkEntry(
+            body, placeholder_text="https://github.com", height=38,
+            fg_color=theme.PANEL_2, border_color=theme.BORDER, corner_radius=theme.RADIUS_SM,
+        )
+        url_entry.pack(fill="x", padx=24, pady=(0, 12))
+
+        field_label("Notes (optional)")
+        notes_box = ctk.CTkTextbox(
+            body, height=64, font=theme.font(12),
+            fg_color=theme.PANEL_2, border_color=theme.BORDER, corner_radius=theme.RADIUS_SM,
+        )
+        notes_box.pack(fill="x", padx=24, pady=(0, 12))
+
+        field_label("Link authenticator (2FA)")
+        totp_labels, totp_map = self._totp_link_options()
+        totp_menu = ctk.CTkComboBox(
+            body, values=totp_labels, height=38, fg_color=theme.PANEL_2,
+            border_color=theme.BORDER, button_color=theme.PANEL_2, button_hover_color=theme.PANEL_HOVER,
+            corner_radius=theme.RADIUS_SM,
+        )
+        totp_menu.set(totp_labels[0] if totp_labels else "— None —")
+        totp_menu.pack(fill="x", padx=24, pady=(0, 16))
 
         # ---------------- Password ----------------
 
         field_label("Password")
-        pass_row = ctk.CTkFrame(dialog, fg_color="transparent")
+        pass_row = ctk.CTkFrame(body, fg_color="transparent")
         pass_row.pack(fill="x", padx=24, pady=(0, 4))
         pass_row.grid_columnconfigure(0, weight=1)
 
@@ -401,100 +556,172 @@ class PasswordVaultPage(ctk.CTkFrame):
         )
         pass_entry.grid(row=0, column=0, sticky="ew")
 
-        strength_label = ctk.CTkLabel(dialog, text="Strength: —", font=theme.font(11), text_color=theme.MUTED)
-        strength_label.pack(anchor="w", padx=24, pady=(4, 16))
+        strength_label = ctk.CTkLabel(body, text="Strength: —", font=theme.font(11), text_color=theme.MUTED)
+        strength_label.pack(anchor="w", padx=24, pady=(4, 4))
+
+        strength_bar = ctk.CTkProgressBar(
+            body, height=4, corner_radius=2, fg_color=theme.BORDER, progress_color=theme.MUTED,
+        )
+        strength_bar.pack(fill="x", padx=24, pady=(0, 12))
+        strength_bar.set(0)
 
         def update_strength(_e=None):
-            s = self.get_strength(pass_entry.get())
+            pwd = pass_entry.get()
+            s = self.get_strength(pwd)
             strength_label.configure(text=f"Strength: {s}", text_color=self._strength_color(s))
+            strength_bar.set(PasswordGenerator.strength_score(pwd) / 100)
+            strength_bar.configure(progress_color=self._strength_color(s))
 
         pass_entry.bind("<KeyRelease>", update_strength)
 
-        # ---------------- Generator (bigger) ----------------
+        # ---------------- Generator ----------------
 
-        gen_panel = ctk.CTkFrame(dialog, fg_color=theme.PANEL_2, corner_radius=theme.RADIUS)
-        gen_panel.pack(fill="x", padx=24, pady=(0, 18))
+        gen_panel = ctk.CTkFrame(body, fg_color=theme.PANEL_2, corner_radius=theme.RADIUS)
+        gen_panel.pack(fill="x", padx=24, pady=(0, 20))
+
+        gen_header = ctk.CTkFrame(gen_panel, fg_color="transparent")
+        gen_header.pack(fill="x", padx=18, pady=(16, 8))
+        gen_header.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(
-            gen_panel, text="🎲 Password Generator", font=theme.font(15, "bold"), text_color=theme.TEXT
-        ).pack(anchor="w", padx=18, pady=(16, 10))
+            gen_header, text="🎲 Password Generator", font=theme.font(15, "bold"), text_color=theme.TEXT,
+        ).grid(row=0, column=0, sticky="w")
 
-        length_label = ctk.CTkLabel(
-            gen_panel, text=f"Length: {self.gen_length_var.get()}",
-            font=theme.font(13), text_color=theme.MUTED
+        gen_status = ctk.CTkLabel(gen_header, text="", font=theme.font(10), text_color=theme.SUCCESS)
+        gen_status.grid(row=0, column=1, sticky="e")
+
+        length_row = ctk.CTkFrame(gen_panel, fg_color="transparent")
+        length_row.pack(fill="x", padx=18, pady=(0, 6))
+        length_row.grid_columnconfigure(2, weight=1)
+
+        ctk.CTkLabel(length_row, text="Length", font=theme.font(12), text_color=theme.MUTED).grid(
+            row=0, column=0, sticky="w", padx=(0, 10),
         )
-        length_label.pack(fill="x", padx=18)
 
-        def on_length_change(value):
-            self.gen_length_var.set(int(float(value)))
-            length_label.configure(text=f"Length: {int(float(value))}")
+        length_entry = ctk.CTkEntry(
+            length_row, width=56, height=30, justify="center", font=theme.mono(12),
+            fg_color=theme.PANEL, border_color=theme.BORDER, corner_radius=theme.RADIUS_SM,
+        )
+        length_entry.insert(0, str(self.gen_length_var.get()))
+        length_entry.grid(row=0, column=1, sticky="w")
+
+        def sync_length_from_slider(value):
+            length = int(float(value))
+            self.gen_length_var.set(length)
+            length_entry.delete(0, "end")
+            length_entry.insert(0, str(length))
+
+        def sync_length_from_entry(_event=None):
+            try:
+                length = int(length_entry.get().strip())
+            except ValueError:
+                return
+            length = max(MIN_PASSWORD_LENGTH, min(MAX_PASSWORD_LENGTH, length))
+            self.gen_length_var.set(length)
+            length_slider.set(length)
+            length_entry.delete(0, "end")
+            length_entry.insert(0, str(length))
 
         length_slider = ctk.CTkSlider(
-            gen_panel, from_=8, to=64, height=20,
+            length_row, from_=MIN_PASSWORD_LENGTH, to=MAX_PASSWORD_LENGTH, height=18,
             progress_color=theme.ACCENT, button_color=theme.ACCENT, button_hover_color=theme.ACCENT_HOVER,
-            command=on_length_change
+            command=sync_length_from_slider,
         )
         length_slider.set(self.gen_length_var.get())
-        length_slider.pack(fill="x", padx=18, pady=(6, 16))
+        length_slider.grid(row=0, column=2, sticky="ew", padx=(12, 0))
+
+        length_entry.bind("<FocusOut>", sync_length_from_entry)
+        length_entry.bind("<Return>", sync_length_from_entry)
 
         checks = ctk.CTkFrame(gen_panel, fg_color="transparent")
-        checks.pack(fill="x", padx=18, pady=(0, 4))
+        checks.pack(fill="x", padx=18, pady=(8, 4))
         checks.grid_columnconfigure((0, 1), weight=1)
 
         ctk.CTkCheckBox(checks, text="Uppercase (A-Z)", variable=self.upper_var,
                          font=theme.font(12), checkbox_width=20, checkbox_height=20).grid(
-            row=0, column=0, sticky="w", pady=6)
+            row=0, column=0, sticky="w", pady=4)
         ctk.CTkCheckBox(checks, text="Lowercase (a-z)", variable=self.lower_var,
                          font=theme.font(12), checkbox_width=20, checkbox_height=20).grid(
-            row=0, column=1, sticky="w", pady=6)
+            row=0, column=1, sticky="w", pady=4)
         ctk.CTkCheckBox(checks, text="Numbers (0-9)", variable=self.number_var,
                          font=theme.font(12), checkbox_width=20, checkbox_height=20).grid(
-            row=1, column=0, sticky="w", pady=6)
+            row=1, column=0, sticky="w", pady=4)
         ctk.CTkCheckBox(checks, text="Symbols (!@#$)", variable=self.symbol_var,
                          font=theme.font(12), checkbox_width=20, checkbox_height=20).grid(
-            row=1, column=1, sticky="w", pady=6)
+            row=1, column=1, sticky="w", pady=4)
+        ctk.CTkCheckBox(
+            checks, text="Exclude ambiguous (0/O, 1/l/I)", variable=self.exclude_ambiguous_var,
+            font=theme.font(12), checkbox_width=20, checkbox_height=20,
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 2))
+
+        def flash_gen_status(message: str, color=theme.SUCCESS):
+            gen_status.configure(text=message, text_color=color)
+            dialog.after(1600, lambda: gen_status.configure(text=""))
 
         def do_generate():
-            length = self.gen_length_var.get()
-            char_pool = ""
-            if self.upper_var.get():
-                char_pool += string.ascii_uppercase
-            if self.lower_var.get():
-                char_pool += string.ascii_lowercase
-            if self.number_var.get():
-                char_pool += string.digits
-            if self.symbol_var.get():
-                char_pool += "!@#$%^&*()_+-="
-            if not char_pool:
-                char_pool = string.ascii_letters + string.digits + "!@#$%^&*()_+-="
+            if not any((
+                self.upper_var.get(),
+                self.lower_var.get(),
+                self.number_var.get(),
+                self.symbol_var.get(),
+            )):
+                flash_gen_status("Pick at least one character type.", theme.ERROR)
+                return
 
-            password = "".join(random.choice(char_pool) for _ in range(length))
+            password = self._generate_password()
+            if not password:
+                flash_gen_status("Could not generate — check options.", theme.ERROR)
+                return
+
             pass_entry.delete(0, "end")
             pass_entry.insert(0, password)
             update_strength()
+            flash_gen_status("Generated")
+
+        def copy_password():
+            if self._copy_to_clipboard(dialog, pass_entry.get(), lambda: flash_gen_status("Copied")):
+                return
+            flash_gen_status("Copy failed.", theme.ERROR)
+
+        btn_row = ctk.CTkFrame(gen_panel, fg_color="transparent")
+        btn_row.pack(fill="x", padx=18, pady=(8, 16))
+        btn_row.grid_columnconfigure(0, weight=1)
 
         ctk.CTkButton(
-            gen_panel, text="🎲  Generate Password", height=44, font=theme.font(14, "bold"),
+            btn_row, text="🎲 Generate", height=40, font=theme.font(13, "bold"),
             fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER, text_color="#0b0d10",
-            corner_radius=theme.RADIUS_SM, command=do_generate
-        ).pack(fill="x", padx=18, pady=(6, 18))
+            corner_radius=theme.RADIUS_SM, command=do_generate,
+        ).grid(row=0, column=0, sticky="ew", padx=(0, 6))
 
-        # ---------------- Save ----------------
+        ctk.CTkButton(
+            btn_row, text="Copy", height=40, width=88, font=theme.font(13, "bold"),
+            fg_color=theme.PANEL, hover_color=theme.PANEL_HOVER, text_color=theme.TEXT,
+            border_width=1, border_color=theme.BORDER, corner_radius=theme.RADIUS_SM,
+            command=copy_password,
+        ).grid(row=0, column=1, sticky="e")
 
-        status_label = ctk.CTkLabel(dialog, text="", font=theme.font(11), text_color=theme.ERROR)
-        status_label.pack(padx=24)
+        # ---------------- Save (pinned footer) ----------------
+
+        status_label = ctk.CTkLabel(footer, text="", font=theme.font(11), text_color=theme.ERROR)
+        status_label.pack(fill="x", pady=(0, 8))
 
         def submit():
             site = site_entry.get().strip()
             user = user_entry.get().strip()
             password = pass_entry.get().strip()
             category = category_menu.get().strip() or "General"
+            url = url_entry.get().strip()
+            notes = notes_box.get("1.0", "end").strip()
+            totp_link_id = self._selected_totp_id(totp_menu, totp_map)
 
             if not site or not password:
                 status_label.configure(text="Site and password are required.")
                 return
 
-            self.vault.add_entry(site, user, password, category)
+            self.vault.add_entry(
+                site, user, password, category,
+                url=url, notes=notes, totp_link_id=totp_link_id,
+            )
             dialog.destroy()
             self._refresh_category_filter()
             self.render()
@@ -504,9 +731,9 @@ class PasswordVaultPage(ctk.CTkFrame):
         pass_entry.bind("<Return>", lambda e: submit())
 
         ctk.CTkButton(
-            dialog, text="➕ Save Entry", height=42, font=theme.font(14, "bold"),
+            footer, text="➕ Save Entry", height=42, font=theme.font(14, "bold"),
             command=submit, **{k: v for k, v in theme.primary_button_style().items() if k != "font"}
-        ).pack(fill="x", padx=24, pady=(0, 20))
+        ).pack(fill="x")
 
         site_entry.focus_set()
 
@@ -548,40 +775,80 @@ class PasswordVaultPage(ctk.CTkFrame):
     def open_edit_dialog(self, entry):
         dialog = ctk.CTkToplevel(self)
         dialog.title("Edit Entry")
-        dialog.geometry("420x480")
+        dialog.geometry("480x640")
+        dialog.minsize(440, 520)
+        dialog.resizable(True, True)
         dialog.transient(self.master)
         dialog.configure(fg_color=theme.PANEL)
+        dialog.grid_columnconfigure(0, weight=1)
+        dialog.grid_rowconfigure(0, weight=1)
         dialog.grab_set()
 
         entry_id = entry["id"]
 
-        ctk.CTkLabel(dialog, text="✏ Edit Entry", font=theme.font(18, "bold"), text_color=theme.TEXT).pack(
+        body = ctk.CTkScrollableFrame(
+            dialog, fg_color=theme.PANEL,
+            scrollbar_button_color=theme.PANEL_2,
+            scrollbar_button_hover_color=theme.PANEL_HOVER,
+        )
+        body.grid(row=0, column=0, sticky="nsew")
+
+        footer = ctk.CTkFrame(dialog, fg_color=theme.PANEL)
+        footer.grid(row=1, column=0, sticky="ew", padx=24, pady=(4, 16))
+
+        ctk.CTkLabel(body, text="✏ Edit Entry", font=theme.font(18, "bold"), text_color=theme.TEXT).pack(
             pady=(20, 16), padx=24, anchor="w"
         )
 
         def field_label(text):
-            ctk.CTkLabel(dialog, text=text, anchor="w", font=theme.font(12), text_color=theme.MUTED).pack(
+            ctk.CTkLabel(body, text=text, anchor="w", font=theme.font(12), text_color=theme.MUTED).pack(
                 fill="x", padx=24, pady=(0, 3)
             )
 
         field_label("Site")
-        edit_site_entry = ctk.CTkEntry(dialog, height=38, fg_color=theme.PANEL_2, border_color=theme.BORDER, corner_radius=theme.RADIUS_SM)
+        edit_site_entry = ctk.CTkEntry(body, height=38, fg_color=theme.PANEL_2, border_color=theme.BORDER, corner_radius=theme.RADIUS_SM)
         edit_site_entry.insert(0, entry["site"])
         edit_site_entry.pack(fill="x", padx=24, pady=(0, 12))
 
         field_label("Username")
-        edit_user_entry = ctk.CTkEntry(dialog, height=38, fg_color=theme.PANEL_2, border_color=theme.BORDER, corner_radius=theme.RADIUS_SM)
+        edit_user_entry = ctk.CTkEntry(body, height=38, fg_color=theme.PANEL_2, border_color=theme.BORDER, corner_radius=theme.RADIUS_SM)
         edit_user_entry.insert(0, entry["username"])
         edit_user_entry.pack(fill="x", padx=24, pady=(0, 12))
 
+        field_label("Website URL")
+        edit_url_entry = ctk.CTkEntry(body, height=38, fg_color=theme.PANEL_2, border_color=theme.BORDER, corner_radius=theme.RADIUS_SM)
+        edit_url_entry.insert(0, entry.get("url", ""))
+        edit_url_entry.pack(fill="x", padx=24, pady=(0, 12))
+
+        field_label("Notes")
+        edit_notes_box = ctk.CTkTextbox(
+            body, height=72, font=theme.font(12),
+            fg_color=theme.PANEL_2, border_color=theme.BORDER, corner_radius=theme.RADIUS_SM,
+        )
+        edit_notes_box.pack(fill="x", padx=24, pady=(0, 12))
+        if entry.get("notes"):
+            edit_notes_box.insert("1.0", entry["notes"])
+
+        field_label("Link authenticator (2FA)")
+        totp_labels, totp_map = self._totp_link_options()
+        edit_totp_menu = ctk.CTkComboBox(
+            body, values=totp_labels, height=38, fg_color=theme.PANEL_2,
+            border_color=theme.BORDER, button_color=theme.PANEL_2, button_hover_color=theme.PANEL_HOVER,
+            corner_radius=theme.RADIUS_SM,
+        )
+        current_totp = entry.get("totp_link_id", "")
+        current_label = next((lbl for lbl, tid in totp_map.items() if tid == current_totp), totp_labels[0])
+        edit_totp_menu.set(current_label)
+        edit_totp_menu.pack(fill="x", padx=24, pady=(0, 12))
+
         field_label("Password")
-        edit_pass_entry = ctk.CTkEntry(dialog, height=38, font=theme.mono(13), fg_color=theme.PANEL_2, border_color=theme.BORDER, corner_radius=theme.RADIUS_SM)
+        edit_pass_entry = ctk.CTkEntry(body, height=38, font=theme.mono(13), fg_color=theme.PANEL_2, border_color=theme.BORDER, corner_radius=theme.RADIUS_SM)
         edit_pass_entry.insert(0, entry["password"])
         edit_pass_entry.pack(fill="x", padx=24, pady=(0, 12))
 
         field_label("Category")
         edit_category_menu = ctk.CTkComboBox(
-            dialog, values=self._all_categories(), height=38, fg_color=theme.PANEL_2,
+            body, values=self._all_categories(), height=38, fg_color=theme.PANEL_2,
             border_color=theme.BORDER, button_color=theme.PANEL_2, button_hover_color=theme.PANEL_HOVER,
             corner_radius=theme.RADIUS_SM
         )
@@ -593,19 +860,27 @@ class PasswordVaultPage(ctk.CTkFrame):
             new_user = edit_user_entry.get().strip()
             new_password = edit_pass_entry.get().strip()
             new_category = edit_category_menu.get().strip() or "General"
+            new_url = edit_url_entry.get().strip()
+            new_notes = edit_notes_box.get("1.0", "end").strip()
+            new_totp = self._selected_totp_id(edit_totp_menu, totp_map)
 
             if not new_site or not new_password:
                 return
 
-            self.vault.update_entry(entry_id, new_site, new_user, new_password, new_category)
+            self.vault.update_entry(
+                entry_id, new_site, new_user, new_password, new_category,
+                url=new_url, notes=new_notes, totp_link_id=new_totp,
+            )
             dialog.destroy()
             self._refresh_category_filter()
             self.render()
+            if self.audit_tab:
+                self.audit_tab.refresh()
 
         ctk.CTkButton(
-            dialog, text="Save Changes", height=42, font=theme.font(14, "bold"),
+            footer, text="Save Changes", height=42, font=theme.font(14, "bold"),
             command=save_edited_entry, **{k: v for k, v in theme.primary_button_style().items() if k != "font"}
-        ).pack(fill="x", padx=24, pady=(0, 20))
+        ).pack(fill="x")
 
     # =====================================================
     # CHANGE MASTER PASSWORD
@@ -730,12 +1005,33 @@ class PasswordVaultPage(ctk.CTkFrame):
 
     def import_vault(self):
         path = filedialog.askopenfilename(
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+            filetypes=[
+                ("Vault backup", "*.json;*.enc"),
+                ("JSON files", "*.json"),
+                ("Encrypted vault", "*.enc"),
+                ("All files", "*.*"),
+            ]
         )
         if path:
-            self.vault.import_json(path)
+            if path.lower().endswith(".enc"):
+                self.vault.import_encrypted(path)
+            else:
+                self.vault.import_json(path)
             self._refresh_category_filter()
             self.render()
+
+    def export_emergency_kit_dialog(self):
+        folder = filedialog.askdirectory(title="Choose folder for Emergency Kit")
+        if not folder:
+            return
+        try:
+            export_emergency_kit(folder, self.vault, self.totp)
+            messagebox.showinfo(
+                "Emergency Kit exported",
+                f"Saved to:\n{folder}\n\nKeep README.txt and the .enc files offline and safe.",
+            )
+        except Exception as exc:
+            messagebox.showerror("Export failed", str(exc))
 
     # =====================================================
     # COPY
@@ -757,6 +1053,14 @@ class PasswordVaultPage(ctk.CTkFrame):
 
         for widget in self.cards.winfo_children():
             widget.destroy()
+
+        self._card_totp_labels.clear()
+        if self._totp_tick_job is not None:
+            try:
+                self.after_cancel(self._totp_tick_job)
+            except Exception:
+                pass
+            self._totp_tick_job = None
 
         all_entries_from_vault = self.vault.get_entries()
 
@@ -809,6 +1113,10 @@ class PasswordVaultPage(ctk.CTkFrame):
         for item in entries_to_render:
             self._render_card(item)
 
+        self._schedule_totp_card_tick()
+        if self.audit_tab:
+            self.audit_tab.refresh()
+
     def _render_card(self, item):
         card = ctk.CTkFrame(self.cards, fg_color=theme.PANEL_2, corner_radius=theme.RADIUS, border_width=1, border_color=theme.BORDER)
         card.pack(fill="x", padx=6, pady=6)
@@ -836,6 +1144,12 @@ class PasswordVaultPage(ctk.CTkFrame):
             text_color=theme.ACCENT, fg_color=theme.ACCENT_GLOW, corner_radius=theme.RADIUS_SM
         ).pack(side="left", padx=(8, 0))
 
+        for badge_text, badge_color in self._security_badges(item["id"]):
+            ctk.CTkLabel(
+                title_row, text=f" {badge_text} ", font=theme.font(9, "bold"),
+                text_color="#0b0d10", fg_color=badge_color, corner_radius=6,
+            ).pack(side="left", padx=(6, 0))
+
         if item.get("favorite", False):
             ctk.CTkLabel(title_row, text="⭐", font=theme.font(11)).pack(side="left", padx=(6, 0))
 
@@ -848,6 +1162,26 @@ class PasswordVaultPage(ctk.CTkFrame):
         ctk.CTkLabel(
             info, text=password_text, font=theme.mono(12), text_color=theme.TEXT if is_visible else theme.FAINT
         ).pack(anchor="w", pady=(3, 0))
+
+        totp_id = item.get("totp_link_id", "")
+        if totp_id:
+            totp_entry = self.totp.get_entry(totp_id)
+            if totp_entry:
+                code = totp_mod.generate_code(totp_entry["secret"])
+                rem = totp_mod.seconds_remaining()
+                totp_lbl = ctk.CTkLabel(
+                    info, text=f"2FA {code} · {rem}s", font=theme.mono(12, "bold"), text_color=theme.ACCENT,
+                )
+                totp_lbl.pack(anchor="w", pady=(3, 0))
+                self._card_totp_labels[item["id"]] = (totp_lbl, totp_entry["secret"])
+
+        if item.get("notes"):
+            preview = item["notes"].replace("\n", " ")
+            if len(preview) > 80:
+                preview = preview[:77] + "…"
+            ctk.CTkLabel(
+                info, text=f"📝 {preview}", font=theme.font(10), text_color=theme.FAINT, anchor="w",
+            ).pack(anchor="w", pady=(3, 0))
 
         updated_date_str = item["updated"]
         if isinstance(updated_date_str, datetime.datetime):
@@ -878,6 +1212,10 @@ class PasswordVaultPage(ctk.CTkFrame):
 
         icon_btn(buttons, "📋", lambda p=item["password"]: self.copy_password(p), width=44).pack(side="left", padx=4)
         icon_btn(buttons, "👤📋", lambda u=item["username"]: self.copy_username(u), width=50).pack(side="left", padx=4)
+        if item.get("url"):
+            icon_btn(
+                buttons, "🌐", lambda u=item["url"]: self._open_url(u), width=44,
+            ).pack(side="left", padx=4)
         icon_btn(buttons, "✏", lambda e=item: self.open_edit_dialog(e), width=44).pack(side="left", padx=4)
         icon_btn(
             buttons, "🗑", lambda eid=item["id"]: self.delete_entry(eid), width=44,

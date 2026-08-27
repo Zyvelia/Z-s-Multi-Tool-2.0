@@ -43,7 +43,46 @@ taskkill /f /im "Z's Multi Tool (Console).exe" >nul 2>nul
 taskkill /f /im "Zs Multi Tool (Console).exe" >nul 2>nul
 timeout /t 1 /nobreak >nul
 
-REM ---- 4. Refresh the dependency lock file ----
+REM ---- 4. WebView2 Python bindings for Brick Breaker in-app play ----
+echo [INFO] Ensuring WebView2 Python packages (pythonnet, pywebview)...
+python -m pip install "pythonnet>=3.0.0" "pywebview>=5.0"
+if errorlevel 1 (
+    echo [WARN] Could not install WebView2 Python packages - Brick Breaker in-app play may not work.
+)
+
+REM ---- 4b. Make sure pywin32 is installed AND its postinstall has run ----
+REM PyInstaller bundles win32com/pythoncom/pywintypes by walking real DLL
+REM dependencies on disk. pip installing pywin32 alone does NOT guarantee
+REM pywintypesXX.dll / pythoncomXX.dll exist where that walker looks -
+REM pywin32 ships its own postinstall step (normally run automatically by
+REM the installer, but skipped by plain `pip install pywin32` in some
+REM environments) that copies those two DLLs into
+REM Lib\site-packages\pywin32_system32\. Skipping this is what causes a
+REM built exe to fail at runtime with "pywin32 isn't installed" even
+REM though pywin32 is clearly installed in the build environment.
+echo [INFO] Ensuring pywin32 is installed and its postinstall step has run...
+python -m pip install --upgrade pywin32 pywin32-ctypes >nul 2>nul
+for /f "delims=" %%P in ('python -c "import sysconfig,os;print(os.path.join(sysconfig.get_paths()['purelib'],'pywin32_system32'))"') do set "PYWIN32_SYS32=%%P"
+if not exist "%PYWIN32_SYS32%\pythoncom3*.dll" (
+    echo [INFO] pywin32 postinstall DLLs missing - running postinstall script...
+    for /f "delims=" %%S in ('python -c "import sysconfig,os;print(os.path.join(sysconfig.get_paths()['scripts'],'pywin32_postinstall.py'))"') do set "PYWIN32_POSTINSTALL=%%S"
+    if exist "!PYWIN32_POSTINSTALL!" (
+        python "!PYWIN32_POSTINSTALL!" -install
+        if errorlevel 1 (
+            echo [WARN] pywin32 postinstall script failed - the exe may still hit "pywin32 isn't installed" at runtime.
+            echo        Try running it manually as Administrator: python "!PYWIN32_POSTINSTALL!" -install
+        )
+    ) else (
+        echo [WARN] Could not locate pywin32_postinstall.py - skipping. If the exe later
+        echo        errors with "pywin32 isn't installed", reinstall pywin32 with:
+        echo          pip uninstall -y pywin32
+        echo          pip install --no-cache-dir pywin32
+    )
+) else (
+    echo [INFO] pywin32 postinstall DLLs already present.
+)
+
+REM ---- 5. Refresh the dependency lock file ----
 echo [INFO] Writing requirements-lock.txt from currently installed packages...
 python -m pip freeze > "requirements-lock.txt"
 
@@ -66,14 +105,8 @@ REM NOTE: --console instead of --windowed is the only functional difference
 REM from build.bat - everything else (collected packages, hidden imports,
 REM bundled data) is identical so this build behaves the same, it just
 REM shows its console.
-REM NOTE: --collect-all openai / --hidden-import openai / the three winrt
-REM hidden-imports + --collect-all winrt were added to match
-REM Zs_Multi_Tool.spec (this script had fallen out of sync with it - it
-REM predates the AI Chat module). Without --collect-all openai, the AI
-REM Chat module's "from openai import OpenAI" fails at runtime with
-REM ModuleNotFoundError, plugin_manager.py's try/except swallows it, and
-REM the module just silently never appears - this is exactly the bug this
-REM console build exists to catch.
+REM NOTE: --collect-all openai / --hidden-import openai were added so the
+REM AI Chat module's "from openai import OpenAI" is bundled correctly.
 REM NOTE: no --add-data for "data" here on purpose. CryptoService/
 REM VaultService/AuthService all resolve through core/paths.py straight to
 REM %APPDATA%\ZsMultiTool\... at runtime and only fall back to a local
@@ -88,15 +121,19 @@ python -m PyInstaller ^
     --uac-admin ^
     --name "Zs Multi Tool (Console)" ^
     --icon "assets\icon.ico" ^
+    --additional-hooks-dir hooks ^
     --collect-all customtkinter ^
     --collect-all mutagen ^
     --collect-all PIL ^
     --collect-all pystray ^
     --collect-all qrcode ^
     --collect-all openai ^
-    --collect-all winrt ^
+    --collect-all pywebview ^
+    --collect-all clr_loader ^
+    --collect-all playwright ^
     --collect-data pypresence ^
     --hidden-import "PIL._tkinter_finder" ^
+    --hidden-import "_tkinter" ^
     --hidden-import "scapy.all" ^
     --hidden-import "nmap" ^
     --hidden-import "vlc" ^
@@ -109,12 +146,19 @@ python -m PyInstaller ^
     --hidden-import "cryptography.fernet" ^
     --hidden-import "yt_dlp" ^
     --hidden-import "openai" ^
-    --hidden-import "winrt.windows.foundation" ^
-    --hidden-import "winrt.windows.ui.notifications" ^
-    --hidden-import "winrt.windows.ui.notifications.management" ^
+    --hidden-import "webview.platforms.edgechromium" ^
+    --hidden-import "webview.platforms.winforms" ^
+    --hidden-import "webview.guilib" ^
+    --hidden-import "clr" ^
+    --hidden-import "pythonnet" ^
+    --hidden-import "playwright.sync_api" ^
+    --hidden-import "playwright.async_api" ^
     --hidden-import "win32com" ^
     --hidden-import "win32com.client" ^
     --hidden-import "win32timezone" ^
+    --hidden-import "win32gui" ^
+    --hidden-import "win32con" ^
+    --hidden-import "win32api" ^
     --hidden-import "pythoncom" ^
     --hidden-import "pywintypes" ^
     --add-data "modules;modules" ^
@@ -192,6 +236,30 @@ if defined VLC_DIR (
     echo          - manually copy those same files into dist\ yourself.
 )
 
+REM ---- 9. Bundle the Playwright browser binaries next to the exe ----
+REM --collect-all playwright above only grabs the playwright PYTHON
+REM PACKAGE (its driver/node launcher etc.) - it does NOT grab the actual
+REM browser binaries (Chromium/Firefox/WebKit), because those live outside
+REM the package in a separate cache folder that `playwright install`
+REM downloads to (normally %USERPROFILE%\AppData\Local\ms-playwright).
+REM PyInstaller has no way to know that folder exists, so without this
+REM step the built exe imports fine but any page.goto()/browser.launch()
+REM call fails at runtime with "Executable doesn't exist" because it's
+REM looking for browsers that were never bundled.
+echo.
+echo [INFO] Looking for Playwright browser binaries to bundle...
+set "PLAYWRIGHT_CACHE=%LOCALAPPDATA%\ms-playwright"
+if exist "%PLAYWRIGHT_CACHE%" (
+    echo [INFO] Found Playwright browsers at "%PLAYWRIGHT_CACHE%" - copying into dist\ms-playwright\...
+    if exist "dist\ms-playwright" rmdir /s /q "dist\ms-playwright"
+    xcopy "%PLAYWRIGHT_CACHE%" "dist\ms-playwright\" /e /i /q >nul
+    echo [INFO] Playwright browsers bundled into dist\.
+) else (
+    echo [WARN] No Playwright browser cache found at "%PLAYWRIGHT_CACHE%".
+    echo        Run "python -m playwright install" once on this machine,
+    echo        then re-run this build so the browsers get bundled.
+)
+
 echo.
 echo ============================================
 echo   Console debug build complete!
@@ -226,5 +294,21 @@ echo    they use different --name values ("Zs Multi Tool (Console)" vs
 echo    "Zs Multi Tool"), so building one never overwrites the other's
 echo    exe in dist\ as long as you don't run both builds back to back
 echo    without moving the first exe out of dist\ first.
+echo  - Playwright: the exe now bundles the browser binaries it finds in
+echo    %%LOCALAPPDATA%%\ms-playwright (as dist\ms-playwright\). Your app
+echo    code needs to point Playwright at that folder at runtime by
+echo    setting the PLAYWRIGHT_BROWSERS_PATH environment variable BEFORE
+echo    importing playwright, e.g. in main.py:
+echo        import os, sys
+echo        if getattr(sys, 'frozen', False):
+echo            os.environ['PLAYWRIGHT_BROWSERS_PATH'] = os.path.join(
+echo                os.path.dirname(sys.executable), 'ms-playwright')
+echo    Without that, Playwright will still look in the default per-user
+echo    cache path and fail on a machine where it wasn't installed.
+echo  - pywin32: this build now checks that pywintypesXX.dll/pythoncomXX.dll
+echo    exist (running pywin32's postinstall script if not) before invoking
+echo    PyInstaller, since a missing postinstall step is the usual cause of
+echo    the exe failing at runtime with "pywin32 isn't installed" even
+echo    though pywin32 is pip-installed in the build environment.
 echo.
 pause

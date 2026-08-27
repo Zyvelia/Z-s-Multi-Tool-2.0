@@ -8,7 +8,9 @@
 import os
 import random
 import sys
+import threading
 import time
+import urllib.parse
 
 import customtkinter as ctk
 from tkinter import filedialog
@@ -25,6 +27,26 @@ from ._buttons import (
 
 def _icon_btn_accent_kwargs(**overrides):
     return play_button_kwargs(width=52, **overrides)
+
+
+def _is_url(s: str) -> bool:
+    """True for anything with an http/https scheme — a direct video URL,
+    a Google Drive share link, etc. Local file paths (with or without a
+    drive letter on Windows) never match this."""
+    try:
+        return urllib.parse.urlparse(s).scheme in ("http", "https")
+    except Exception:
+        return False
+
+
+def _url_display_name(url: str) -> str:
+    """Turns a URL into something short and readable for the playlist row
+    — the filename if the path has one, otherwise the host."""
+    parsed = urllib.parse.urlparse(url)
+    name = os.path.basename(parsed.path.rstrip("/"))
+    if not name:
+        name = parsed.netloc or url
+    return urllib.parse.unquote(name)
 
 
 # =====================================================
@@ -49,8 +71,18 @@ class VLCMediaEngine:
     # ── Load ──────────────────────────────────────────────────
 
     def load(self, files):
-        self.playlist = [os.path.abspath(f) for f in (files or [])]
+        self.playlist = [f if _is_url(f) else os.path.abspath(f) for f in (files or [])]
         self.index = 0 if self.playlist else -1
+
+    def add_track(self, mrl):
+        """Appends a single track (local path or http/https URL) to the
+        end of the current playlist without disturbing what's already
+        loaded or playing."""
+        mrl = mrl if _is_url(mrl) else os.path.abspath(mrl)
+        self.playlist.append(mrl)
+        if self.index < 0:
+            self.index = 0
+        return len(self.playlist) - 1
 
     # ── Playback ──────────────────────────────────────────────
 
@@ -69,7 +101,7 @@ class VLCMediaEngine:
         self.player.stop()
 
         path = self.playlist[i]
-        if not os.path.exists(path):
+        if not _is_url(path) and not os.path.exists(path):
             print("[VLC] Missing file:", path)
             return
 
@@ -364,13 +396,32 @@ class VideoPlayerPage(ctk.CTkFrame):
         self.popout_btn.grid(row=0, column=5, padx=4)
 
     def _build_load_button(self):
+        self.load_row = ctk.CTkFrame(self, fg_color="transparent")
+        self.load_row.pack(side="bottom", fill="x", padx=15, pady=(0, 8))
+
         load_kw = theme.primary_button_kwargs()
         load_kw["font"] = ("Segoe UI", 13, "bold")
         self.load_btn = ctk.CTkButton(
-            self, text="📂  Open Media Files", command=self.load_files,
+            self.load_row, text="📂  Open Media Files", command=self.load_files,
             **load_kw,
         )
-        self.load_btn.pack(side="bottom", fill="x", padx=15, pady=(0, 8))
+        self.load_btn.pack(side="left", fill="x", expand=True, padx=(0, 6))
+
+        url_kw = cool_button_kwargs()
+        url_kw["font"] = ("Segoe UI", 13, "bold")
+        self.url_btn = ctk.CTkButton(
+            self.load_row, text="🔗  Open URL", command=self.add_url,
+            **url_kw,
+        )
+        self.url_btn.pack(side="left", fill="x", expand=True, padx=(0, 6))
+
+        stream_kw = cool_button_kwargs()
+        stream_kw["font"] = ("Segoe UI", 13, "bold")
+        self.find_stream_btn = ctk.CTkButton(
+            self.load_row, text="🕵  Find Stream", command=self.find_stream_url,
+            **stream_kw,
+        )
+        self.find_stream_btn.pack(side="left", fill="x", expand=True)
 
     def _build_volume(self):
         self.volume_frame = ctk.CTkFrame(
@@ -418,30 +469,129 @@ class VideoPlayerPage(ctk.CTkFrame):
         self.song_names = [os.path.basename(f) for f in files]
 
         for i, name in enumerate(self.song_names):
-            row = ctk.CTkFrame(
-                self.song_frame, fg_color=theme.PANEL_2, corner_radius=6,
-                border_width=1, border_color=theme.BORDER,
-            )
-            row.pack(fill="x", padx=4, pady=2)
+            self._build_track_row(i, name)
 
-            btn = ctk.CTkButton(
-                row,
-                text=self._track_label(i, name, active=False),
-                anchor="w",
-                fg_color="transparent",
-                hover_color=highlight_fill_hover(),
-                text_color=theme.TEXT,
-                font=("Segoe UI", 13),
-                corner_radius=6,
-                height=34,
-                command=lambda idx=i: self.play_song(idx),
-            )
-            btn.pack(side="left", fill="x", expand=True, padx=2, pady=1)
-            self.song_buttons.append(btn)
-
+        self._refresh_playlist_count()
         count = len(files)
-        self.playlist_count.configure(text=f"{count} file{'s' if count != 1 else ''}")
         self.status.configure(text=f"{count} file(s) loaded", text_color=theme.TEXT)
+
+    def add_url(self):
+        """Prompts for a direct media URL (a raw video file link, a Google
+        Drive share link to a file you own, etc.) and appends it to the
+        playlist — same track list the local-file playlist uses, so it's
+        saved, reorderable, and playable exactly like everything else."""
+        dialog = ctk.CTkInputDialog(
+            text="Paste a direct video URL (e.g. a Google Drive link to a file you own):",
+            title="Open URL",
+        )
+        raw = dialog.get_input()
+        if raw is None:
+            return
+        url = raw.strip()
+        if not url:
+            return
+
+        if not _is_url(url):
+            self.status.configure(
+                text="⚠ That doesn't look like a valid http(s) URL", text_color=theme.MUTED)
+            return
+
+        index = self.engine.add_track(url)
+        self.song_names.append(_url_display_name(url))
+        self._build_track_row(index, self.song_names[index])
+
+        self._refresh_playlist_count()
+        self.status.configure(text="🔗 Added URL to playlist", text_color=theme.TEXT)
+
+    def find_stream_url(self):
+        """Prompts for a *page* URL (a stream site, an embed page — not
+        necessarily a direct media link), scans it headlessly with
+        Playwright for the first .m3u8 HLS manifest it requests over the
+        network, and adds that manifest URL to the playlist exactly like
+        add_url() does. No assumptions are made about the page's
+        structure; this works purely off network interception, so it
+        should hold up across different sites/players.
+
+        Requires Playwright + Chromium:
+            pip install playwright
+            playwright install chromium
+        """
+        dialog = ctk.CTkInputDialog(
+            text="Paste a page URL to scan for an HLS (.m3u8) stream:",
+            title="Find Stream",
+        )
+        raw = dialog.get_input()
+        if raw is None:
+            return
+        page_url = raw.strip()
+        if not page_url:
+            return
+
+        if not _is_url(page_url):
+            self.status.configure(
+                text="⚠ That doesn't look like a valid http(s) URL", text_color=theme.MUTED)
+            return
+
+        self.status.configure(text="🕵 Scanning page for stream…", text_color=theme.MUTED)
+        self.url_btn.configure(state="disabled")
+        self.find_stream_btn.configure(state="disabled")
+
+        def worker():
+            stream_url = None
+            error = None
+            try:
+                from .stream_finder import find_m3u8_sync
+                stream_url = find_m3u8_sync(page_url, timeout=30.0)
+            except Exception as exc:
+                error = str(exc)
+
+            def apply():
+                if self.winfo_exists():
+                    self.url_btn.configure(state="normal")
+                    self.find_stream_btn.configure(state="normal")
+
+                if not self.winfo_exists():
+                    return
+
+                if stream_url:
+                    index = self.engine.add_track(stream_url)
+                    self.song_names.append(_url_display_name(page_url))
+                    self._build_track_row(index, self.song_names[index])
+                    self._refresh_playlist_count()
+                    self.status.configure(text="🎯 Stream found and added", text_color=theme.ACCENT)
+                else:
+                    self.status.configure(text=f"⚠ {error}", text_color=theme.MUTED)
+
+            self.after(0, apply)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _build_track_row(self, index, name):
+        row = ctk.CTkFrame(
+            self.song_frame, fg_color=theme.PANEL_2, corner_radius=6,
+            border_width=1, border_color=theme.BORDER,
+        )
+        row.pack(fill="x", padx=4, pady=2)
+
+        btn = ctk.CTkButton(
+            row,
+            text=self._track_label(index, name, active=False),
+            anchor="w",
+            fg_color="transparent",
+            hover_color=highlight_fill_hover(),
+            text_color=theme.TEXT,
+            font=("Segoe UI", 13),
+            corner_radius=6,
+            height=34,
+            command=lambda idx=index: self.play_song(idx),
+        )
+        btn.pack(side="left", fill="x", expand=True, padx=2, pady=1)
+        self.song_buttons.append(btn)
+        return btn
+
+    def _refresh_playlist_count(self):
+        count = len(self.engine.playlist)
+        self.playlist_count.configure(text=f"{count} file{'s' if count != 1 else ''}")
 
     @staticmethod
     def _track_label(index, name, active):
@@ -554,7 +704,7 @@ class VideoPlayerPage(ctk.CTkFrame):
         self.playlist_frame.pack_forget()
         self.progress_card.pack_forget()
         self.controls.pack_forget()
-        self.load_btn.pack_forget()
+        self.load_row.pack_forget()
         self.volume_frame.pack_forget()
 
         self.video_frame.pack_forget()
@@ -596,7 +746,7 @@ class VideoPlayerPage(ctk.CTkFrame):
         self.video_frame.pack(side="top", fill="x", padx=15, pady=(0, 8))
 
         self.volume_frame.pack(side="bottom", fill="x", padx=15, pady=(0, 15))
-        self.load_btn.pack(side="bottom", fill="x", padx=15, pady=(0, 8))
+        self.load_row.pack(side="bottom", fill="x", padx=15, pady=(0, 8))
         self.controls.pack(side="bottom", pady=(0, 8))
         self.progress_card.pack(side="bottom", fill="x", padx=15, pady=(0, 6))
 

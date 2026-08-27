@@ -202,6 +202,7 @@ class VLCMusicEngine:
         self.repeat_mode = "off"   # off | one | all
 
         self.volume      = 0.5
+        self._current_song_id = None
         self._apply_volume()
 
         # Tracks the file + cue window currently loaded, so a failed
@@ -224,6 +225,7 @@ class VLCMusicEngine:
         self._monitor_thread = threading.Thread(target=self._monitor_loop,
                                                  daemon=True)
         self._monitor_thread.start()
+        self._last_player_state = vlc.State.NothingSpecial
 
     # ── Private helpers ───────────────────────────────────────
 
@@ -237,6 +239,10 @@ class VLCMusicEngine:
         while True:
             try:
                 state = self.player.get_state()
+                if (state == vlc.State.Playing
+                        and self._last_player_state != vlc.State.Playing):
+                    self._apply_volume()
+                self._last_player_state = state
                 if state == vlc.State.Ended and not self._ended_handled:
                     self._ended_handled = True
                     print("[VLC] Track ended detected by poll.")
@@ -251,7 +257,11 @@ class VLCMusicEngine:
     def _apply_volume(self):
         # libVLC volume is an int 0-100; our public API stays 0.0-1.0 to
         # match the old engine (ui.py and web_server.py both use 0.0-1.0).
-        self.player.audio_set_volume(int(round(self.volume * 100)))
+        try:
+            self.player.audio_set_mute(False)
+            self.player.audio_set_volume(int(round(self.volume * 100)))
+        except Exception:
+            pass
 
     def _start_media(self, path, cue_start, cue_end, force_transcode=False):
         """Builds a vlc.Media for `path` and starts playback."""
@@ -308,6 +318,7 @@ class VLCMusicEngine:
         self.index    = 0 if self.playlist else -1
         self._loaded_index = -1
         self._current_path = None
+        self._current_song_id = None
 
     def load_ids(self, db, ids, start_index=0):
         """
@@ -320,6 +331,7 @@ class VLCMusicEngine:
         self.index    = start_index if len(self.playlist) else -1
         self._loaded_index = -1
         self._current_path = None
+        self._current_song_id = None
 
     # ── Playback ──────────────────────────────────────────────
 
@@ -358,6 +370,10 @@ class VLCMusicEngine:
         self.index      = i
         self._retry_done = False
         self._loaded_index = i
+        self._current_song_id = (
+            int(self.playlist.id_at(i))
+            if isinstance(self.playlist, LazyPlaylist) else None
+        )
 
         path = self.playlist[i]
         if not os.path.exists(path):
@@ -401,6 +417,7 @@ class VLCMusicEngine:
     def stop(self):
         self.player.stop()
         self._loaded_index = -1
+        self._current_song_id = None
 
     # ── Volume ────────────────────────────────────────────────
 
@@ -409,7 +426,7 @@ class VLCMusicEngine:
             value = float(value)
         except Exception:
             value = 0.5
-        self.volume = max(0.0, min(1.0, value))
+        self.volume = max(0.0, min(2.0, value))
         self._apply_volume()
 
     # ── Navigation ────────────────────────────────────────────

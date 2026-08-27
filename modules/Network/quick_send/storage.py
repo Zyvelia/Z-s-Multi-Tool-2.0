@@ -16,6 +16,43 @@ LOG_FILE = paths.data_path("quick_send", "received_log.json")
 _DEFAULT_INBOX = os.path.join(os.path.expanduser("~"), "Downloads", "Quick Send Inbox")
 _DEFAULT_OUTBOX = os.path.join(os.path.expanduser("~"), "Desktop", "Quick Send Shared")
 
+_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif", ".bmp", ".tif", ".tiff"}
+_VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm", ".3gp"}
+
+
+def _mime_type(filename):
+    ext = os.path.splitext(filename)[1].lower()
+    mapping = {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+        ".heic": "image/heic",
+        ".heif": "image/heif",
+        ".bmp": "image/bmp",
+        ".tif": "image/tiff",
+        ".tiff": "image/tiff",
+        ".mp4": "video/mp4",
+        ".mov": "video/quicktime",
+        ".m4v": "video/mp4",
+        ".webm": "video/webm",
+        ".3gp": "video/3gpp",
+        ".pdf": "application/pdf",
+        ".zip": "application/zip",
+        ".txt": "text/plain",
+    }
+    return mapping.get(ext, "application/octet-stream")
+
+
+def file_kind(filename):
+    ext = os.path.splitext(filename)[1].lower()
+    if ext in _IMAGE_EXTS:
+        return "image"
+    if ext in _VIDEO_EXTS:
+        return "video"
+    return "file"
+
 
 def _load_json(path, default):
     if not os.path.exists(path):
@@ -102,6 +139,8 @@ def list_outbox_files():
                     "name": name,
                     "size": stat.st_size,
                     "modified": stat.st_mtime,
+                    "kind": file_kind(name),
+                    "mime": _mime_type(name),
                 })
     except Exception as e:
         print(f"[quick_send] Failed listing outbox: {e}")

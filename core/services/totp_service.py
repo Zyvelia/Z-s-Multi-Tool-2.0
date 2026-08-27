@@ -299,5 +299,17 @@ class TotpService:
         results.sort(key=lambda e: e["name"].lower())
         return results
 
+    def get_entry(self, entry_id: str):
+        for entry in self.get_entries():
+            if entry["id"] == entry_id:
+                return entry
+        return None
+
+    def export_encrypted(self, filepath: str) -> None:
+        data = self._load()
+        encrypted_content = self.crypto.encrypt(json.dumps(data))
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(encrypted_content)
+
     def count(self):
         return len(self._load())
