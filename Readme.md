@@ -1,6 +1,6 @@
 # Z's Multi Tool
 
-A modular Windows desktop app that bundles **31 utilities** — media tools, security, gaming, design, networking, AI, and system utilities — into one **CustomTkinter** interface with a searchable plugin catalog.
+A modular Windows desktop app that bundles **33 utilities** — media tools, security, gaming, design, networking, AI, and system utilities — into one **CustomTkinter** interface with a searchable plugin catalog.
 
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![CustomTkinter](https://img.shields.io/badge/UI-CustomTkinter-4ea1ff)
@@ -22,11 +22,12 @@ Instead of one monolithic app, every tool lives in its own folder under `modules
 - **Catalog themes** — global app appearance presets (including Neon Pulse and others)
 - **Mini widgets** — some modules (Media Player, Remote Hub) show a compact control on their catalog card
 - **Shared services** — Discord RPC, Tailscale remote access, auth/crypto, and settings live in `core/services/`
+- **Remote Hub** — one Tailscale URL for your phone, with **QR code**, **unified Quick Send inbox**, and links to all live modules
 - **Self-updater** — optional GitHub Releases check from Settings (v4.0.0+)
 
 ---
 
-## Modules (31)
+## Modules (33)
 
 ### 🎵 Media
 
@@ -44,13 +45,14 @@ Instead of one monolithic app, every tool lives in its own folder under `modules
 |---|---|---|
 | 🔍 | **Hash Tools** | Generate and verify **MD5, SHA-1, SHA-256, SHA-512** (and more) for files and text. Compare hashes to check integrity. |
 | 🔒 | **File Encryption** | **Encrypt and decrypt** individual files with a password. Lock screen while the vault key is in memory. |
-| 🔐 | **Secure Vault** | All-in-one **password manager** and **TOTP authenticator (2FA)**. Encrypted at rest, unlock with master password. Optional **Tailscale remote vault access** from your phone. |
-| 🕵️ | **Breach Checker** | Check **email addresses and passwords** against known data breaches using the Have I Been Pwned API (k-anonymity — your full password is never sent). |
+| 🔐 | **Secure Vault** | All-in-one **password manager** and **TOTP authenticator (2FA)**. Encrypted at rest, unlock with master password. **Security audit** (weak/reused/breached passwords), notes + URLs, emergency kit export, optional **FIDO2 security key** unlock, and **Tailscale remote vault access** from your phone. |
+| 🛡 | **Security Center** | **Have I Been Pwned** password + email checks, plus **vault audit** (weak, reused, and breached saved passwords) in one place. |
 
 ### 🎮 Gaming
 
 | | Module | What it does |
 |---|---|---|
+| 🕹️ | **Arcade** | Browser **game hub** — **Brick Breaker**, **Pong**, **Air Hockey**, and more. In-app WebView, local server, optional **Cloudflare Pages** deploy, Brick Breaker **global leaderboard**. |
 | 🎮 | **Gaming Hub** | **Scan, launch, and manage** installed games across drives. Save backup hints, per-game notes, drive selection, and optional **Tailscale remote access** to browse your library from a phone. |
 | 🎮 | **Game Server Manager** | Universal **dedicated game server** manager — **Minecraft Java & Bedrock**, Satisfactory, Terraria, Valheim, Palworld, Project Zomboid, **SteamCMD** installs, and custom servers. Start/stop, console, RCON, configs, backups, and server file editing in one UI. |
 
@@ -68,14 +70,15 @@ Instead of one monolithic app, every tool lives in its own folder under `modules
 |---|---|---|
 | 🌐 | **Network Auditor** | **Discover devices** on your LAN, **scan ports**, and review basic security findings. Uses scapy + nmap (requires Npcap/Nmap on the machine). |
 | 🔀 | **Port Forward Helper** | Detect your router via **UPnP** and add/remove **port forwards** without logging into the router admin page. |
-| 📤 | **Quick Send** | **Send files between your phone and PC** on the local network — quick drag-and-drop style transfers. |
-| 📡 | **Remote Hub** | One **phone-friendly landing page** (over Tailscale) with links into **Media Player**, **Secure Vault**, and **YouTube Downloader** remote UIs. |
+| 📤 | **Quick Send** | **Send files between your phone and PC** on your tailnet — inbox/outbox folders and a received-files log. |
+| 📡 | **Remote Hub** | One **phone-friendly landing page** over Tailscale: **scan a QR code**, see recent **Quick Send** files (unified inbox), and jump to whichever modules are live (Vault, Music, YouTube, Notes, Gaming Hub, Soundboard, Quick Send, Brick Breaker). |
 
 ### 🖥️ System
 
 | | Module | What it does |
 |---|---|---|
 | 🖥️ | **System Monitor** | Live **CPU, RAM, disk, network, and GPU** stats with process list and an optional **mini desktop widget**. |
+| 🩺 | **Environment Checker** | One-screen **dependency health** — VLC, Tailscale, WebView2, Nmap/Npcap, disk space, and more. Shows what's missing before a module fails silently. |
 | 🚀 | **Startup Manager** | See and **enable/disable** everything that runs when Windows starts — registry Run keys, startup folders, scheduled tasks, and more. |
 | 🧬 | **Duplicate File Finder** | Scan folders for **byte-identical files** and reclaim wasted disk space. |
 | 🔧 | **Driver/Update Checker** | Review **installed drivers** and check for driver/software updates (Windows Update Agent integration where available). |
@@ -160,7 +163,7 @@ Optional extras on registration:
 
 ## Requirements
 
-- **Python 3.11+** (3.13 supported)
+- **Python 3.11+** (3.14 supported on current builds)
 - **Windows** (most modules assume Win32 APIs, winget, UPnP, etc.)
 
 ### Python packages
@@ -190,6 +193,8 @@ Key dependencies:
 | `pyperclip` | Clipboard Manager |
 | `qrcode` | QR Generator |
 | `openai` | AI Chat (hosted models) |
+| `fido2` | Optional FIDO2 USB security key unlock (Secure Vault) |
+| `tkwebview2`, `pythonnet`, `pywebview` | Brick Breaker in-app play (Windows only) |
 | `pywin32` | Windows-only features (timestamps, startup, updates) |
 
 See `requirements.txt` for the full list and version floors.
@@ -202,7 +207,8 @@ See `requirements.txt` for the full list and version floors.
 | **ffmpeg** | Optional fallback transcode for exotic audio (tracker/MIDI) when VLC can't decode natively. |
 | **Npcap + Nmap** | Network Auditor — packet capture and port scanning. |
 | **Ollama / llama.cpp** | AI Chat — optional local model backends (not bundled). |
-| **Tailscale** | Remote access features in Media Player, Secure Vault, YouTube Downloader, Gaming Hub, Remote Hub. |
+| **Tailscale** | Remote access features in Media Player, Secure Vault, YouTube Downloader, Gaming Hub, Soundboard, Notes, Quick Send, Brick Breaker, and Remote Hub. |
+| **Microsoft Edge WebView2 Runtime** | Brick Breaker in-app embed — usually preinstalled on Windows 10/11; the **installer** can install it if missing. |
 | **winget** | App Installer — Windows Package Manager CLI. |
 | **mGBA** (optional) | Folder Generator — some GBA templates expect `modules/Files/Folder Generator/assets/mGBA.exe` ([download](https://mgba.io/downloads.html)). Not included in the repo. |
 
@@ -234,13 +240,32 @@ From the project root:
 build.bat
 ```
 
-This uses PyInstaller to produce `dist/Z's Multi Tool.exe` (windowed, single-file). See `build.bat` for bundled paths and VLC/Npcap caveats — system drivers and VLC still need to exist on the target machine.
+This uses PyInstaller to produce `dist/Z's Multi Tool.exe` (windowed, single-file). The script also:
+
+- Installs **WebView2 Python packages** (`tkwebview2`, `pythonnet`, `pywebview`) before building
+- Bundles them into the exe for **Brick Breaker in-app play**
+- Refreshes `requirements-lock.txt`
+
+See `build.bat` for bundled paths and caveats — **VLC**, **Npcap/Nmap**, and **WebView2 Runtime** still need to exist on the target machine (or be installed via `install.iss`).
 
 Console build (shows stdout/stderr):
 
 ```bat
 build_console.bat
 ```
+
+### Windows installer (Inno Setup)
+
+After `build.bat`, compile `install.iss` with [Inno Setup 6+](https://jrsoftware.org/isinfo.php):
+
+```bat
+"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" install.iss
+```
+
+Optional setup tasks can download/install:
+
+- **Npcap** and **Nmap** (Network Auditor)
+- **Microsoft Edge WebView2 Runtime** (Brick Breaker in-app play, silent install)
 
 ---
 
@@ -252,7 +277,7 @@ Local app data lives under `%APPDATA%` (e.g. `MusicPlayerApp/library.db` for the
 
 - `data/` — vault files, keys, local caches
 - `settings.json` — personal preferences
-- Master keys, API keys entered in modules (Breach Checker, Game Stats & News, AI Chat)
+- Master keys, API keys entered in modules (Security Center, Game Stats & News, AI Chat)
 
 The **Secure Vault** and **File Encryption** modules use local encryption — back up your master password and vault data separately.
 
@@ -262,13 +287,23 @@ The **Secure Vault** and **File Encryption** modules use local encryption — ba
 
 Several modules can expose a **localhost-only** web UI meant to be reached through **[Tailscale Serve](https://tailscale.com/kb/1242/serve)** (HTTPS on your tailnet, not the public internet):
 
-- **Media Player** — browse/stream library from phone
-- **Secure Vault** — read passwords/TOTP remotely
-- **YouTube Downloader** — queue downloads remotely
-- **Gaming Hub** — browse game library
-- **Remote Hub** — single page linking to the above
+| Module | Remote feature |
+|---|---|
+| **Remote Hub** | Single landing page — **QR code**, unified Quick Send inbox, links to everything below |
+| **Media Player** | Browse/stream library from phone |
+| **Secure Vault** | Read passwords/TOTP remotely |
+| **YouTube Downloader** | Queue downloads remotely |
+| **Gaming Hub** | Browse game library |
+| **Soundboard** | Trigger sounds from phone |
+| **Notes** | Read/edit notes |
+| **Quick Send** | Send files to/from PC |
+| **Brick Breaker** | Play in browser over tailnet |
 
-Configure each module's ⚙ **Remote access** section and an optional API key before exposing anything beyond your tailnet.
+Configure each module's ⚙ **Remote access** section (or **Remote Hub → Go Live** for all at once) and an optional access code before exposing anything beyond your tailnet.
+
+### Brick Breaker online (Cloudflare)
+
+The public web game in `modules/Gaming/Brick Breaker/web/` can be deployed to **Cloudflare Pages** with a separate **Worker** for the global leaderboard. See `modules/Gaming/Brick Breaker/DEPLOY.md`. Desktop module settings do not change the live Cloudflare site.
 
 ---
 

@@ -107,7 +107,7 @@ class QuickSendPage(ctk.CTkFrame):
         outbox_panel.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(
-            outbox_panel, text="SHARED  (drop files here for your phone to pull down)",
+            outbox_panel, text="SHARED  (drop photos & files here for your phone to pull down)",
             font=theme.font(10, "bold"), text_color=theme.FAINT, anchor="w"
         ).grid(row=0, column=0, columnspan=3, sticky="w", padx=theme.PAD_LG, pady=(theme.PAD, 4))
 

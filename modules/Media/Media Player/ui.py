@@ -7,7 +7,7 @@ from array import array
 import customtkinter as ctk
 from tkinter import filedialog
 
-from .player import VLCMusicEngine, State
+from .player import VLCMusicEngine, State, LazyPlaylist
 from . import db as musicdb
 from .media_types import file_dialog_media_types, is_media_path, is_playlist_path
 from . import auto_index
@@ -62,6 +62,7 @@ SCAN_WORKERS = 6      # concurrent tag-reader threads (network share = I/O bound
 STARTUP_SCAN_MAX_AGE = 6 * 3600   # skip redundant full scan if indexed within 6 h
 AUTOINDEX_START_DELAY_MS = 3_000  # brief pause after UI/library settle — watch-only, no scan
 _RENDER_CHUNK = 20    # song rows built per UI frame — keeps open/page-turn responsive
+_ROW_SCROLL_HEIGHT = 40  # approx row frame + pady for index-based scroll fallback
 
 
 def _fmt_row(meta, fallback_path):
@@ -158,6 +159,13 @@ class MusicPage(ctk.CTkFrame):
         self._seek_track_length = 0.0
         self._last_followed_index = -1
         self._last_highlighted_index = -1
+        self._last_engine_index_tracked = -1
+        self._last_tracked_song_id = None
+        self._preferred_volume = 0.5
+        self._song_id_index: dict[int, int] = {}
+        self._follow_scroll_idx: int | None = None
+        self._song_list_hidden_for_follow = False
+        self._scroll_retry_seq = 0
 
         self._build_ui()
         self._sync_initial_state()
@@ -239,12 +247,39 @@ class MusicPage(ctk.CTkFrame):
         """Yield one frame, then start heavy work off the UI thread."""
         self.after(0, self._refresh_status)
         if not self._engine_ready:
-            threading.Thread(target=self._init_engine_worker, daemon=True).start()
+            existing = getattr(self.manager, "music_engine", None)
+            if existing is not None:
+                self._attach_engine(existing)
+            else:
+                threading.Thread(target=self._init_engine_worker, daemon=True).start()
         self._begin_library_load()
         self.after(500, self._on_module_ready)
         self.after(250, self._setup_drag_drop)
 
+    def _attach_engine(self, engine):
+        """Wire a ready VLC engine to this page and sync UI state."""
+        self.engine = engine
+        self.manager.music_engine = engine
+        self.web_server.engine = engine
+        self._engine_ready = True
+        try:
+            vol = float(self.volume.get())
+        except Exception:
+            vol = getattr(engine, "volume", self._preferred_volume)
+        vol = max(0.0, min(1.0, vol))
+        self._preferred_volume = vol
+        self.volume.set(vol)
+        engine.set_volume(vol)
+        self._update_playback_ui_state()
+        self._flush_pending_playback()
+        self._refresh_status()
+
     def _init_engine_worker(self):
+        existing = getattr(self.manager, "music_engine", None)
+        if existing is not None:
+            self.after(0, lambda: self._attach_engine(existing))
+            return
+
         try:
             engine = VLCMusicEngine()
         except Exception as exc:
@@ -257,15 +292,7 @@ class MusicPage(ctk.CTkFrame):
             if engine is None:
                 self._flash_status("Audio engine failed to start")
                 return
-            self.engine = engine
-            self.manager.music_engine = engine
-            self.web_server.engine = engine
-            self._engine_ready = True
-            self.volume.set(engine.volume)
-            engine.set_volume(engine.volume)
-            self._update_playback_ui_state()
-            self._flush_pending_playback()
-            self._refresh_status()
+            self._attach_engine(engine)
 
         self.after(0, apply)
 
@@ -333,6 +360,7 @@ class MusicPage(ctk.CTkFrame):
         if seq != self._library_load_seq or not self.winfo_exists():
             return
         self._result_ids = ids
+        self._rebuild_song_id_index()
         self._library_loading = False
         self._page = 0
         self.results_count.configure(text=f"{_fmt_count(count)} songs")
@@ -465,6 +493,12 @@ class MusicPage(ctk.CTkFrame):
         )
         self.results_count.pack(side="right")
 
+        self.now_playing_list_hint = ctk.CTkLabel(
+            panel, text="", text_color=theme.ACCENT, font=("Segoe UI", 11, "bold"),
+            anchor="w",
+        )
+        self.now_playing_list_hint.pack(fill="x", padx=10, pady=(0, 2))
+
         big_row = ctk.CTkFrame(panel, fg_color="transparent")
         big_row.pack(fill="x", padx=10, pady=(0, 6))
 
@@ -487,16 +521,8 @@ class MusicPage(ctk.CTkFrame):
         self.search_entry.pack(fill="x", padx=10, pady=(0, 6))
         self.search_entry.bind("<KeyRelease>", self._on_search_key)
 
-        self.song_buttons_frame = ctk.CTkScrollableFrame(
-            panel, fg_color=theme.BG, corner_radius=8,
-            border_width=1, border_color=theme.BORDER,
-            scrollbar_button_color=theme.PANEL_2,
-            scrollbar_button_hover_color=theme.PANEL_HOVER,
-        )
-        self.song_buttons_frame.pack(fill="both", expand=True, padx=10, pady=(0, 4))
-
         pager = ctk.CTkFrame(panel, fg_color="transparent")
-        pager.pack(fill="x", padx=10, pady=(0, 10))
+        pager.pack(fill="x", padx=10, pady=(0, 6))
 
         self.prev_page_btn = _make_btn(pager, "◀ Prev", self.prev_page, width=90)
         self.prev_page_btn.pack(side="left")
@@ -506,8 +532,21 @@ class MusicPage(ctk.CTkFrame):
         )
         self.page_label.pack(side="left", expand=True)
 
+        self.locate_playing_btn = _make_btn(
+            pager, "▶ In list", self._locate_now_playing_in_list, width=90,
+        )
+        self.locate_playing_btn.pack(side="left", padx=(0, 8))
+
         self.next_page_btn = _make_btn(pager, "Next ▶", self.next_page, width=90)
         self.next_page_btn.pack(side="right")
+
+        self.song_buttons_frame = ctk.CTkScrollableFrame(
+            panel, fg_color=theme.BG, corner_radius=8,
+            border_width=1, border_color=theme.BORDER,
+            scrollbar_button_color=theme.PANEL_2,
+            scrollbar_button_hover_color=theme.PANEL_HOVER,
+        )
+        self.song_buttons_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
     def _build_now_playing(self):
         card = ctk.CTkFrame(
@@ -564,8 +603,14 @@ class MusicPage(ctk.CTkFrame):
         )
         outer.pack(side="bottom", fill="x", padx=12, pady=(4, 12))
 
-        transport = ctk.CTkFrame(outer, fg_color="transparent")
-        transport.pack(pady=(10, 4))
+        transport_row = ctk.CTkFrame(outer, fg_color="transparent")
+        transport_row.pack(fill="x", padx=14, pady=(10, 12))
+        transport_row.grid_columnconfigure(0, weight=1)
+        transport_row.grid_columnconfigure(1, weight=0)
+        transport_row.grid_columnconfigure(2, weight=1)
+
+        transport = ctk.CTkFrame(transport_row, fg_color="transparent")
+        transport.grid(row=0, column=1)
 
         transport_btns = [
             ("⏮", self.prev, False),
@@ -581,27 +626,27 @@ class MusicPage(ctk.CTkFrame):
                 btn = _make_btn(transport, text, cmd, width=56, height=44)
                 btn.grid(row=0, column=col, padx=4)
 
-        mode_row = ctk.CTkFrame(outer, fg_color="transparent")
-        mode_row.pack(pady=(0, 4))
+        self.repeat_btn = _make_btn(transport, "🔁  Repeat", self.toggle_repeat, width=130)
+        self.repeat_btn.grid(row=0, column=3, padx=(8, 0))
 
-        self.repeat_btn = _make_btn(mode_row, "🔁  Repeat", self.toggle_repeat, width=130)
-        self.repeat_btn.pack()
-
-        vol_row = ctk.CTkFrame(outer, fg_color="transparent")
-        vol_row.pack(fill="x", padx=14, pady=(4, 12))
+        vol_row = ctk.CTkFrame(transport_row, fg_color="transparent")
+        vol_row.grid(row=0, column=2, sticky="ew", padx=(12, 0))
+        vol_row.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(
             vol_row, text="Volume", text_color=theme.TEXT,
             font=("Segoe UI", 12, "bold"),
-        ).pack(side="left", padx=(0, 10))
+        ).grid(row=0, column=0, padx=(0, 8))
 
         self.volume = ctk.CTkSlider(
-            vol_row, from_=0, to=1, progress_color=cool_accent(),
-            button_color=cool_accent(), button_hover_color=cool_accent_hover(),
-            fg_color=theme.BORDER, command=self.set_volume, corner_radius=4,
-            height=16,
+            vol_row, from_=0, to=2, number_of_steps=200,
+            progress_color=cool_accent(), button_color=cool_accent(),
+            button_hover_color=cool_accent_hover(), fg_color=theme.BORDER,
+            command=self.set_volume, corner_radius=4, height=16,
         )
-        self.volume.pack(side="left", fill="x", expand=True)
+        self.volume.set(self._preferred_volume)
+        self.volume.grid(row=0, column=1, sticky="ew")
+        self.volume.bind("<ButtonRelease-1>", self._on_volume_release)
 
     def _set_seek_display(self, current: float, total: float):
         self._seek_track_length = max(0.0, total)
@@ -637,7 +682,12 @@ class MusicPage(ctk.CTkFrame):
 
     def _sync_initial_state(self):
         if self._engine_ready and self.engine is not None:
-            vol = getattr(self.engine, "volume", 0.5)
+            try:
+                vol = float(self.volume.get())
+            except Exception:
+                vol = getattr(self.engine, "volume", self._preferred_volume)
+            vol = max(0.0, min(1.0, vol))
+            self._preferred_volume = vol
             self.volume.set(vol)
             self.engine.set_volume(vol)
 
@@ -977,7 +1027,15 @@ class MusicPage(ctk.CTkFrame):
         seq = self._search_seq
 
         def worker():
-            ids = self.db.search_ids(query)
+            q = (query or "").strip()
+            if not q:
+                cached = getattr(self.manager, "music_library_ids", None)
+                if cached is not None:
+                    ids = cached
+                else:
+                    ids = self.db.all_ids()
+            else:
+                ids = self.db.search_ids(q)
             self.after(0, lambda: self._apply_search_results(seq, ids))
 
         if immediate:
@@ -989,21 +1047,28 @@ class MusicPage(ctk.CTkFrame):
         if seq != self._search_seq:
             return  # a newer search superseded this one
         self._result_ids = ids
+        self._rebuild_song_id_index()
         self._page = 0
         self._last_followed_index = -1
         self.results_count.configure(text=f"{_fmt_count(len(ids))} songs")
         self._render_page()
         self.after(100, lambda: self._ensure_active_track_visible(force=True))
 
+    def _rebuild_song_id_index(self) -> None:
+        """Map database song id → position in the current browse/search list."""
+        self._song_id_index = {int(sid): i for i, sid in enumerate(self._result_ids)}
+
     def _total_pages(self):
         return max(1, (len(self._result_ids) + PAGE_SIZE - 1) // PAGE_SIZE)
 
     def prev_page(self):
+        self._follow_scroll_idx = None
         if self._page > 0:
             self._page -= 1
             self._render_page()
 
     def next_page(self):
+        self._follow_scroll_idx = None
         if self._page + 1 < self._total_pages():
             self._page += 1
             self._render_page()
@@ -1027,6 +1092,8 @@ class MusicPage(ctk.CTkFrame):
         self._render_page_ids = list(self._result_ids[start:end])
         self._render_page_metas = self.db.get_songs(self._render_page_ids)
         self._render_chunk_idx = 0
+        now_idx = self._resolve_now_playing_browse_index()
+        self._now_playing_browse_idx = now_idx
         self._render_chunk_batch()
 
     def _render_chunk_batch(self):
@@ -1042,7 +1109,10 @@ class MusicPage(ctk.CTkFrame):
             sid = page_ids[offset]
             global_index = page_start + offset
             meta = metas.get(sid)
-            text = f"{global_index + 1}.  {_fmt_row(meta, None)}"
+            if global_index == self._now_playing_browse_idx:
+                text = self._row_label(global_index, meta, playing=True)
+            else:
+                text = self._row_label(global_index, meta, playing=False)
 
             row = ctk.CTkFrame(
                 self.song_buttons_frame, fg_color=theme.PANEL_2,
@@ -1061,12 +1131,7 @@ class MusicPage(ctk.CTkFrame):
             )
             btn.pack(side="left", fill="x", expand=True, padx=2, pady=1)
             self.row_widgets.append((global_index, btn))
-            if (
-                self._engine_ready
-                and self.engine is not None
-                and global_index == self.engine.index
-                and self._current_queue_is(self._result_ids)
-            ):
+            if global_index == self._now_playing_browse_idx:
                 btn.configure(**selected_track_kwargs())
                 row.configure(border_color=highlight_border())
                 self.active_index = global_index
@@ -1074,7 +1139,10 @@ class MusicPage(ctk.CTkFrame):
 
         self._render_chunk_idx = chunk_end
         if chunk_end < len(page_ids):
-            self._render_job = self.after(1, self._render_chunk_batch)
+            if self._follow_scroll_idx is not None:
+                self._render_chunk_batch()
+            else:
+                self._render_job = self.after(1, self._render_chunk_batch)
             return
 
         self._render_job = None
@@ -1085,19 +1153,95 @@ class MusicPage(ctk.CTkFrame):
             state="normal" if self._page + 1 < total_pages else "disabled")
         self._highlight_active(force=True)
         self._refresh_status()
+        self._refresh_now_playing_list_hint()
         page_start = self._render_page_start
         page_end = page_start + len(page_ids)
+        now_idx = self._resolve_now_playing_browse_index()
+        self._now_playing_browse_idx = now_idx
+        if self._follow_scroll_idx is not None:
+            if now_idx >= 0 and page_start <= now_idx < page_end:
+                self.active_index = now_idx
+                self._last_followed_index = now_idx
+            self._finish_follow_scroll()
+        elif now_idx >= 0 and page_start <= now_idx < page_end:
+            self.active_index = now_idx
+            self._last_followed_index = now_idx
+            self._schedule_scroll_to_now_playing()
+        elif now_idx >= 0 and now_idx == self._last_followed_index:
+            self._schedule_scroll_to_now_playing()
+
+    # ── Playback ─────────────────────────────────────────────
+
+    def _now_playing_song_id(self) -> int | None:
+        if not self._engine_ready or self.engine is None:
+            return None
+        tracked = getattr(self.engine, "_current_song_id", None)
+        if tracked is not None:
+            return int(tracked)
+        if self.engine.index < 0:
+            return None
+        playlist = self.engine.playlist
+        if isinstance(playlist, LazyPlaylist):
+            try:
+                return int(playlist.id_at(self.engine.index))
+            except Exception:
+                return None
+        return None
+
+    def _browse_index_for_song_id(self, song_id: int) -> int:
+        return self._song_id_index.get(int(song_id), -1)
+
+    def _resolve_now_playing_browse_index(self) -> int:
+        """Position of the now-playing track in the current library/search list."""
+        song_id = self._now_playing_song_id()
+        if song_id is not None:
+            idx = self._browse_index_for_song_id(song_id)
+            if idx >= 0:
+                return idx
         if (
             self._engine_ready
             and self.engine is not None
-            and page_start <= self.engine.index < page_end
-            and self._current_queue_is(self._result_ids)
+            and self._engine_queue_matches_browse()
+            and 0 <= self.engine.index < len(self._result_ids)
         ):
-            self.active_index = self.engine.index
-            self._last_followed_index = self.engine.index
-            self.after_idle(self._scroll_active_row_into_view)
+            return self.engine.index
+        return -1
 
-    # ── Playback ─────────────────────────────────────────────
+    def _refresh_now_playing_list_hint(self) -> None:
+        if not hasattr(self, "now_playing_list_hint"):
+            return
+        idx = self._resolve_now_playing_browse_index()
+        if idx < 0:
+            if self._now_playing_song_id() is not None and self.search_entry.get().strip():
+                self.now_playing_list_hint.configure(
+                    text="▶ Now playing — clear search to see it in the list",
+                )
+            else:
+                self.now_playing_list_hint.configure(text="")
+            if hasattr(self, "locate_playing_btn"):
+                self.locate_playing_btn.configure(state="disabled")
+            return
+        page = idx // PAGE_SIZE + 1
+        row = idx + 1
+        on_page = page == self._page + 1
+        where = "on this page" if on_page else f"page {page}"
+        self.now_playing_list_hint.configure(
+            text=f"▶ Now playing: #{row} ({where}) — highlighted row below",
+        )
+        if hasattr(self, "locate_playing_btn"):
+            self.locate_playing_btn.configure(state="normal")
+
+    def _locate_now_playing_in_list(self) -> None:
+        self._ensure_active_track_visible(force=True)
+
+    def _follow_now_playing(self) -> None:
+        """Jump to the playing track in the library list (page + scroll)."""
+        if not self._engine_ready or self.engine is None:
+            return
+        self._last_followed_index = -1
+        self._update_playback_ui_state()
+        self._ensure_active_track_visible(force=True)
+        self.after(80, lambda: self._ensure_active_track_visible(force=True))
 
     def play_result(self, global_index):
         def _play():
@@ -1106,7 +1250,7 @@ class MusicPage(ctk.CTkFrame):
             self.engine.load_ids(self.db, self._result_ids, start_index=global_index)
             self.engine.shuffle = False
             self.engine.play()
-            self._update_playback_ui_state()
+            self._follow_now_playing()
 
         self._queue_playback(_play)
 
@@ -1122,7 +1266,7 @@ class MusicPage(ctk.CTkFrame):
             self.engine.load_ids(self.db, ids, start_index=start)
             self.engine.shuffle = True
             self.engine.play()
-            self._update_playback_ui_state()
+            self._follow_now_playing()
 
         self._queue_playback(_shuffle)
 
@@ -1137,7 +1281,7 @@ class MusicPage(ctk.CTkFrame):
             self.engine.load_ids(self.db, ids, start_index=0)
             self.engine.shuffle = False
             self.engine.play()
-            self._update_playback_ui_state()
+            self._follow_now_playing()
 
         self._queue_playback(_play)
 
@@ -1166,17 +1310,26 @@ class MusicPage(ctk.CTkFrame):
         if not self._ensure_engine():
             return
         self.engine.next()
-        self._update_playback_ui_state()
+        self._follow_now_playing()
 
     def prev(self):
         if not self._ensure_engine():
             return
         self.engine.prev()
-        self._update_playback_ui_state()
+        self._follow_now_playing()
 
     def set_volume(self, value):
+        try:
+            vol = float(value)
+        except (TypeError, ValueError):
+            return
+        vol = max(0.0, min(1.0, vol))
+        self._preferred_volume = vol
         if self.engine is not None:
-            self.engine.set_volume(value)
+            self.engine.set_volume(vol)
+
+    def _on_volume_release(self, _event=None):
+        self.set_volume(self.volume.get())
 
     # ── Repeat ────────────────────────────────────────────────
 
@@ -1208,77 +1361,150 @@ class MusicPage(ctk.CTkFrame):
         """Jump to the library page showing the currently playing track."""
         if not self._engine_ready or self.engine is None:
             return
-        idx = self.engine.index
+        idx = self._resolve_now_playing_browse_index()
         if idx < 0 or not len(self._result_ids):
-            return
-        if not self._current_queue_is(self._result_ids):
-            return
-        if idx >= len(self._result_ids):
+            self._refresh_now_playing_list_hint()
             return
 
         self.active_index = idx
         if not force and idx == self._last_followed_index:
+            self._highlight_active(force=True)
+            self._refresh_now_playing_list_hint()
             return
 
         self._last_followed_index = idx
         target_page = idx // PAGE_SIZE
         if target_page != self._page:
+            self._follow_scroll_idx = idx
             self._page = target_page
+            self._hide_song_list_for_follow()
             self._render_page()
             return
 
         self._highlight_active(force=True)
-        self._scroll_active_row_into_view()
+        self._schedule_scroll_to_now_playing()
+        self._refresh_now_playing_list_hint()
 
-    def _scroll_active_row_into_view(self):
-        """Scroll the song list so the active row is visible."""
+    def _hide_song_list_for_follow(self) -> None:
+        if self._song_list_hidden_for_follow:
+            return
+        self.song_buttons_frame.pack_forget()
+        self._song_list_hidden_for_follow = True
+
+    def _show_song_list_after_follow(self) -> None:
+        if not self._song_list_hidden_for_follow:
+            return
+        self.song_buttons_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self._song_list_hidden_for_follow = False
+
+    def _finish_follow_scroll(self) -> None:
+        """Scroll to the playing row while hidden, then reveal the list once."""
+        self._scroll_active_row_into_view()
+        self.update_idletasks()
+        self._scroll_active_row_into_view()
+        self._follow_scroll_idx = None
+        self._show_song_list_after_follow()
+
+    def _schedule_scroll_to_now_playing(self) -> None:
+        """Scroll the list so the now-playing row is visible near the top."""
+        self._scroll_retry_seq += 1
+        seq = self._scroll_retry_seq
+
+        def retry(delay_ms: int):
+            def run():
+                if seq != self._scroll_retry_seq:
+                    return
+                self._scroll_active_row_into_view()
+            self.after(delay_ms, run)
+
+        if self._scroll_active_row_into_view():
+            return
+        retry(50)
+
+    def _scroll_active_row_into_view(self) -> bool:
+        """Scroll the song list so the active row sits near the top of the viewport."""
+        idx = self._resolve_now_playing_browse_index()
+        if idx < 0:
+            idx = self.active_index
+        if idx < 0:
+            return False
+
+        page_start = getattr(self, "_render_page_start", 0)
+        page_len = len(getattr(self, "_render_page_ids", ()))
+        if page_len and not (page_start <= idx < page_start + page_len):
+            return False
+
+        sf = self.song_buttons_frame
+        canvas = getattr(sf, "_parent_canvas", None)
+        if canvas is None:
+            return False
+
         target_row = None
         for global_index, btn in self.row_widgets:
-            if global_index == self.active_index:
+            if global_index == idx:
                 target_row = btn.master
                 break
-        if target_row is None:
-            return
 
-        canvas = getattr(self.song_buttons_frame, "_parent_canvas", None)
-        inner = getattr(self.song_buttons_frame, "_scrollable_frame", None)
-        if canvas is None or inner is None:
-            return
+        try:
+            sf.update_idletasks()
+            canvas.update_idletasks()
+            bbox = canvas.bbox("all")
+            if bbox:
+                canvas.configure(scrollregion=bbox)
 
-        def _scroll():
-            try:
-                inner.update_idletasks()
+            inner_h = max(1, sf.winfo_reqheight())
+            view_h = max(1, canvas.winfo_height())
+            if inner_h <= view_h:
+                return target_row is not None
+
+            if target_row is not None and target_row.winfo_exists():
                 target_row.update_idletasks()
-                inner_h = max(1, inner.winfo_height())
-                view_h = max(1, canvas.winfo_height())
-                if inner_h <= view_h:
-                    return
-                y = target_row.winfo_y()
-                h = max(1, target_row.winfo_height())
-                visible_top, visible_bottom = canvas.yview()
-                top_frac = y / inner_h
-                bottom_frac = (y + h) / inner_h
-                if top_frac >= visible_top and bottom_frac <= visible_bottom:
-                    return
-                window = view_h / inner_h
-                # Keep the active row anchored near the top — centering can
-                # push it back out of view on short lists or after resize.
-                pad = 8
-                new_top = max(0.0, min(1.0 - window, (y - pad) / inner_h))
-                canvas.yview_moveto(new_top)
-            except Exception:
-                pass
+                y = max(0, int(target_row.winfo_y()))
+            else:
+                y = max(0, (idx - page_start) * _ROW_SCROLL_HEIGHT)
 
-        self.after_idle(_scroll)
+            window = view_h / inner_h
+            pad = 6
+            new_top = max(0.0, min(1.0 - window, (y - pad) / inner_h))
+            canvas.yview_moveto(new_top)
+            return target_row is not None
+        except Exception:
+            return False
+
+    def _row_label(self, global_index: int, meta, *, playing: bool) -> str:
+        text = _fmt_row(meta, None)
+        if playing:
+            return f"▶  {text}"
+        return f"{global_index + 1}.  {text}"
 
     def _highlight_active(self, *, force=False):
-        if not force and self._last_highlighted_index == self.active_index:
+        browse_idx = self._resolve_now_playing_browse_index()
+        if browse_idx >= 0:
+            self.active_index = browse_idx
+        if not force and self._last_highlighted_index == browse_idx:
             return
-        if not self._current_queue_is(self._result_ids):
+        if browse_idx < 0:
             self._last_highlighted_index = -1
+            inactive_kw = dict(
+                fg_color="transparent",
+                hover_color=theme.PANEL_HOVER,
+                text_color=theme.TEXT,
+                font=("Segoe UI", 13),
+            )
+            page_start = getattr(self, "_render_page_start", 0)
+            metas = getattr(self, "_render_page_metas", {})
+            page_ids = getattr(self, "_render_page_ids", [])
+            for global_index, btn in self.row_widgets:
+                offset = global_index - page_start
+                meta = metas.get(page_ids[offset]) if 0 <= offset < len(page_ids) else None
+                if meta is not None:
+                    btn.configure(text=self._row_label(global_index, meta, playing=False), **inactive_kw)
+                else:
+                    btn.configure(**inactive_kw)
+                btn.master.configure(border_color=theme.BORDER)
             return
 
-        self._last_highlighted_index = self.active_index
+        self._last_highlighted_index = browse_idx
         active_kw = selected_track_kwargs()
         inactive_kw = dict(
             fg_color="transparent",
@@ -1286,19 +1512,48 @@ class MusicPage(ctk.CTkFrame):
             text_color=theme.TEXT,
             font=("Segoe UI", 13),
         )
+        page_start = getattr(self, "_render_page_start", 0)
+        metas = getattr(self, "_render_page_metas", {})
+        page_ids = getattr(self, "_render_page_ids", [])
         for global_index, btn in self.row_widgets:
-            if global_index == self.active_index:
-                btn.configure(**active_kw)
+            offset = global_index - page_start
+            meta = metas.get(page_ids[offset]) if 0 <= offset < len(page_ids) else None
+            if global_index == browse_idx:
+                if meta is not None:
+                    btn.configure(text=self._row_label(global_index, meta, playing=True), **active_kw)
+                else:
+                    btn.configure(**active_kw)
                 btn.master.configure(border_color=highlight_border())
             else:
-                btn.configure(**inactive_kw)
+                if meta is not None:
+                    btn.configure(text=self._row_label(global_index, meta, playing=False), **inactive_kw)
+                else:
+                    btn.configure(**inactive_kw)
                 btn.master.configure(border_color=theme.BORDER)
+
+    def _engine_queue_matches_browse(self) -> bool:
+        """True when the engine queue is the same library list we're browsing."""
+        if not self.engine:
+            return False
+        playlist = self.engine.playlist
+        if not isinstance(playlist, LazyPlaylist):
+            return False
+        if playlist.ids is self._result_ids:
+            return True
+        cached = getattr(self.manager, "music_library_ids", None)
+        if cached is not None and playlist.ids is cached and self._result_ids is cached:
+            return True
+        if (
+            cached is not None
+            and self._result_ids is cached
+            and len(playlist.ids) == len(cached)
+        ):
+            return True
+        return False
 
     def _current_queue_is(self, ids):
         if not self.engine:
             return False
-        # Only highlight a browse row as "active" when the engine's queue is
-        # actually this same result set (not, say, an ad-hoc "Add Files" list).
         playlist = self.engine.playlist
         return getattr(playlist, "ids", None) is ids
 
@@ -1313,19 +1568,39 @@ class MusicPage(ctk.CTkFrame):
         current_engine_index = self.engine.index
         is_playing = self.engine.is_playing()
         engine_state = self.engine.get_state()
+        prev_engine_idx = self._last_engine_index_tracked
+        current_song_id = self._now_playing_song_id()
 
-        if current_engine_index != self.active_index:
-            self.active_index = current_engine_index
-            self._ensure_active_track_visible()
-            self.update_discord_song(force_update=True)
+        browse_idx = self._resolve_now_playing_browse_index()
+        track_changed = (
+            current_song_id != self._last_tracked_song_id
+            or current_engine_index != prev_engine_idx
+        )
+        if browse_idx != self.active_index or track_changed:
+            self.active_index = browse_idx
+            if browse_idx >= 0:
+                if track_changed:
+                    self._last_followed_index = -1
+                self._ensure_active_track_visible(force=track_changed)
+            else:
+                self._highlight_active(force=True)
+        elif browse_idx >= 0:
+            self._highlight_active()
 
-        if self.engine.playlist and 0 <= self.active_index < len(self.engine.playlist):
+        self._last_engine_index_tracked = current_engine_index
+        self._last_tracked_song_id = current_song_id
+        self._refresh_now_playing_list_hint()
+
+        if self.engine.index >= 0 and self.engine.playlist:
             meta = self.engine.get_current_meta()
             if meta:
                 self.current_song_label.configure(text=_fmt_row(meta, None))
             else:
-                self.current_song_label.configure(
-                    text=os.path.basename(self.engine.playlist[self.active_index]))
+                try:
+                    path = self.engine.playlist[self.engine.index]
+                    self.current_song_label.configure(text=os.path.basename(path))
+                except Exception:
+                    self.current_song_label.configure(text="Nothing playing")
         else:
             self.current_song_label.configure(text="Nothing playing")
 
@@ -1333,7 +1608,7 @@ class MusicPage(ctk.CTkFrame):
             self.play_pause_btn.configure(text="⏸" if is_playing else "▶")
 
         if is_playing:
-            if not self._discord_rpc_active:
+            if not self._discord_rpc_active or prev_engine_idx != current_engine_index:
                 self.update_discord_song(force_update=True)
         elif engine_state == State.Paused:
             if self._discord_rpc_active:

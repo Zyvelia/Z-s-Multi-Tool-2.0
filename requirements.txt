@@ -46,13 +46,13 @@ yt-dlp>=2026.6.9
 # themselves).
 pywin32>=312; sys_platform == "win32"
 
-# Windows-only: powers the notification_mirror module's capture of Windows
-# notifications via the UserNotificationListener WinRT API (modules/
-# notification_mirror/listener.py). Also guarded with try/except so the
-# module degrades to an "unavailable" status instead of crashing if missing.
-winrt-Windows.UI.Notifications.Management>=3.2.1; sys_platform == "win32"
-winrt-Windows.UI.Notifications>=3.2.1; sys_platform == "win32"
-winrt-Windows.Foundation>=3.2.1; sys_platform == "win32"
+# Windows-only: embed Brick Breaker (HTML5) inside the module via Edge WebView2.
+# Also requires Microsoft WebView2 Runtime (usually preinstalled on Win10/11).
+pythonnet>=3.0.0; sys_platform == "win32"
+pywebview>=5.0; sys_platform == "win32"
+
+# Optional: FIDO2 USB security keys for Secure Vault unlock (YubiKey, etc.).
+fido2>=1.1.2
 
 # ---
 #

@@ -14,6 +14,10 @@
 # only ever needs to link OUT to full https://host:port/ URLs, which works
 # regardless of what path it's served from.
 
+import html
+import importlib
+import time
+
 from core import paths
 
 HUB_HTML_PATH = paths.data_path("tailscale", "hub.html")
@@ -27,7 +31,54 @@ APPS = [
     ("games", "Gaming Hub", "🎮", "Launch a game on this PC"),
     ("soundboard", "Soundboard", "🔊", "Play a sound out loud"),
     ("send", "Quick Send", "📤", "Send files to/from this PC"),
+    ("arcade", "Arcade", "🕹️", "Browser games — Brick Breaker, Pong, and more"),
 ]
+
+
+def _recent_quick_send(limit: int = 5) -> list[dict]:
+    try:
+        storage = importlib.import_module("modules.Network.quick_send.storage")
+        return list(storage.get_received_log()[:limit])
+    except Exception:
+        return []
+
+
+def _time_ago(ts: float) -> str:
+    if not ts:
+        return ""
+    delta = max(0, int(time.time() - ts))
+    if delta < 60:
+        return "just now"
+    if delta < 3600:
+        return f"{delta // 60}m ago"
+    if delta < 86400:
+        return f"{delta // 3600}h ago"
+    return f"{delta // 86400}d ago"
+
+
+def _inbox_html(live_apps) -> str:
+    if "send" not in set(live_apps or []):
+        return ""
+    entries = _recent_quick_send(5)
+    if not entries:
+        return (
+            '<div class="inbox">'
+            '<div class="inbox-title">📥 Quick Send inbox</div>'
+            '<div class="inbox-empty">No files received yet — send from your phone when Quick Send is live.</div>'
+            '</div>'
+        )
+    rows = []
+    for entry in entries:
+        name = html.escape(str(entry.get("filename") or "file"))
+        when = html.escape(_time_ago(entry.get("received_at", 0)))
+        rows.append(f'<div class="inbox-row"><span class="fname">{name}</span><span class="when">{when}</span></div>')
+    return (
+        '<div class="inbox">'
+        '<div class="inbox-title">📥 Recent from Quick Send</div>'
+        + "".join(rows)
+        + '<div class="inbox-hint">Open Quick Send on your phone to send more files.</div>'
+        '</div>'
+    )
 
 
 def build_hub_html(hostname, live_apps):
@@ -93,12 +144,26 @@ def build_hub_html(hostname, live_apps):
   .dot.on {{ background:var(--success); }}
   .dot.off {{ background:var(--off); }}
   .foot {{ color:var(--muted); font-size:12px; margin-top:24px; text-align:center; }}
+  .inbox {{
+    background:var(--panel); border:1px solid #22283a; border-radius:14px;
+    padding:14px 16px; margin-bottom:18px;
+  }}
+  .inbox-title {{ font-weight:700; font-size:15px; margin-bottom:10px; }}
+  .inbox-empty, .inbox-hint {{ color:var(--muted); font-size:12px; margin-top:8px; }}
+  .inbox-row {{
+    display:flex; justify-content:space-between; gap:12px;
+    padding:8px 0; border-top:1px solid #22283a; font-size:13px;
+  }}
+  .inbox-row:first-of-type {{ border-top:none; }}
+  .fname {{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+  .when {{ color:var(--muted); flex-shrink:0; font-size:12px; }}
 </style>
 </head>
 <body>
 <div class="wrap">
   <h1>Remote Hub</h1>
   <div class="sub">Reachable only from devices on your own Tailscale network.</div>
+  {_inbox_html(live_apps)}
   {''.join(cards)}
   <div class="foot">Refresh this page after starting an app on your PC.</div>
 </div>

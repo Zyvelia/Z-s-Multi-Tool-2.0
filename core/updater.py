@@ -33,15 +33,34 @@ from packaging import version as _version
 
 # ── Fill these in once the repo is public ────────────────────────────────
 GITHUB_OWNER = "Zyvelia"   # e.g. "yourusername"
-GITHUB_REPO = "https://github.com/Zyvelia/Z-s-Multi-Tool-2.0"    # e.g. "Zs-Multi-Tool"
+GITHUB_REPO = "Z-s-Multi-Tool-2.0"    # repo name only, not a URL
 
 # Keep this in sync with APP_VERSION in pages/settings_page.py.
 # Bump it (and tag a matching vX.Y.Z GitHub Release) each time you ship.
 APP_VERSION = "4.0.0"
 
 
+def _repo_slug() -> str:
+    """Build "owner/repo", tolerating a full URL pasted into GITHUB_REPO.
+
+    Pasting the browser URL in there yields a 404 that reads as a missing
+    release rather than a config mistake, so normalise it instead.
+    """
+    repo = GITHUB_REPO.strip().rstrip("/")
+    for prefix in ("https://github.com/", "http://github.com/", "github.com/"):
+        if repo.lower().startswith(prefix):
+            repo = repo[len(prefix):]
+            break
+    if repo.endswith(".git"):
+        repo = repo[: -len(".git")]
+    # Accept either "repo" or an already-qualified "owner/repo".
+    if "/" in repo:
+        return repo.strip("/")
+    return f"{GITHUB_OWNER.strip().strip('/')}/{repo}"
+
+
 def _api_url() -> str:
-    return f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
+    return f"https://api.github.com/repos/{_repo_slug()}/releases/latest"
 
 
 def is_configured() -> bool:

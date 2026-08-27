@@ -1,4 +1,4 @@
-── Your actual user data — NEVER commit this ────────────────────────────
+# ── Your actual user data — NEVER commit this ────────────────────────────
 # vault.json + master.key together = your real, decryptable passwords.
 data/
 
@@ -22,6 +22,9 @@ modules/folder_gen/assets/mGBA.exe
 
 # ── Local-only scripts — not project source, don't ship in the repo ────
 git_push.bat
+modules/Gaming/Arcade/brick_breaker/web/admin-config.js
+modules/Gaming/Arcade/pages_deploy/
+modules/Gaming/Arcade/
 
 # ── Editor/OS junk ────────────────────────────────────────────────────
 .vscode/

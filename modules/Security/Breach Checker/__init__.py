@@ -3,9 +3,9 @@ from .ui import BreachCheckerPage
 
 def register(plugin_manager):
     plugin_manager.register({
-        "name": "Breach Checker",
+        "name": "Security Center",
         "category": "Security",
-        "desc": "Check passwords and email addresses against known data breaches (HaveIBeenPwned)",
-        "icon": "🕵️",
+        "desc": "Breach checks (HIBP) + vault password audit — weak, reused, and leaked passwords.",
+        "icon": "🛡",
         "page_class": BreachCheckerPage,
     })

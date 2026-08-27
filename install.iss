@@ -55,6 +55,7 @@ Name: "startupicon"; Description: "Launch {#MyAppName} at Windows startup"; Grou
 Name: "runasadmin"; Description: "Always run {#MyAppName} as administrator (needed for the Network Auditor module's packet capture)"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
 Name: "npcaptask"; Description: "Download and install Npcap (required for the Network Auditor module's packet capture)"; GroupDescription: "Network Auditor dependencies:"
 Name: "nmaptask"; Description: "Download and install Nmap (required for the Network Auditor module)"; GroupDescription: "Network Auditor dependencies:"
+Name: "webview2task"; Description: "Install Microsoft Edge WebView2 Runtime if missing (required for Brick Breaker in-app play)"; GroupDescription: "Brick Breaker dependencies:"; Flags: checkedonce
 
 [Files]
 ; The onefile PyInstaller build - everything (modules/core/pages/assets/
@@ -90,6 +91,7 @@ Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName} now"; Flags
 ; the download actually succeeded and it wasn't already installed.
 Filename: "{tmp}\npcap-setup.exe"; StatusMsg: "Launching the Npcap installer (a few clicks needed - the free edition can't install silently)..."; Flags: postinstall skipifsilent shellexec; Check: ShouldRunNpcapInstaller
 Filename: "{tmp}\nmap-setup.exe"; StatusMsg: "Launching the Nmap installer..."; Flags: postinstall skipifsilent shellexec; Check: ShouldRunNmapInstaller
+Filename: "{tmp}\MicrosoftEdgeWebview2Setup.exe"; Parameters: "/silent /install"; StatusMsg: "Installing Microsoft Edge WebView2 Runtime (Brick Breaker)..."; Flags: postinstall skipifsilent waituntilterminated; Check: ShouldRunWebView2Installer
 
 [UninstallDelete]
 ; Removes the exe/shortcuts installed above. Deliberately NOT touching
@@ -102,7 +104,11 @@ Filename: "{tmp}\nmap-setup.exe"; StatusMsg: "Launching the Nmap installer..."; 
 
 [Code]
 var
-  DownloadedNpcap, DownloadedNmap: Boolean;
+  DownloadedNpcap, DownloadedNmap, DownloadedWebView2: Boolean;
+
+const
+  WebView2ClientGuid = '{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}';
+  WebView2BootstrapperUrl = 'https://go.microsoft.com/fwlink/p/?LinkId=2124703';
 
 procedure InitializeWizard;
 begin
@@ -113,7 +119,10 @@ begin
     'official installers for you and launch them once setup finishes ' +
     '- but neither one''s free edition supports a fully silent install, ' +
     'so you''ll still need to click through each of their installer ' +
-    'windows once.';
+    'windows once.' + #13#10#13#10 +
+    'Brick Breaker in-app play needs the Microsoft Edge WebView2 Runtime. ' +
+    'If that task is checked and WebView2 is missing, the installer will ' +
+    'download and install it silently.';
 end;
 
 function IsNpcapInstalled(): Boolean;
@@ -128,6 +137,14 @@ begin
             RegKeyExists(HKLM, 'SOFTWARE\WOW6432Node\Nmap');
 end;
 
+function IsWebView2Installed(): Boolean;
+begin
+  Result :=
+    RegKeyExists(HKLM, 'SOFTWARE\Microsoft\EdgeUpdate\Clients\' + WebView2ClientGuid) or
+    RegKeyExists(HKLM, 'SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\' + WebView2ClientGuid) or
+    RegKeyExists(HKCU, 'SOFTWARE\Microsoft\EdgeUpdate\Clients\' + WebView2ClientGuid);
+end;
+
 function RunHidden(const Exe, Params, WorkDir: String; var ResultCode: Integer): Boolean;
 begin
   Result := Exec(Exe, Params, WorkDir, SW_HIDE, ewWaitUntilTerminated, ResultCode);
@@ -138,6 +155,34 @@ end;
 // Windows 10 1803+ / Windows 11). Sets DownloadedNpcap/DownloadedNmap so
 // the matching [Run] entries below know whether there's actually
 // anything to launch.
+procedure DownloadWebView2Bootstrapper();
+var
+  CurlExe: String;
+  ResultCode: Integer;
+begin
+  if not IsTaskSelected('webview2task') then
+    Exit;
+  if IsWebView2Installed() then
+  begin
+    Log('WebView2 runtime already installed.');
+    Exit;
+  end;
+
+  CurlExe := ExpandConstant('{sys}\curl.exe');
+  if not FileExists(CurlExe) then
+  begin
+    Log('DownloadWebView2: curl.exe not found.');
+    Exit;
+  end;
+
+  if RunHidden(CurlExe,
+       '-L --fail -o "' + ExpandConstant('{tmp}\MicrosoftEdgeWebview2Setup.exe') + '" "' + WebView2BootstrapperUrl + '"',
+       ExpandConstant('{tmp}'), ResultCode) and (ResultCode = 0) then
+    DownloadedWebView2 := True
+  else
+    Log('WebView2 bootstrapper download failed, ResultCode=' + IntToStr(ResultCode));
+end;
+
 procedure DownloadNetTools();
 var
   ScriptPath, ListFile, Line, Url, PowerShellExe, CurlExe: String;
@@ -146,68 +191,68 @@ var
 begin
   DownloadedNpcap := False;
   DownloadedNmap := False;
+  DownloadedWebView2 := False;
 
-  if not (IsTaskSelected('npcaptask') or IsTaskSelected('nmaptask')) then
-    Exit;
-
-  PowerShellExe := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
-  CurlExe := ExpandConstant('{sys}\curl.exe');
-
-  if not FileExists(PowerShellExe) or not FileExists(CurlExe) then
+  if IsTaskSelected('npcaptask') or IsTaskSelected('nmaptask') then
   begin
-    Log('DownloadNetTools: powershell.exe or curl.exe not found, skipping auto-download.');
-    Exit;
-  end;
+    PowerShellExe := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
+    CurlExe := ExpandConstant('{sys}\curl.exe');
 
-  ExtractTemporaryFile('resolve_net_tools.ps1');
-  ScriptPath := ExpandConstant('{tmp}\resolve_net_tools.ps1');
-  ListFile := ExpandConstant('{tmp}\net_tools.txt');
-
-  if not RunHidden(PowerShellExe,
-       '-NoProfile -ExecutionPolicy Bypass -File "' + ScriptPath + '" -OutFile "' + ListFile + '"',
-       ExpandConstant('{tmp}'), ResultCode) or (ResultCode <> 0) then
-  begin
-    Log('resolve_net_tools.ps1 failed, ResultCode=' + IntToStr(ResultCode));
-    Exit;
-  end;
-
-  if not LoadStringsFromFile(ListFile, Lines) then
-  begin
-    Log('DownloadNetTools: could not read ' + ListFile);
-    Exit;
-  end;
-
-  for I := 0 to GetArrayLength(Lines) - 1 do
-  begin
-    Line := Lines[I];
-
-    if (Pos('NPCAP_URL=', Line) = 1) then
+    if FileExists(PowerShellExe) and FileExists(CurlExe) then
     begin
-      Url := Copy(Line, Length('NPCAP_URL=') + 1, MaxInt);
-      if (Url <> '') and IsTaskSelected('npcaptask') and (not IsNpcapInstalled()) then
+      ExtractTemporaryFile('resolve_net_tools.ps1');
+      ScriptPath := ExpandConstant('{tmp}\resolve_net_tools.ps1');
+      ListFile := ExpandConstant('{tmp}\net_tools.txt');
+
+      if RunHidden(PowerShellExe,
+           '-NoProfile -ExecutionPolicy Bypass -File "' + ScriptPath + '" -OutFile "' + ListFile + '"',
+           ExpandConstant('{tmp}'), ResultCode) and (ResultCode = 0) then
       begin
-        if RunHidden(CurlExe,
-             '-L --fail -o "' + ExpandConstant('{tmp}\npcap-setup.exe') + '" "' + Url + '"',
-             ExpandConstant('{tmp}'), ResultCode) and (ResultCode = 0) then
-          DownloadedNpcap := True
+        if LoadStringsFromFile(ListFile, Lines) then
+        begin
+          for I := 0 to GetArrayLength(Lines) - 1 do
+          begin
+            Line := Lines[I];
+
+            if (Pos('NPCAP_URL=', Line) = 1) then
+            begin
+              Url := Copy(Line, Length('NPCAP_URL=') + 1, MaxInt);
+              if (Url <> '') and IsTaskSelected('npcaptask') and (not IsNpcapInstalled()) then
+              begin
+                if RunHidden(CurlExe,
+                     '-L --fail -o "' + ExpandConstant('{tmp}\npcap-setup.exe') + '" "' + Url + '"',
+                     ExpandConstant('{tmp}'), ResultCode) and (ResultCode = 0) then
+                  DownloadedNpcap := True
+                else
+                  Log('Npcap download failed, ResultCode=' + IntToStr(ResultCode));
+              end;
+            end
+            else if (Pos('NMAP_URL=', Line) = 1) then
+            begin
+              Url := Copy(Line, Length('NMAP_URL=') + 1, MaxInt);
+              if (Url <> '') and IsTaskSelected('nmaptask') and (not IsNmapInstalled()) then
+              begin
+                if RunHidden(CurlExe,
+                     '-L --fail -o "' + ExpandConstant('{tmp}\nmap-setup.exe') + '" "' + Url + '"',
+                     ExpandConstant('{tmp}'), ResultCode) and (ResultCode = 0) then
+                  DownloadedNmap := True
+                else
+                  Log('Nmap download failed, ResultCode=' + IntToStr(ResultCode));
+              end;
+            end;
+          end;
+        end
         else
-          Log('Npcap download failed, ResultCode=' + IntToStr(ResultCode));
-      end;
+          Log('DownloadNetTools: could not read ' + ListFile);
+      end
+      else
+        Log('resolve_net_tools.ps1 failed, ResultCode=' + IntToStr(ResultCode));
     end
-    else if (Pos('NMAP_URL=', Line) = 1) then
-    begin
-      Url := Copy(Line, Length('NMAP_URL=') + 1, MaxInt);
-      if (Url <> '') and IsTaskSelected('nmaptask') and (not IsNmapInstalled()) then
-      begin
-        if RunHidden(CurlExe,
-             '-L --fail -o "' + ExpandConstant('{tmp}\nmap-setup.exe') + '" "' + Url + '"',
-             ExpandConstant('{tmp}'), ResultCode) and (ResultCode = 0) then
-          DownloadedNmap := True
-        else
-          Log('Nmap download failed, ResultCode=' + IntToStr(ResultCode));
-      end;
-    end;
+    else
+      Log('DownloadNetTools: powershell.exe or curl.exe not found, skipping Npcap/Nmap auto-download.');
   end;
+
+  DownloadWebView2Bootstrapper();
 end;
 
 // Inno Setup has no built-in way to set a shortcut's "Run as
@@ -255,6 +300,11 @@ end;
 function ShouldRunNmapInstaller(): Boolean;
 begin
   Result := DownloadedNmap;
+end;
+
+function ShouldRunWebView2Installer(): Boolean;
+begin
+  Result := DownloadedWebView2;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);

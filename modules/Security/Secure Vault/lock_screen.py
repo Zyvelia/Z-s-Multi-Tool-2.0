@@ -16,12 +16,30 @@ STRENGTH_COLORS = [theme.DANGER, "#e0803f", "#e0c53f", "#8bd15a", theme.SUCCESS]
 
 class PasswordVaultLockScreen(ctk.CTkFrame):
 
-    MODULE_SETTINGS_TITLE = "Remote access"
+    MODULE_SETTINGS_TITLE = "Vault settings"
 
     @staticmethod
     def build_module_settings(parent, manager):
         from .remote_access_tab import RemoteAccessTab
-        return RemoteAccessTab(parent, manager)
+        from .hardware_key_tab import HardwareKeyTab
+
+        wrap = ctk.CTkFrame(parent, fg_color="transparent")
+        wrap.grid_columnconfigure(0, weight=1)
+
+        tabs = ctk.CTkTabview(
+            wrap, fg_color=theme.PANEL_2,
+            segmented_button_fg_color=theme.PANEL,
+            segmented_button_selected_color=theme.ACCENT,
+        )
+        tabs.grid(row=0, column=0, sticky="ew")
+        tabs.grid_columnconfigure(0, weight=1)
+
+        remote_tab = tabs.add("Remote access")
+        key_tab = tabs.add("Security key")
+
+        RemoteAccessTab(remote_tab, manager).pack(fill="x", padx=4, pady=4)
+        HardwareKeyTab(key_tab, manager).pack(fill="x", padx=4, pady=4)
+        return wrap
 
     def __init__(self, parent, manager):
         super().__init__(parent)
@@ -30,6 +48,7 @@ class PasswordVaultLockScreen(ctk.CTkFrame):
 
         self.auth = manager.container.auth_service
         self.alert = manager.container.alert_service
+        self.hw = manager.container.hardware_key_service
 
         self.configure(fg_color=theme.BG)
 
@@ -319,6 +338,16 @@ class PasswordVaultLockScreen(ctk.CTkFrame):
             command=self.unlock_vault
         ).pack(fill="x", pady=(18, 0))
 
+        self._hw_unlock_btn = ctk.CTkButton(
+            parent,
+            text="Unlock with security key",
+            height=38,
+            command=self.unlock_with_hardware_key,
+            **theme.secondary_button_style(),
+        )
+        self._hw_unlock_btn.pack(fill="x", pady=(10, 0))
+        self._update_hw_unlock_button()
+
     # -------------------------------------------------
     # SHOW / HIDE PASSWORD
     # -------------------------------------------------
@@ -397,6 +426,27 @@ class PasswordVaultLockScreen(ctk.CTkFrame):
             )
             self.password_entry.delete(0, "end")
             self.password_entry.focus_set()
+
+    def _update_hw_unlock_button(self):
+        if not hasattr(self, "_hw_unlock_btn"):
+            return
+        if self.hw.is_enabled():
+            self._hw_unlock_btn.configure(state="normal")
+        else:
+            self._hw_unlock_btn.configure(state="disabled")
+
+    def unlock_with_hardware_key(self):
+        self.error_label.configure(text="")
+        try:
+            if self.hw.verify_and_unlock():
+                self.alert.local_unlock_attempt(True)
+                self.open_vault()
+            else:
+                self.alert.local_unlock_attempt(False)
+                self.error_label.configure(text="Security key verification failed.")
+        except Exception as exc:
+            self.alert.local_unlock_attempt(False)
+            self.error_label.configure(text=str(exc))
 
     # =====================================================
     # OPEN VAULT

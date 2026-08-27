@@ -12,6 +12,7 @@ from core import updater
 from core.services.crypto_service import CryptoService
 from core.services.vault_service import VaultService
 from core.services.auth_service import AuthService
+from core.services.hardware_key_service import HardwareKeyService
 from core.services.totp_service import TotpService
 from core.services.discord_service import DiscordService # Added import
 from core.services.tailscale_service import TailscaleService
@@ -58,6 +59,8 @@ class App(ctk.CTk):
         self.crypto_service = CryptoService()
 
         self.auth_service = AuthService()
+
+        self.hardware_key_service = HardwareKeyService(self.auth_service)
 
         self.alert_service = AlertService()
 
@@ -159,6 +162,9 @@ class App(ctk.CTk):
         if self.settings.get("auto_update_check"):
             updater.check_on_launch_async(self)
 
+        # Warm Brick Breaker on the UI thread (WebView2 cannot init in a worker thread).
+        self.after(100, self._prewarm_arcade)
+
         # =====================================================
         # CLEAN SHUTDOWN
         # =====================================================
@@ -169,6 +175,14 @@ class App(ctk.CTk):
         # the mainloop first, then destroying widgets afterward,
         # avoids that race.
         self.protocol("WM_DELETE_WINDOW", self.quit_app)
+
+    def _prewarm_arcade(self):
+        try:
+            import importlib
+            mod = importlib.import_module("modules.Gaming.Arcade.ui")
+            mod.prewarm_arcade(self)
+        except Exception:
+            pass
 
     def _on_minimize(self, event):
         # <Unmap> also fires for reasons other than the user minimizing
@@ -221,6 +235,18 @@ class App(ctk.CTk):
             if soundboard_web_server and soundboard_web_server.is_running():
                 self.tailscale_service.disable_app_serve("soundboard")
                 soundboard_web_server.stop()
+        except Exception:
+            pass
+        try:
+            import importlib
+            importlib.import_module("modules.Gaming.Arcade.brick_breaker.webview_service").get_service(self).destroy()
+        except Exception:
+            pass
+        try:
+            arcade_srv = getattr(self, "arcade_web_server", None)
+            if arcade_srv and arcade_srv.is_running():
+                self.tailscale_service.disable_app_serve("arcade")
+                arcade_srv.stop()
         except Exception:
             pass
         try:

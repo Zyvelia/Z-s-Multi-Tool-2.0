@@ -27,10 +27,9 @@ class SystemMonitorMiniWidget(ctk.CTkFrame):
 
         self.grid_columnconfigure(0, weight=0)
         self.grid_columnconfigure(1, weight=1)
-        self.grid_columnconfigure(2, weight=0)
 
-        self._cpu_bar = self._build_row(0, "CPU", metric_color("cpu"))
-        self._ram_bar = self._build_row(1, "RAM", metric_color("ram"))
+        self._cpu_label = self._build_row(0, "CPU", metric_color("cpu"))
+        self._ram_label = self._build_row(1, "RAM", metric_color("ram"))
 
         self._tick()
 
@@ -41,32 +40,19 @@ class SystemMonitorMiniWidget(ctk.CTkFrame):
             font=theme.font(10, "bold"),
             text_color=theme.FAINT,
             width=32,
-            anchor="w"
+            anchor="w",
         ).grid(row=row, column=0, sticky="w", pady=2)
-
-        bar = ctk.CTkProgressBar(
-            self,
-            height=8,
-            corner_radius=4,
-            fg_color=theme.PANEL_2,
-            progress_color=color
-        )
-        bar.set(0)
-        bar.grid(row=row, column=1, sticky="ew", padx=8, pady=2)
-        bar.base_color = color
 
         pct_label = ctk.CTkLabel(
             self,
             text="—",
-            font=theme.mono(10),
-            text_color=theme.MUTED,
-            width=32,
-            anchor="e"
+            font=theme.mono(11, "bold"),
+            text_color=color,
+            anchor="e",
         )
-        pct_label.grid(row=row, column=2, sticky="e", pady=2)
-
-        bar.pct_label = pct_label
-        return bar
+        pct_label.grid(row=row, column=1, sticky="e", pady=2)
+        pct_label.base_color = color
+        return pct_label
 
     def _tick(self):
         if not self.winfo_exists():
@@ -76,16 +62,14 @@ class SystemMonitorMiniWidget(ctk.CTkFrame):
             cpu = psutil.cpu_percent(interval=None)
             ram = psutil.virtual_memory().percent
 
-            self._cpu_bar.set(cpu / 100)
-            self._cpu_bar.pct_label.configure(text=f"{cpu:.0f}%")
-
-            self._ram_bar.set(ram / 100)
-            self._ram_bar.pct_label.configure(text=f"{ram:.0f}%")
-
-            for bar, val in ((self._cpu_bar, cpu), (self._ram_bar, ram)):
-                bar.configure(
-                    progress_color=theme.DANGER if val >= 85 else bar.base_color
-                )
+            self._cpu_label.configure(
+                text=f"{cpu:.1f}%",
+                text_color=theme.DANGER if cpu >= 85 else self._cpu_label.base_color,
+            )
+            self._ram_label.configure(
+                text=f"{ram:.1f}%",
+                text_color=theme.DANGER if ram >= 85 else self._ram_label.base_color,
+            )
         except Exception:
             pass
 
