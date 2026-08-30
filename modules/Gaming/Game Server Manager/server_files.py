@@ -76,6 +76,15 @@ def detect_game_type(folder: Path) -> str | None:
     if (folder / "gmod.exe").is_file() and (folder / "garrysmod").is_dir():
         return "gmod"
 
+    # Minecraft Java loader installs may not contain server.jar. Avoid treating a
+    # generic run.bat/run.sh as Minecraft; require a loader-specific signature.
+    if (folder / "server.jar").is_file() or any(folder.glob("fabric-server-launch*.jar")) or any(folder.glob("quilt-server-launch*.jar")):
+        return "minecraft_java"
+    if (folder / "run.bat").is_file() or (folder / "run.sh").is_file():
+        libs = folder / "libraries"
+        if (libs / "net" / "minecraftforge").is_dir() or (libs / "net" / "neoforged").is_dir():
+            return "minecraft_java"
+
     checks: list[tuple[str, tuple[str, ...]]] = [
         ("palworld", ("PalServer.exe", "PalServer.sh")),
         ("soulmask", ("WDS.exe", "SoulmaskServer.exe", "SoulmaskServer.sh")),
@@ -120,7 +129,7 @@ def detect_game_type(folder: Path) -> str | None:
         ("atlas", ("ShooterGameServer.exe",)),
         ("dst", ("dontstarve_dedicated_server_nullrenderer.exe", "dontstarve_dedicated_server_nullrenderer")),
         ("conan_exiles", ("ConanSandboxServer.exe", "ConanSandboxServer")),
-        ("minecraft_java", ("server.jar",)),
+        ("minecraft_java", ("server.jar", "fabric-server-launch.jar", "quilt-server-launch.jar")),
         ("minecraft_bedrock", ("bedrock_server.exe", "bedrock_server")),
         ("satisfactory", ("FactoryServer.exe", "FactoryServer.sh")),
         ("valheim", ("valheim_server.exe", "valheim_server.x86_64")),

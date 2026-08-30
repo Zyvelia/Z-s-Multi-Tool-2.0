@@ -171,6 +171,16 @@ def _normalize_minecraft_paths(servers: list[dict]) -> list[dict]:
     """Point Java/Bedrock servers at Documents/Game Servers instead of Minecraft Servers."""
     changed = False
     for srv in servers:
+        if srv.get("game_type") == "minecraft_java":
+            cfg = srv.setdefault("config", {})
+            cfg.setdefault("config_version", 2)
+            cfg.setdefault("minecraft_version", "")
+            cfg.setdefault("installed_version", "")
+            cfg.setdefault("verified_version", "")
+            cfg.setdefault("version_status", "unknown")
+            cfg.setdefault("version_checked_at", "")
+            cfg.setdefault("auto_start", False)
+            cfg.setdefault("auto_start_confirmed", False)
         if srv.get("game_type") not in ("minecraft_java", "minecraft_bedrock"):
             continue
         old_dir = srv.get("server_dir", "")
@@ -249,3 +259,34 @@ def _migrate_legacy_minecraft_settings() -> list[dict]:
         )
 
     return servers
+
+# ---------------------------------------------------------------------------
+# Manager integration settings
+
+def _manager_settings_file() -> Path:
+    try:
+        from core import paths  # type: ignore
+        return Path(paths.data_path("game_server_manager", "settings.json"))
+    except ImportError:  # pragma: no cover
+        import os
+        base = Path(os.environ.get("APPDATA", Path.home())) / "ZsMultiTool" / "game_server_manager"
+        base.mkdir(parents=True, exist_ok=True)
+        return base / "settings.json"
+
+
+def load_manager_settings() -> dict:
+    f = _manager_settings_file()
+    try:
+        data = json.loads(f.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_manager_settings(settings: dict) -> None:
+    f = _manager_settings_file()
+    try:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    except OSError:
+        pass

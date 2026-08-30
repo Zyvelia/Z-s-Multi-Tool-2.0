@@ -8,6 +8,7 @@ from pathlib import Path
 from .. import backend as mc
 from ..core.events import ServerEvent
 from .base import ConfigField, GameServerAdapter, LogTagRule
+from .minecraft_loaders import detect_loader, launch_command, launcher_markers, loader_name
 
 _DIFFICULTIES = ["peaceful", "easy", "normal", "hard"]
 _GAMEMODES = ["survival", "creative", "adventure", "spectator"]
@@ -21,31 +22,33 @@ class MinecraftJavaAdapter(GameServerAdapter):
     game_type = "minecraft_java"
     display_name = "Minecraft Java"
     icon = "⛏️"
-    description = "Official Mojang Java server.jar with version picker and SHA1-verified downloads."
+    description = "Minecraft Java server with Vanilla, Forge, NeoForge, Fabric, and Quilt loader support."
 
     def default_port(self) -> int:
         return 25565
 
     def executable_marker(self, server_dir: Path) -> Path:
-        return server_dir / "server.jar"
+        loader = detect_loader(server_dir) or "vanilla"
+        markers = launcher_markers(server_dir, loader)
+        return next((p for p in markers if p.exists()), markers[0] if markers else server_dir / "server.jar")
+
+    def _loader(self, server_dir: Path, config: dict) -> str:
+        return str(config.get("loader") or detect_loader(server_dir) or "vanilla").lower()
 
     def pre_start_checks(self, server_dir: Path, config: dict) -> tuple[bool, str]:
-        if not self.is_installed(server_dir):
-            return False, "server.jar wasn't found — download it from the Config tab first."
+        loader = self._loader(server_dir, config)
+        if not self.is_installed(server_dir, config):
+            return False, f"{loader_name(loader)} server files weren't found — install them from the Config tab first."
         if not mc.eula_accepted(server_dir):
             return False, "Mojang's EULA hasn't been accepted for this server yet."
         return True, "Ready to start."
 
     def build_start_command(self, server_dir: Path, config: dict) -> tuple[list[str], dict]:
-        min_mb = int(config.get("min_mb", 1024))
-        max_mb = int(config.get("max_mb", 2048))
-        java_path = config.get("java_path", "java")
-        extra_args = config.get("extra_args", "")
-        args = [java_path, f"-Xms{min_mb}M", f"-Xmx{max_mb}M"]
-        if str(extra_args).strip():
-            args += str(extra_args).split()
-        args += ["-jar", "server.jar", "nogui"]
-        return args, {}
+        loader = self._loader(server_dir, config)
+        try:
+            return launch_command(server_dir, config), {}
+        except FileNotFoundError as exc:
+            raise RuntimeError(str(exc)) from exc
 
     def parse_log_line(self, line: str) -> ServerEvent | None:
         if _READY_RE.search(line):
@@ -132,6 +135,9 @@ class MinecraftJavaAdapter(GameServerAdapter):
     def supports_mods(self) -> bool:
         return True
 
+    def supports_mods_for(self, config: dict) -> bool:
+        return str(config.get("loader", "vanilla")).lower() != "vanilla"
+
     def mods_directory(self, server_dir: Path) -> Path | None:
         return server_dir / "mods"
 
@@ -152,9 +158,9 @@ class MinecraftJavaAdapter(GameServerAdapter):
 
     def setup_panel_hints(self) -> list[str]:
         return [
-            "Installs server.jar directly into your Game Servers folder.",
-            "Requires Java 21+ for current releases.",
-            "Pick a version from Mojang's official manifest — downloads are SHA1-verified.",
+            "Supports Vanilla, Forge, NeoForge, Fabric, and Quilt.",
+            "Minecraft versions come from Mojang's official manifest.",
+            "Loader versions are fetched from the loader project's official metadata service.",
             "Accept Mojang's EULA before installing.",
         ]
 
@@ -168,8 +174,13 @@ class MinecraftJavaAdapter(GameServerAdapter):
         rows = super().overview_rows(server_dir, config, running=running)
         if mc.eula_accepted(server_dir):
             rows.append(("EULA", "Accepted"))
+        loader = str(config.get("loader", "vanilla"))
+        rows.append(("Loader", loader_name(loader)))
         version = config.get("installed_version")
         if version:
             rows.append(("Version", version))
+        loader_version = config.get("loader_version")
+        if loader_version and loader != "vanilla":
+            rows.append((f"{loader_name(loader)} Version", loader_version))
         rows.append(("Memory", f"{config.get('min_mb', 1024)}–{config.get('max_mb', 2048)} MB"))
         return rows

@@ -34,8 +34,6 @@ import customtkinter as ctk
 
 from core import theme
 from ._buttons import cool_button_kwargs
-from .stream_finder import find_m3u8_sync
-
 # Unique-enough window title so we can find this exact webview window
 # via EnumWindows without grabbing some unrelated Edge/Chromium window
 # that happens to be open on the user's desktop.

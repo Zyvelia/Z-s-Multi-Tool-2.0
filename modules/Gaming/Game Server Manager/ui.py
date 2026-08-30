@@ -14,21 +14,33 @@ from __future__ import annotations
 
 import queue
 import re
+import shutil
 import threading
+import subprocess
 import time
 import uuid
 import webbrowser
 import zipfile
 from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog, messagebox
+import tkinter as tk
+from tkinter import filedialog, messagebox, simpledialog
 
 import customtkinter as ctk
 import psutil
 
 from . import backend as mc
+from . import dialogs
 from .game_picker import GamePicker
 from .adapters import get_adapter, game_choices
+from .adapters.minecraft_loaders import get_loader_versions, loader_choices, loader_name, detect_minecraft_version, create_install_worker as create_minecraft_loader_install_worker
+from .adapters.java_runtimes import discover_java_runtimes, required_java_major, recommended_runtime, compatibility_text
+from .adapters.minecraft_modpacks import (
+    search_modpacks, get_project_files, get_latest_project_files, get_file, create_curseforge_download_worker, create_modpack_install_worker, create_modpack_loader_repair_worker, infer_profile_loader,
+    peek_manifest_minecraft_version, detect_loader, scan_modpack_version_conflicts, quarantine_modpack_conflicts, replace_with_compatible_curseforge_mod, build_missing_mod_entry,
+)
+from .adapters.minecraft_client import prepare_client, launch_minecraft_direct, open_minecraft_launcher, ModpackDownloadError, estimate_memory_mb, get_last_heap_probe_notes
+from .adapters.minecraft_auth import load_auth, sign_in as minecraft_sign_in, logout as minecraft_logout
 from .adapters.install import (
     create_minecraft_bedrock_install_worker,
     create_minecraft_java_install_worker,
@@ -39,11 +51,14 @@ from .core.console_buffer import ConsoleBuffer
 from .core.module_prefs import TERMINAL_SCHEMES, load_prefs, scheme_colors
 from .core.events import DownloadEvent, ServerEvent
 from .core.process import ServerProcess
+from .core.ytdlp import ensure_ytdlp
 from .core.settings import (
     align_terraria_server_folder,
     default_server_folder_for,
     load_servers,
     save_servers,
+    load_manager_settings,
+    save_manager_settings,
 )
 from core import theme as t
 from core.module_shell import find_module_shell
@@ -59,7 +74,7 @@ MAX_CONSOLE_LINES = 2000
 IP_MASK = "•" * 13
 
 _DEFAULT_CONFIGS: dict[str, dict] = {
-    "minecraft_java": {"min_mb": 1024, "max_mb": 2048, "java_path": "java"},
+    "minecraft_java": {"config_version": 2, "loader": "vanilla", "loader_version": "", "minecraft_version": "", "installed_version": "", "verified_version": "", "version_status": "unknown", "version_checked_at": "", "min_mb": 1024, "max_mb": 2048, "java_path": "java", "auto_start": False, "auto_start_confirmed": False},
     "minecraft_bedrock": {"bedrock_channel": "stable"},
     "satisfactory": {
         "port": "7777", "reliable_port": "8888", "server_name": "Satisfactory Server",
@@ -391,6 +406,11 @@ class AddServerWizard(ctk.CTkToplevel):
         _folder, _name = default_server_folder_for("minecraft_java")
         self.name_var = ctk.StringVar(value=_name)
         self.folder_var = ctk.StringVar(value=_folder)
+        # Tracks whether the user has typed their own server name, so later
+        # game/folder changes don't silently clobber it with a default.
+        self._name_user_edited = False
+        self._setting_name_programmatically = False
+        self.name_var.trace_add("write", self._on_name_var_write)
 
         self.grid_columnconfigure(0, weight=1)
 
@@ -484,12 +504,25 @@ class AddServerWizard(ctk.CTkToplevel):
         except Exception:
             pass
 
+    def _on_name_var_write(self, *_args) -> None:
+        if self._setting_name_programmatically:
+            return
+        self._name_user_edited = True
+
+    def _set_default_name(self, name: str) -> None:
+        self._setting_name_programmatically = True
+        try:
+            self.name_var.set(name)
+        finally:
+            self._setting_name_programmatically = False
+
     def _on_game_pick_from_picker(self, label: str, game_type: str) -> None:
         self.game_type.set(game_type)
         if not self.import_mode:
             folder, name = default_server_folder_for(game_type)
             self.folder_var.set(folder)
-            self.name_var.set(name)
+            if not self._name_user_edited:
+                self._set_default_name(name)
         self._update_hint()
 
     def _on_game_pick(self, label: str) -> None:
@@ -498,7 +531,8 @@ class AddServerWizard(ctk.CTkToplevel):
         if not self.import_mode:
             folder, name = default_server_folder_for(gt)
             self.folder_var.set(folder)
-            self.name_var.set(name)
+            if not self._name_user_edited:
+                self._set_default_name(name)
         self._update_hint()
 
     def _update_hint(self) -> None:
@@ -520,8 +554,8 @@ class AddServerWizard(ctk.CTkToplevel):
             self.game_type.set(detected)
             self.game_picker.set_game_type(detected)
         name = Path(chosen).name
-        if name:
-            self.name_var.set(name)
+        if name and not self._name_user_edited:
+            self._set_default_name(name)
         self._update_hint()
 
     def _create(self) -> None:
@@ -599,8 +633,17 @@ class GameServerManagerModule(GameServerFeaturesMixin, ctk.CTkFrame):
         self._mc_versions: list[mc.MCVersion] = []
         self._mc_selected_version: mc.MCVersion | None = None
         self._mc_versions_loading = False
+        self._mc_loader_versions: list = []
+        self._mc_loader_versions_loading = False
+        self._mc_selected_loader_version = ""
+        self._java_runtimes = []
+        self._java_required_major = 21
+        self._java_auto_path = "java"
         self._pending_mc_download = False
         self._show_snapshots = ctk.BooleanVar(value=False)
+        self._curseforge_results: list[dict] = []
+        self._modpack_minecraft_version = ""
+        self._curseforge_settings = load_manager_settings()
         self._eula_var = ctk.BooleanVar(value=False)
 
         self._init_features()
@@ -615,6 +658,7 @@ class GameServerManagerModule(GameServerFeaturesMixin, ctk.CTkFrame):
         self.after(POLL_MS, self._poll_all)
         self.after(1500, self._auto_start_servers)
         self.after(50, game_choices)  # warm adapter registry before Add wizard opens
+        threading.Thread(target=ensure_ytdlp, daemon=True, name="yt-dlp-bootstrap").start()
 
     # ------------------------------------------------------------------ layout
 
@@ -715,7 +759,7 @@ class GameServerManagerModule(GameServerFeaturesMixin, ctk.CTkFrame):
             corner_radius=t.RADIUS_SM,
         )
         self.tabview.grid(row=3, column=0, sticky="nsew", padx=14, pady=(0, 14))
-        for tab in ("Overview", "Console", "Players", "Files", "Mods", "Backups", "Config", "Logs"):
+        for tab in ("Overview", "Console", "Players", "Files", "Mods", "Modpacks", "Backups", "Config", "Logs"):
             self.tabview.add(tab)
             self.tabview.tab(tab).configure(fg_color=t.PANEL_2)
         self.tabview.configure(command=self._on_tab_changed)
@@ -725,6 +769,7 @@ class GameServerManagerModule(GameServerFeaturesMixin, ctk.CTkFrame):
         self._build_players_tab(self.tabview.tab("Players"))
         self._build_files_tab(self.tabview.tab("Files"))
         self._build_mods_tab(self.tabview.tab("Mods"))
+        self._build_modpacks_tab(self.tabview.tab("Modpacks"))
         self._build_backups_tab(self.tabview.tab("Backups"))
         self._build_config_tab(self.tabview.tab("Config"))
         self._build_logs_tab(self.tabview.tab("Logs"))
@@ -755,9 +800,181 @@ class GameServerManagerModule(GameServerFeaturesMixin, ctk.CTkFrame):
             self._processes[sid] = ServerProcess()
         return self._processes[sid]
 
+    @staticmethod
+    def _mem_mb(var: "ctk.StringVar", default: int) -> int:
+        """Safely read a memory (MB) StringVar, tolerating an empty/invalid entry."""
+        try:
+            value = int(str(var.get()).strip())
+        except (ValueError, tk.TclError):
+            return default
+        return value if value > 0 else default
+
+    def _suggest_mc_memory(self) -> None:
+        """Sets Min/Max MB from the currently-installed modpack's mod count/
+        size, capped to a safe share of system RAM, instead of the person
+        having to guess or crank the sliders to "use everything". Writes
+        straight into the saved server config too, so the value takes
+        effect on the next Play/Launch even if Save Config is never
+        clicked separately."""
+        srv = self._current_server()
+        client_dir = self._server_dir(srv) if srv else None
+        if not client_dir or not client_dir.exists():
+            messagebox.showinfo("Suggest Memory", "Install or select a modpack first.",
+                                 parent=self.winfo_toplevel())
+            return
+        try:
+            min_mb, max_mb = estimate_memory_mb(client_dir)
+        except Exception as e:
+            messagebox.showerror("Suggest Memory", f"Couldn't estimate memory: {e}",
+                                  parent=self.winfo_toplevel())
+            return
+        self.min_mb.set(str(min_mb))
+        self.max_mb.set(str(max_mb))
+        cfg = srv.setdefault("config", {})
+        cfg["min_mb"] = min_mb
+        cfg["max_mb"] = max_mb
+        self._persist()
+
+    def _system_ram_mb(self) -> int | None:
+        try:
+            import psutil
+            return int(psutil.virtual_memory().total / (1024 * 1024))
+        except Exception:
+            return None
+
+    def _refresh_mc_mem_system_label(self) -> None:
+        total = self._system_ram_mb()
+        self.mc_mem_system_label.configure(text=f"System RAM: {total} MB" if total else "")
+
+    def _schedule_mc_mem_autosave(self) -> None:
+        """Debounces edits to Min/Max MB so every keystroke doesn't hit disk,
+        but changes still land without a separate Save click — same effect
+        as CurseForge writing its per-instance memory slider to disk as
+        soon as you let go of it."""
+        if getattr(self, "_mc_mem_syncing", False):
+            return
+        job = getattr(self, "_mc_mem_autosave_job", None)
+        if job:
+            try:
+                self.after_cancel(job)
+            except Exception:
+                pass
+        self._mc_mem_autosave_job = self.after(600, self._commit_mc_mem_autosave)
+
+    def _commit_mc_mem_autosave(self) -> None:
+        self._mc_mem_autosave_job = None
+        srv = self._current_server()
+        if not srv or srv.get("game_type") != "minecraft_java":
+            return
+        min_mb = self._mem_mb(self.min_mb, 1024)
+        max_mb = self._mem_mb(self.max_mb, 2048)
+        # Mirror CurseForge's own slider ceiling: it queries total system RAM
+        # and never lets the slider (or the saved value) exceed it, so a
+        # mistyped/huge number here can't hand the JVM more memory than the
+        # machine actually has.
+        total = self._system_ram_mb()
+        if total:
+            cap = max(1024, total - 1024)
+            clamped_max = min(max_mb, cap)
+            if clamped_max != max_mb:
+                max_mb = clamped_max
+                self._mc_mem_syncing = True
+                self.max_mb.set(str(max_mb))
+                self._mc_mem_syncing = False
+            min_mb = min(min_mb, max_mb)
+        cfg = srv.setdefault("config", {})
+        if cfg.get("min_mb") == min_mb and cfg.get("max_mb") == max_mb:
+            return
+        cfg["min_mb"] = min_mb
+        cfg["max_mb"] = max_mb
+        self._persist()
+
     def _server_dir(self, server: dict | None = None) -> Path:
         srv = server or self._current_server()
-        return Path(srv["server_dir"]) if srv else Path(".")
+        if not srv:
+            return Path(".")
+        base = Path(srv["server_dir"])
+        active = str((srv.get("config", {}) or {}).get("active_modpack_profile") or "")
+        if active:
+            return base / "modpacks" / self._profile_dir_name(srv, active)
+        return base
+
+    def _modpack_profiles(self, srv: dict) -> dict:
+        cfg = srv.setdefault("config", {})
+        return cfg.setdefault("modpack_profiles", {})
+
+    @staticmethod
+    def _sanitize_profile_dir_name(name: str) -> str:
+        """Turn a modpack's display name into a filesystem-safe folder name."""
+        cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", name or "").strip(" .")
+        cleaned = re.sub(r"\s+", " ", cleaned)
+        cleaned = cleaned[:60].strip(" .")
+        return cleaned or "Modpack"
+
+    def _unique_profile_dir_name(self, srv: dict, name: str) -> str:
+        """Pick a sanitized folder name that doesn't collide with an existing
+        profile's folder (either already on disk or reserved by another
+        profile entry)."""
+        base_name = self._sanitize_profile_dir_name(name)
+        taken = {
+            str(p.get("dir_name") or "") for p in self._modpack_profiles(srv).values()
+        }
+        modpacks_root = Path(srv["server_dir"]) / "modpacks"
+        candidate = base_name
+        n = 2
+        while candidate in taken or (modpacks_root / candidate).exists():
+            candidate = f"{base_name} ({n})"
+            n += 1
+        return candidate
+
+    def _profile_dir_name(self, srv: dict, profile_id: str) -> str:
+        """Resolve a profile's on-disk folder name, falling back to the raw
+        profile id for profiles created before folders were named after the
+        modpack (keeps existing installs working without moving anything)."""
+        profile = self._modpack_profiles(srv).get(profile_id) or {}
+        return str(profile.get("dir_name") or profile_id)
+
+    def _new_modpack_profile(self, srv: dict, name: str) -> str:
+        profile_id = uuid.uuid4().hex[:10]
+        dir_name = self._unique_profile_dir_name(srv, name)
+        profiles = self._modpack_profiles(srv)
+        profiles[profile_id] = {"name": name, "dir_name": dir_name}
+        return profile_id
+
+    def _activate_modpack_profile(self, srv: dict, profile_id: str) -> None:
+        cfg = srv.setdefault("config", {})
+        cfg["active_modpack_profile"] = profile_id
+        profile = self._modpack_profiles(srv).get(profile_id) if profile_id else None
+        if profile:
+            cfg["modpack_provider"] = profile.get("provider", "curseforge")
+            cfg["modpack_name"] = profile.get("name", "")
+            cfg["modpack_project_id"] = profile.get("project_id", 0)
+            cfg["modpack_file_id"] = profile.get("file_id", 0)
+            if profile.get("minecraft_version"):
+                cfg["minecraft_version"] = profile["minecraft_version"]
+                cfg["installed_version"] = profile.get("installed_version", profile["minecraft_version"])
+            if profile.get("loader"):
+                cfg["loader"] = profile["loader"]
+                cfg["loader_version"] = profile.get("loader_version", "")
+            if profile.get("java_path"):
+                cfg["java_path"] = profile["java_path"]
+                self.java_path.set(profile["java_path"])
+        elif not profile_id:
+            cfg["modpack_name"] = ""
+        self._persist()
+
+    def _remove_modpack_profile(self, srv: dict, profile_id: str) -> None:
+        profiles = self._modpack_profiles(srv)
+        dir_name = self._profile_dir_name(srv, profile_id)
+        profiles.pop(profile_id, None)
+        cfg = srv.get("config", {})
+        profile_dir = Path(srv["server_dir"]) / "modpacks" / dir_name
+        if profile_dir.exists():
+            shutil.rmtree(profile_dir, ignore_errors=True)
+        if str(cfg.get("active_modpack_profile") or "") == profile_id:
+            self._activate_modpack_profile(srv, "")
+        else:
+            self._persist()
 
     def _port(self) -> str:
         srv = self._current_server()
@@ -963,6 +1180,8 @@ class GameServerManagerModule(GameServerFeaturesMixin, ctk.CTkFrame):
             self._refresh_files_listing()
         elif tab == "Mods":
             self._refresh_mods()
+        elif tab == "Modpacks":
+            self._refresh_modpacks_tab()
         elif tab == "Backups":
             self._refresh_backups()
         elif tab == "Config":
@@ -1427,6 +1646,1000 @@ class GameServerManagerModule(GameServerFeaturesMixin, ctk.CTkFrame):
 
     # ------------------------------------------------------------------ mods
 
+    def _minecraft_auth_status(self) -> None:
+        if not hasattr(self, "minecraft_account_status"):
+            return
+        account = load_auth()
+        if account and account.get("name"):
+            self.minecraft_account_status.configure(text=f"Signed in: {account['name']}", text_color=t.SUCCESS)
+            self.minecraft_signin_button.configure(text="Refresh Login")
+            self.minecraft_signout_button.configure(state="normal")
+        else:
+            self.minecraft_account_status.configure(text="Not signed in", text_color=t.MUTED)
+            self.minecraft_signin_button.configure(text="Sign in with Microsoft")
+            self.minecraft_signout_button.configure(state="disabled")
+
+    def _minecraft_sign_in(self) -> None:
+        self.minecraft_signin_button.configure(state="disabled", text="Signing in…")
+        self.minecraft_account_status.configure(
+            text="Checking your official Minecraft Launcher login…", text_color=t.MUTED
+        )
+
+        def ask_for_redirect(auth_url: str) -> str | None:
+            # Called from the worker thread. Show the dialog on the main
+            # thread and block this worker until the user submits/cancels.
+            done = threading.Event()
+            holder: dict = {}
+
+            def show() -> None:
+                dlg = dialogs.MicrosoftSignInDialog(self, auth_url)
+                self.wait_window(dlg)
+                holder["value"] = dlg.result
+                done.set()
+
+            self.after(0, show)
+            done.wait()
+            return holder.get("value")
+
+        def set_status(msg: str) -> None:
+            self.after(0, lambda: self.minecraft_account_status.configure(text=msg, text_color=t.MUTED))
+
+        def worker() -> None:
+            try:
+                account = minecraft_sign_in(on_code=ask_for_redirect, on_status=set_status)
+                self.after(0, lambda: self._minecraft_auth_finished(account, None))
+            except Exception as exc:
+                self.after(0, lambda exc=exc: self._minecraft_auth_finished(None, exc))
+
+        threading.Thread(target=worker, daemon=True, name="Minecraft-Launcher-Login").start()
+
+
+    def _minecraft_auth_finished(self, account: dict | None, exc: Exception | None) -> None:
+        if exc:
+            self.modpack_status.configure(text=f"Minecraft sign-in failed: {exc}", text_color=t.DANGER)
+        elif account:
+            self.modpack_status.configure(
+                text=f"Microsoft account connected: {account.get('name', '')}",
+                text_color=t.SUCCESS,
+            )
+        self._minecraft_auth_status()
+        self.minecraft_signin_button.configure(state="normal")
+
+    def _minecraft_sign_out(self) -> None:
+        minecraft_logout()
+        self._minecraft_auth_status()
+        self.modpack_status.configure(text="Minecraft account signed out.", text_color=t.MUTED)
+
+    def _sync_modpack_profiles_from_disk(self, srv: dict) -> None:
+        """Register existing modpack folders that are missing from config."""
+        if not srv or srv.get("game_type") != "minecraft_java":
+            return
+        root = Path(srv.get("server_dir", "")) / "modpacks"
+        if not root.is_dir():
+            return
+        profiles = self._modpack_profiles(srv)
+        known_dirs = {str(p.get("dir_name") or "") for p in profiles.values()}
+        changed = False
+        for folder in root.iterdir():
+            if not folder.is_dir() or folder.name in known_dirs or folder.name.startswith(".") or folder.name == "__pycache__":
+                continue
+            name = folder.name
+            minecraft_version = ""
+            loader = ""
+            manifest_path = folder / "manifest.json"
+            if manifest_path.is_file():
+                try:
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    name = str(manifest.get("name") or name)
+                    minecraft_version = str((manifest.get("minecraft") or {}).get("version") or "")
+                    loaders = (manifest.get("minecraft") or {}).get("modLoaders") or []
+                    if loaders:
+                        lid = str((loaders[0] or {}).get("id") or "").lower()
+                        loader = next((x for x in ("neoforge", "forge", "fabric", "quilt") if lid.startswith(x + "-")), "")
+                except Exception:
+                    pass
+            profile_id = uuid.uuid4().hex[:10]
+            profiles[profile_id] = {"name": name, "dir_name": folder.name, "provider": "curseforge",
+                                    "minecraft_version": minecraft_version, "installed_version": minecraft_version,
+                                    "loader": loader}
+            known_dirs.add(folder.name)
+            changed = True
+        if changed:
+            self._persist()
+
+    def _refresh_modpacks_tab(self) -> None:
+        srv = self._current_server()
+        if not hasattr(self, "modpack_status"):
+            return
+        if not srv:
+            self.modpack_status.configure(text="Select a server to manage modpacks.", text_color=t.MUTED)
+            return
+        if srv.get("game_type") != "minecraft_java":
+            self.modpack_status.configure(text="Modpacks are available for Minecraft Java servers only.", text_color=t.MUTED)
+            return
+        self._sync_modpack_profiles_from_disk(srv)
+        cfg = srv.get("config", {})
+        if hasattr(self, "modpack_version_menu"):
+            self._load_modpack_versions()
+        if hasattr(self, "modpack_profile_menu"):
+            labels = self._modpack_profile_labels(srv)
+            none_label = "No modpack (base server files)"
+            values = [none_label] + list(labels.keys())
+            self.modpack_profile_menu.configure(values=values)
+            active_id = str(cfg.get("active_modpack_profile") or "")
+            active_label = next((lbl for lbl, pid in labels.items() if pid == active_id), none_label)
+            self.modpack_profile_menu.set(active_label)
+        name = cfg.get("modpack_name")
+        if name:
+            version = cfg.get("installed_version", "")
+            loader = cfg.get("loader", "")
+            count = len(self._modpack_profiles(srv))
+            extra = f"  •  {count} modpack(s) installed" if count > 1 else ""
+            self.modpack_status.configure(
+                text=f"Loaded: {name}" + (f"  •  Minecraft {version}" if version else "") + (f"  •  {loader_name(loader)}" if loader else "") + extra,
+                text_color=t.SUCCESS,
+            )
+        else:
+            self.modpack_status.configure(text="Search CurseForge or import a modpack ZIP.", text_color=t.MUTED)
+
+    def _modpack_profile_labels(self, srv: dict) -> dict[str, str]:
+        """Map a distinct display label -> profile_id for the current server."""
+        profiles = self._modpack_profiles(srv)
+        labels: dict[str, str] = {}
+        for pid, profile in profiles.items():
+            base = str(profile.get("name") or "Modpack")
+            label = base
+            if label in labels:
+                label = f"{base} ({pid[:6]})"
+            labels[label] = pid
+        return labels
+
+    def _on_modpack_profile_selected(self, label: str) -> None:
+        srv = self._current_server()
+        if not srv:
+            return
+        if self._process(srv["id"]).running:
+            messagebox.showwarning("Modpack", "Stop the server before switching modpacks.", parent=self.winfo_toplevel())
+            self._refresh_modpacks_tab()
+            return
+        labels = self._modpack_profile_labels(srv)
+        profile_id = labels.get(label, "")
+        self._activate_modpack_profile(srv, profile_id)
+        self._refresh_modpacks_tab()
+        self._refresh_config_tab()
+        self._refresh_overview()
+        self._refresh_mods()
+
+    def _repair_selected_modpack_loader(self) -> None:
+        srv = self._current_server()
+        if not srv or srv.get("game_type") != "minecraft_java":
+            return
+        if self._process(srv["id"]).running:
+            messagebox.showwarning("Modpack", "Stop the server before repairing its loader.", parent=self.winfo_toplevel())
+            return
+        label = self.modpack_profile_menu.get()
+        profile_id = self._modpack_profile_labels(srv).get(label, "")
+        if not profile_id:
+            self.modpack_status.configure(text="Select a modpack first.", text_color=t.DANGER)
+            return
+        profile = self._modpack_profiles(srv).get(profile_id) or {}
+        folder = Path(srv["server_dir"]) / "modpacks" / str(profile.get("dir_name") or profile_id)
+        if not folder.is_dir():
+            self.modpack_status.configure(text="Modpack folder was not found.", text_color=t.DANGER)
+            return
+        if detect_loader(folder):
+            self.modpack_status.configure(text="This modpack already has a server loader.", text_color=t.SUCCESS)
+            return
+        self.modpack_status.configure(text="Checking mod versions before loader installation…", text_color=t.MUTED)
+
+        def work():
+            try:
+                conflict_report = scan_modpack_version_conflicts(folder)
+                conflicts = conflict_report.get("conflicts", [])
+                if conflicts:
+                    dominant = conflict_report.get("dominant_version") or "unknown"
+                    lines = [
+                        "This modpack contains mods targeting a different Minecraft version.",
+                        f"\nPrimary detected version: {dominant}",
+                        "\nConflicting mods:",
+                    ]
+                    for item in conflicts[:60]:
+                        lines.append(f"• {item['file']}  →  Minecraft {item['version']}")
+                    if len(conflicts) > 60:
+                        lines.append(f"… and {len(conflicts) - 60} more")
+                    lines.append(
+                        "\nYes = move ONLY these incompatible JARs into the modpack's "
+                        "incompatible-mods folder and continue.\n"
+                        "No = leave everything untouched and stop."
+                    )
+                    text = "\n".join(lines)
+                    self.after(0, lambda text=text, conflicts=conflicts, folder=folder, dominant=dominant:
+                               self._resolve_modpack_conflicts_before_loader(
+                                   text, conflicts, folder, dominant, srv, profile_id, label
+                               ))
+                    return
+                mc_version, loader, loader_version = infer_profile_loader(folder, label)
+                if not mc_version or loader == "vanilla" or not loader_version:
+                    raise RuntimeError("Could not determine a supported Minecraft loader for this modpack.")
+                required = required_java_major(mc_version) if mc_version else None
+                self.after(0, lambda: self._start_modpack_loader_repair(
+                    srv, profile_id, label, folder, mc_version, loader, loader_version, required
+                ))
+            except Exception as exc:
+                text = str(exc)
+                self.after(0, lambda text=text: self.modpack_status.configure(
+                    text=f"Loader repair failed: {text}", text_color=t.DANGER
+                ))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _resolve_modpack_conflicts_before_loader(self, text, conflicts, folder, dominant, srv, profile_id, label) -> None:
+        """Try to replace conflicting JARs with CurseForge-compatible versions.
+
+        We preserve every original JAR under .modpack_backup. If CurseForge's
+        distribution/API permission blocks a replacement, the original is left
+        in place and a MISSING_MODS.txt entry with a manual CurseForge link is
+        written. Loader installation is stopped until the user resolves those
+        remaining conflicts.
+        """
+        proceed = messagebox.askyesno(
+            "Find Compatible Mod Versions",
+            text + "\n\nYes = find and replace each conflicting mod with a compatible CurseForge version.\n"
+                  "No = leave everything untouched and stop.",
+            parent=self.winfo_toplevel(),
+        )
+        if not proceed:
+            self.modpack_status.configure(
+                text=f"Loader installation stopped: {len(conflicts)} conflicting mod(s) detected.",
+                text_color=t.DANGER,
+            )
+            return
+
+        self.modpack_status.configure(text="Finding compatible CurseForge versions…", text_color=t.MUTED)
+        try:
+            api_key = str(self.curseforge_key_var.get() or "").strip()
+        except Exception:
+            api_key = ""
+
+        def work():
+            replaced = []
+            unresolved = []
+            links = []
+            for item in conflicts:
+                src = folder / str(item.get("path") or item.get("file") or "")
+                if not src.is_file():
+                    continue
+                ok, link = replace_with_compatible_curseforge_mod(
+                    folder, src, api_key, dominant, infer_profile_loader(folder, label)[1]
+                )
+                if ok:
+                    replaced.append(src.name)
+                else:
+                    unresolved.append(item)
+                    links.append(build_missing_mod_entry(
+                        src.name, dominant, infer_profile_loader(folder, label)[1],
+                        project_url=link,
+                        reason="No automatic replacement was available; the original file was preserved."
+                    ))
+
+            if links:
+                try:
+                    (folder / "MISSING_MODS.txt").write_text(
+                        "These mods need manual attention before the server loader can be installed.\n"
+                        "The original JARs were NOT deleted. Replace them with the compatible\n"
+                        "Minecraft/loader version shown by the CurseForge link below.\n\n"
+                        + "\n\n".join(links) + "\n", encoding="utf-8"
+                    )
+                except Exception:
+                    pass
+
+            self.after(0, lambda: self._finish_modpack_conflict_repair(
+                folder, srv, profile_id, label, replaced, unresolved, dominant
+            ))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _finish_modpack_conflict_repair(self, folder, srv, profile_id, label, replaced, unresolved, dominant):
+        if unresolved:
+            msg = (
+                f"Replaced {len(replaced)} compatible mod(s).\n\n"
+                f"{len(unresolved)} mod(s) could not be replaced automatically.\n"
+                "See MISSING_MODS.txt for the CurseForge links.\n\n"
+                "The original JARs were preserved, and the loader was NOT installed."
+            )
+            messagebox.showwarning("Manual Mod Replacement Required", msg, parent=self.winfo_toplevel())
+            self.modpack_status.configure(
+                text=f"{len(unresolved)} mod conflict(s) need manual replacement. See MISSING_MODS.txt.",
+                text_color=t.DANGER,
+            )
+            return
+
+        def work():
+            try:
+                report = scan_modpack_version_conflicts(folder)
+                remaining = report.get("conflicts", [])
+                if remaining:
+                    self.after(0, lambda: self.modpack_status.configure(
+                        text=f"{len(remaining)} Minecraft-version conflict(s) remain. See MISSING_MODS.txt.",
+                        text_color=t.DANGER,
+                    ))
+                    return
+                mc_version, loader, loader_version = infer_profile_loader(folder, label)
+                if not mc_version or loader == "vanilla" or not loader_version:
+                    raise RuntimeError("Could not determine a supported Minecraft loader for this modpack.")
+                required = required_java_major(mc_version) if mc_version else None
+                self.after(0, lambda: self._start_modpack_loader_repair(
+                    srv, profile_id, label, folder, mc_version, loader, loader_version, required
+                ))
+            except Exception as exc:
+                msg = str(exc)
+                self.after(0, lambda msg=msg: self.modpack_status.configure(
+                    text=f"Loader repair failed: {msg}", text_color=t.DANGER
+                ))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _start_modpack_loader_repair(self, srv, profile_id, label, folder, mc_version, loader, loader_version, required_java) -> None:
+        runtime_match = next((r for r in self._java_runtimes if r.major == required_java), None) if required_java else None
+        if required_java and not runtime_match:
+            self.modpack_status.configure(
+                text=f"Minecraft {mc_version} needs Java {required_java}; installing it…", text_color=t.MUTED
+            )
+            self._install_required_java_async(
+                required_java,
+                lambda: self._start_modpack_loader_repair(srv, profile_id, label, folder, mc_version, loader, loader_version, required_java),
+            )
+            return
+        java_path = runtime_match.path if runtime_match else self.java_path.get()
+        self.modpack_status.configure(
+            text=f"Installing {loader_name(loader)} {loader_version} for Minecraft {mc_version}…", text_color=t.MUTED
+        )
+        worker = create_modpack_loader_repair_worker(
+            folder, label, java_path=java_path,
+            min_mb=self._mem_mb(self.min_mb, 1024), max_mb=self._mem_mb(self.max_mb, 2048),
+        )
+        previous = str(srv.get("config", {}).get("active_modpack_profile") or "")
+        self._begin_modpack_worker(
+            worker, {"name": label}, None,
+            extra_meta={"profile_id": profile_id, "previous_profile_id": previous, "loader_repair": True},
+        )
+
+    def _remove_selected_modpack_profile(self) -> None:
+        srv = self._current_server()
+        if not srv:
+            return
+        label = self.modpack_profile_menu.get()
+        labels = self._modpack_profile_labels(srv)
+        profile_id = labels.get(label, "")
+        if not profile_id:
+            return
+        if self._process(srv["id"]).running and str(srv.get("config", {}).get("active_modpack_profile") or "") == profile_id:
+            messagebox.showwarning("Modpack", "Stop the server before removing the loaded modpack.", parent=self.winfo_toplevel())
+            return
+        if not messagebox.askyesno(
+            "Remove Modpack", f'Remove "{label}" and delete its files? This cannot be undone.',
+            parent=self.winfo_toplevel(),
+        ):
+            return
+        self._remove_modpack_profile(srv, profile_id)
+        self._refresh_modpacks_tab()
+        self._refresh_config_tab()
+        self._refresh_overview()
+        self._refresh_mods()
+
+    def _build_modpacks_tab(self, parent) -> None:
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(7, weight=1)
+        ctk.CTkLabel(parent, text="Minecraft Modpacks", font=t.font(15, "bold"), text_color=t.TEXT).grid(
+            row=0, column=0, sticky="w", padx=12, pady=(12, 4)
+        )
+        self.modpack_status = ctk.CTkLabel(parent, text="", font=t.font(10), text_color=t.MUTED,
+                                            anchor="w", justify="left", wraplength=620)
+        self.modpack_status.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 8))
+        self._modpack_missing_links: list[str] = []
+        self.modpack_copy_links_btn = ctk.CTkButton(
+            parent, text="Copy Links", width=110, height=24, font=t.font(10),
+            command=self._copy_modpack_missing_links,
+        )
+        self.modpack_copy_links_btn.grid(row=1, column=1, sticky="e", padx=12, pady=(0, 8))
+        self.modpack_copy_links_btn.grid_remove()
+
+        auth_row = ctk.CTkFrame(parent, fg_color="transparent")
+        auth_row.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 8))
+        self.minecraft_account_status = ctk.CTkLabel(
+            auth_row, text="Not signed in", font=t.font(10), text_color=t.MUTED, anchor="w"
+        )
+        self.minecraft_account_status.pack(side="left", fill="x", expand=True)
+        self.minecraft_signin_button = ctk.CTkButton(
+            auth_row, text="Sign in with Microsoft", width=150, height=28,
+            **t.secondary_button_style(), command=self._minecraft_sign_in,
+        )
+        self.minecraft_signin_button.pack(side="right")
+        self.minecraft_signout_button = ctk.CTkButton(
+            auth_row, text="Sign out", width=70, height=28,
+            **t.secondary_button_style(), command=self._minecraft_sign_out,
+        )
+        self.minecraft_signout_button.pack(side="right", padx=(0, 8))
+
+        controls = ctk.CTkFrame(parent, fg_color="transparent")
+        controls.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 8))
+        controls.grid_columnconfigure(0, weight=1)
+        self.modpack_search_entry = ctk.CTkEntry(controls, placeholder_text="Search CurseForge modpacks…",
+                                                 fg_color=t.PANEL, border_color=t.BORDER)
+        self.modpack_search_entry.grid(row=0, column=0, sticky="ew")
+        self.modpack_search_entry.bind("<Return>", lambda _e: self._search_curseforge_modpacks())
+        ctk.CTkButton(controls, text="Search", width=82, **t.primary_button_style(),
+                      command=self._search_curseforge_modpacks).grid(row=0, column=1, padx=(8, 0))
+        ctk.CTkButton(controls, text="Import ZIP", width=90, **t.secondary_button_style(),
+                      command=self._import_modpack_zip).grid(row=0, column=2, padx=(8, 0))
+        ctk.CTkButton(controls, text="Play Modpack", width=105, **t.secondary_button_style(),
+                      command=self._launch_installed_modpack).grid(row=0, column=3, padx=(8, 0))
+
+        profile_row = ctk.CTkFrame(parent, fg_color="transparent")
+        profile_row.grid(row=4, column=0, sticky="ew", padx=12, pady=(0, 8))
+        ctk.CTkLabel(profile_row, text="Loaded modpack", font=t.font(10), text_color=t.MUTED).pack(side="left")
+        self.modpack_profile_menu = ctk.CTkOptionMenu(
+            profile_row, values=["No modpack (base server files)"], width=260,
+            fg_color=t.PANEL_2, button_color=t.ACCENT, button_hover_color=t.ACCENT_HOVER,
+            command=self._on_modpack_profile_selected,
+        )
+        self.modpack_profile_menu.pack(side="left", padx=(8, 0))
+        ctk.CTkButton(profile_row, text="Repair Loader", width=100, height=26,
+                      **t.secondary_button_style(), command=self._repair_selected_modpack_loader).pack(side="left", padx=(8, 0))
+        ctk.CTkButton(profile_row, text="Remove", width=80, height=26,
+                      **t.secondary_button_style(), command=self._remove_selected_modpack_profile).pack(side="left", padx=(8, 0))
+
+        version_row = ctk.CTkFrame(parent, fg_color="transparent")
+        version_row.grid(row=5, column=0, sticky="ew", padx=12, pady=(0, 8))
+        ctk.CTkLabel(version_row, text="Minecraft version", font=t.font(10), text_color=t.MUTED).pack(side="left")
+        self.modpack_version_menu = ctk.CTkOptionMenu(
+            version_row, values=["Use server version", "Latest"], width=170,
+            fg_color=t.PANEL_2, button_color=t.ACCENT, button_hover_color=t.ACCENT_HOVER,
+            command=self._on_modpack_version_selected,
+        )
+        self.modpack_version_menu.pack(side="left", padx=(8, 0))
+        ctk.CTkButton(version_row, text="Load Versions", width=100, height=26,
+                      **t.secondary_button_style(), command=self._load_modpack_versions).pack(side="left", padx=(8, 0))
+
+        key_row = ctk.CTkFrame(parent, fg_color="transparent")
+        key_row.grid(row=6, column=0, sticky="ew", padx=12, pady=(0, 8))
+        key_row.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(key_row, text="CurseForge API key", font=t.font(10), text_color=t.MUTED).grid(row=0, column=0, sticky="w")
+        self.curseforge_key_var = ctk.StringVar(value=str(self._curseforge_settings.get("curseforge_api_key", "")))
+        self.curseforge_key_entry = ctk.CTkEntry(key_row, textvariable=self.curseforge_key_var, show="•",
+                                                 fg_color=t.PANEL, border_color=t.BORDER)
+        self.curseforge_key_entry.grid(row=0, column=1, sticky="ew", padx=(8, 8))
+        ctk.CTkButton(key_row, text="Save Key", width=82, **t.secondary_button_style(),
+                      command=self._save_curseforge_key).grid(row=0, column=2)
+
+        self.modpack_results = ctk.CTkScrollableFrame(parent, **st.inset_style())
+        self.modpack_results.grid(row=7, column=0, sticky="nsew", padx=12, pady=(0, 12))
+        self.modpack_results.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(self.modpack_results,
+                     text="Search CurseForge or import a CurseForge .zip / server pack.\n"
+                          "Manifest-based packs require an API key to download their mod files.",
+                     font=t.font(11), text_color=t.MUTED, justify="left", anchor="w").grid(
+            row=0, column=0, sticky="ew", padx=8, pady=12
+        )
+
+        self._minecraft_auth_status()
+
+    def _load_modpack_versions(self) -> None:
+        if not self._mc_versions:
+            self._load_mc_versions_async()
+            self.modpack_status.configure(text="Loading Minecraft versions…", text_color=t.MUTED)
+            return
+        versions = [v.id for v in self._mc_versions if getattr(v, "type", "release") == "release"]
+        versions = ["Automatic (latest)", "Use server version"] + versions
+        self.modpack_version_menu.configure(values=versions)
+        srv = self._current_server()
+        current = str((srv or {}).get("config", {}).get("minecraft_version", ""))
+        selected = current if current in versions else "Automatic (latest)"
+        self.modpack_version_menu.set(selected)
+        self._modpack_minecraft_version = current if selected == "Use server version" else ("" if selected == "Automatic (latest)" else selected)
+
+    def _on_modpack_version_selected(self, value: str) -> None:
+        srv = self._current_server()
+        server_version = str((srv or {}).get("config", {}).get("minecraft_version", ""))
+        if value == "Use server version":
+            self._modpack_minecraft_version = server_version
+        elif value == "Automatic (latest)":
+            self._modpack_minecraft_version = ""
+        else:
+            self._modpack_minecraft_version = value
+        if self._modpack_minecraft_version:
+            self.modpack_status.configure(text=f"Modpack search/install restricted to Minecraft {self._modpack_minecraft_version}.", text_color=t.MUTED)
+
+    def _minecraft_modpack_available(self) -> bool:
+        srv = self._current_server()
+        return bool(srv and srv.get("game_type") == "minecraft_java")
+
+    def _save_curseforge_key(self) -> None:
+        key = self.curseforge_key_var.get().strip()
+        self._curseforge_settings["curseforge_api_key"] = key
+        save_manager_settings(self._curseforge_settings)
+        self.modpack_status.configure(text="CurseForge API key saved.", text_color=t.SUCCESS)
+
+    def _search_curseforge_modpacks(self) -> None:
+        if not self._minecraft_modpack_available():
+            self.modpack_status.configure(text="Select a Minecraft Java server first.", text_color=t.DANGER)
+            return
+        key = self.curseforge_key_var.get().strip()
+        if not key:
+            self.modpack_status.configure(text="Enter and save a CurseForge API key first.", text_color=t.DANGER)
+            return
+        query = self.modpack_search_entry.get().strip()
+        self.modpack_status.configure(text=f"Searching CurseForge{f" for Minecraft {self._modpack_minecraft_version}" if self._modpack_minecraft_version else ""}…", text_color=t.MUTED)
+        for child in self.modpack_results.winfo_children():
+            child.destroy()
+
+        def work():
+            try:
+                results = search_modpacks(key, query)
+                self.after(0, lambda: self._show_curseforge_results(results))
+            except Exception as exc:
+                error_text = str(exc)
+                self.after(0, lambda error_text=error_text: self.modpack_status.configure(
+                    text=f"CurseForge search failed: {error_text}", text_color=t.DANGER
+                ))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _show_curseforge_results(self, results: list[dict]) -> None:
+        self._curseforge_results = results
+        for child in self.modpack_results.winfo_children():
+            child.destroy()
+        if not results:
+            ctk.CTkLabel(self.modpack_results, text="No modpacks found.", text_color=t.MUTED).grid(row=0, column=0, padx=8, pady=12)
+            self.modpack_status.configure(text="No results.", text_color=t.MUTED)
+            return
+        self.modpack_status.configure(text=f"Found {len(results)} modpacks.", text_color=t.MUTED)
+        for row, pack in enumerate(results):
+            frame = ctk.CTkFrame(self.modpack_results, **st.card_style())
+            frame.grid(row=row, column=0, sticky="ew", padx=4, pady=4)
+            frame.grid_columnconfigure(0, weight=1)
+            name = str(pack.get("name") or "Unnamed Modpack")
+            summary = str(pack.get("summary") or "").replace("\n", " ")
+            downloads = pack.get("downloadCount")
+            text = name
+            if downloads is not None:
+                text += f"  •  {int(downloads):,} downloads"
+            ctk.CTkLabel(frame, text=text, font=t.font(12, "bold"), text_color=t.TEXT, anchor="w").grid(
+                row=0, column=0, sticky="ew", padx=10, pady=(8, 2)
+            )
+            ctk.CTkLabel(frame, text=summary[:180], font=t.font(10), text_color=t.MUTED,
+                         anchor="w", justify="left", wraplength=500).grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 8))
+            ctk.CTkButton(frame, text="Install Latest", width=105, height=28, **t.primary_button_style(),
+                          command=lambda p=pack: self._install_curseforge_project(p)).grid(row=0, column=1, rowspan=2, padx=10)
+
+    def _install_curseforge_project(self, project: dict) -> None:
+        srv = self._current_server()
+        if not srv or srv.get("game_type") != "minecraft_java":
+            return
+        if not self._eula_var.get():
+            self.modpack_status.configure(text="Accept Mojang's EULA in Config before installing a modpack.", text_color=t.DANGER)
+            return
+        if self._process(srv["id"]).running:
+            messagebox.showwarning("Modpack", "Stop the server before installing a modpack.", parent=self.winfo_toplevel())
+            return
+        key = self.curseforge_key_var.get().strip()
+        if not key:
+            self.modpack_status.configure(text="Enter a CurseForge API key first.", text_color=t.DANGER)
+            return
+        project_id = int(project.get("id") or 0)
+        if not project_id:
+            self.modpack_status.configure(text="CurseForge project has no valid ID.", text_color=t.DANGER)
+            return
+        self.modpack_status.configure(text=f"Finding latest file for {project.get('name', 'modpack')}…", text_color=t.MUTED)
+        def work():
+            try:
+                # Modpacks determine their own Minecraft version. The
+                # selected/server Minecraft version is only a hint for the UI;
+                # it must never prevent us from finding the correct modpack
+                # release (e.g. SkyFactory 4 is 1.12.2).
+                target_version = ""
+                files = get_latest_project_files(key, project_id)
+                auto_selected = bool(files)
+
+                # If the normal file listing is unavailable, use the project's
+                # latestFilesIndexes as a fallback.
+
+                # Some CurseForge API responses expose latestFilesIndexes on
+                # the project but return no rows from /files for legacy packs.
+                # Use those file IDs as a final fallback, then fetch the full
+                # file records. This is especially important for old packs
+                # such as SkyFactory 4.
+                if not files:
+                    indexes = project.get("latestFilesIndexes") or []
+                    candidates = []
+                    for item in indexes:
+                        if not isinstance(item, dict):
+                            continue
+                        fid = int(item.get("fileId") or 0)
+                        if not fid:
+                            continue
+                        gv = str(item.get("gameVersion") or "")
+                        if target_version and gv and gv != target_version:
+                            continue
+                        candidates.append((fid, gv))
+                    if not candidates and target_version:
+                        for item in indexes:
+                            if not isinstance(item, dict):
+                                continue
+                            fid = int(item.get("fileId") or 0)
+                            if fid:
+                                candidates.append((fid, str(item.get("gameVersion") or "")))
+                        auto_selected = bool(candidates)
+                    for fid, gv in candidates[:25]:
+                        try:
+                            info = get_file(key, project_id, fid)
+                            if isinstance(info, dict):
+                                files.append(info)
+                        except Exception:
+                            continue
+                    auto_selected = auto_selected or bool(files)
+
+                if not files:
+                    raise RuntimeError(
+                        "CurseForge returned no downloadable files for this modpack. "
+                        "Check that your API key has access to the project."
+                    )
+
+                files.sort(key=lambda f: str(f.get("fileDate") or ""), reverse=True)
+
+                def is_server_pack_file(item: dict) -> bool:
+                    if item.get("serverPackFileId") or item.get("isServerPack"):
+                        return True
+                    name = str(item.get("displayName") or item.get("fileName") or "").lower()
+                    return (
+                        "server pack" in name
+                        or "server files" in name
+                        or "_server_" in name
+                        or name.endswith("_server.zip")
+                    )
+
+                # Prefer a dedicated server-pack file. If the client release
+                # points at a separate serverPackFileId, the worker resolves
+                # that exact child file after this selection.
+                server_pack_files = [item for item in files if is_server_pack_file(item)]
+                release_files = [
+                    item for item in files
+                    if int(item.get("releaseType") or 1) == 1
+                ]
+
+                # Prefer a server pack. Among server packs, prefer one that
+                # actually declares a Minecraft version, then the newest one.
+                candidates = server_pack_files or release_files or files
+                candidates = sorted(
+                    candidates,
+                    key=lambda item: (
+                        bool([
+                            v for v in (item.get("gameVersions") or [])
+                            if re.fullmatch(r"1\.\d+(?:\.\d+)?", str(v))
+                        ]),
+                        str(item.get("fileDate") or ""),
+                    ),
+                    reverse=True,
+                )
+                f = candidates[0]
+
+                if auto_selected:
+                    versions = [str(v) for v in (f.get("gameVersions") or [])]
+                    mc_versions = [
+                        v for v in versions
+                        if re.fullmatch(r"1\.\d+(?:\.\d+)?", v)
+                    ]
+                    if mc_versions:
+                        selected_mc = mc_versions[0]
+                        self._modpack_minecraft_version = selected_mc
+                        self.after(
+                            0,
+                            lambda v=selected_mc: self.modpack_status.configure(
+                                text=f"Automatically selected Minecraft {v} for this modpack.",
+                                text_color=t.MUTED,
+                            ),
+                        )
+                # Modpacks determine their own Minecraft version. Pick the Java
+                # runtime for that detected version instead of blindly using the
+                # Java configured for the server's old/current vanilla version.
+                detected_java_major = required_java_major(
+                    selected_mc if 'selected_mc' in locals() else
+                    (mc_versions[0] if mc_versions else "")
+                ) if (('selected_mc' in locals() and selected_mc) or mc_versions) else None
+
+                def launch_modpack_worker(java_path_for_pack=None):
+                    previous_profile = str(srv.get("config", {}).get("active_modpack_profile") or "")
+                    profile_id = self._new_modpack_profile(srv, str(project.get("name") or "CurseForge Modpack"))
+                    self._activate_modpack_profile(srv, profile_id)
+                    worker = create_curseforge_download_worker(
+                        self._server_dir(srv), key, project_id, int(f["id"]),
+                        java_path=java_path_for_pack or self.java_path.get(),
+                        min_mb=self._mem_mb(self.min_mb, 1024), max_mb=self._mem_mb(self.max_mb, 2048),
+                        project_name=str(project.get("name") or "CurseForge Modpack"),
+                    )
+                    self.after(0, lambda: self._begin_modpack_worker(
+                        worker, project, f,
+                        extra_meta={"profile_id": profile_id, "previous_profile_id": previous_profile},
+                    ))
+
+                if detected_java_major:
+                    runtime_match = next(
+                        (r for r in self._java_runtimes if r.major == detected_java_major),
+                        None,
+                    )
+                    if runtime_match:
+                        self.java_path.set(runtime_match.path)
+                        # Java installed under Program Files (x86) is a 32-bit
+                        # JVM. A 2 GB heap cannot be reserved reliably by it.
+                        if "program files (x86)" in runtime_match.path.lower():
+                            self.min_mb.set(str(min(self._mem_mb(self.min_mb, 1024), 512)))
+                            self.max_mb.set(str(min(self._mem_mb(self.max_mb, 2048), 1024)))
+                        self._append_console_line(
+                            f"[Modpack] Using Java {detected_java_major} for Minecraft {selected_mc}: {runtime_match.path}"
+                        )
+                        self.after(0, lambda p=runtime_match.path: launch_modpack_worker(p))
+                    else:
+                        self.after(
+                            0,
+                            lambda req=detected_java_major: self._install_required_java_async(
+                                req,
+                                lambda: launch_modpack_worker(
+                                    next((r.path for r in self._java_runtimes if r.major == req), self.java_path.get())
+                                ),
+                            ),
+                        )
+                else:
+                    self.after(0, launch_modpack_worker)
+            except Exception as exc:
+                error_text = str(exc)
+                self.after(0, lambda error_text=error_text: self.modpack_status.configure(
+                    text=f"Modpack lookup failed: {error_text}", text_color=t.DANGER
+                ))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _set_modpack_missing_links(self, urls: list[str]) -> None:
+        self._modpack_missing_links = urls
+        if urls:
+            self.modpack_copy_links_btn.grid()
+        else:
+            self.modpack_copy_links_btn.grid_remove()
+
+    def _copy_modpack_missing_links(self) -> None:
+        if not self._modpack_missing_links:
+            return
+        self.clipboard_clear()
+        self.clipboard_append("\n".join(self._modpack_missing_links))
+        self.modpack_copy_links_btn.configure(text="Copied!")
+        self.after(1500, lambda: self.modpack_copy_links_btn.configure(text="Copy Links"))
+
+    def _launch_installed_modpack(self) -> None:
+        srv = self._current_server()
+        if not srv or srv.get("game_type") != "minecraft_java":
+            self.modpack_status.configure(text="Select a Minecraft Java server first.", text_color=t.DANGER)
+            return
+        cfg = srv.get("config", {})
+        name = str(cfg.get("modpack_name") or "").strip()
+        mc_version = str(cfg.get("minecraft_version") or cfg.get("installed_version") or "").strip()
+        if not mc_version:
+            # Older imports (before the extractor recorded a version for
+            # manifest-less server-pack ZIPs) can have this saved blank.
+            # Recover it from the files already on disk instead of forcing
+            # a full reinstall/redownload.
+            server_dir = self._server_dir(srv)
+            detected = detect_minecraft_version(server_dir)
+            if detected:
+                mc_version = detected
+                cfg["minecraft_version"] = detected
+                cfg["installed_version"] = detected
+                self._persist()
+        loader = str(cfg.get("loader") or "").lower()
+        loader_version = str(cfg.get("loader_version") or "").strip()
+        if not name:
+            self.modpack_status.configure(text="Install a modpack first.", text_color=t.DANGER)
+            return
+        if not loader:
+            loader = "vanilla"
+        supported_loaders = {"forge", "neoforge", "fabric", "quilt", "vanilla"}
+        if loader not in supported_loaders:
+            self.modpack_status.configure(
+                text=f"Client launcher preparation does not yet support {loader or 'unknown'} modpacks.",
+                text_color=t.DANGER,
+            )
+            return
+        java_path = str(cfg.get("java_path") or self.java_path.get() or "java")
+        server_dir = self._server_dir(srv)
+        active_profile = str(cfg.get("active_modpack_profile") or "")
+        instance_id = f'{srv.get("id") or "default"}-{active_profile}' if active_profile else str(srv.get("id") or "default")
+        prep_label = f"Minecraft {mc_version}" if loader == "vanilla" else f"Minecraft {mc_version} + {loader.title()} {loader_version}"
+        self.modpack_status.configure(
+            text=f"Preparing {prep_label}…",
+            text_color=t.MUTED,
+        )
+        self._set_modpack_missing_links([])
+
+        def work():
+            try:
+                client_dir, version_id = prepare_client(
+                    server_dir,
+                    mc_version,
+                    loader,
+                    loader_version,
+                    java_path,
+                    name,
+                    instance_id,
+                    curseforge_api_key=self.curseforge_key_var.get().strip(),
+                    project_id=int(cfg.get("modpack_project_id") or 0),
+                    file_id=int(cfg.get("modpack_file_id") or 0),
+                )
+                self.after(0, lambda: self.modpack_status.configure(
+                    text=f"Launching Minecraft {version_id}…", text_color=t.MUTED
+                ))
+                self.after(0, lambda: self._finish_modpack_launch(client_dir, version_id, java_path, cfg, srv.get("id")))
+            except ModpackDownloadError as exc:
+                error_text = str(exc)
+                links = [url for _name, url in exc.entries if url]
+                self.after(0, lambda error_text=error_text: self.modpack_status.configure(
+                    text=f"Minecraft client preparation failed: {error_text}", text_color=t.DANGER
+                ))
+                self.after(0, lambda links=links: self._set_modpack_missing_links(links))
+            except Exception as exc:
+                error_text = str(exc)
+                self.after(0, lambda error_text=error_text: self.modpack_status.configure(
+                    text=f"Minecraft client preparation failed: {error_text}", text_color=t.DANGER
+                ))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _finish_modpack_launch(self, client_dir: Path, version_id: str, java_path: str, cfg: dict, server_id: str | None = None) -> None:
+        try:
+            min_mb = int(cfg.get("min_mb", 1024) or 1024)
+            max_mb = int(cfg.get("max_mb", 4096) or 4096)
+            applied_min, applied_max, mc_proc = launch_minecraft_direct(client_dir, version_id, java_path, min_mb, max_mb)
+            self.modpack_status.configure(
+                text=f"Minecraft {version_id} launched directly. The Minecraft Launcher was not opened.",
+                text_color=t.SUCCESS,
+            )
+            self._append_console_line(
+                f"[Modpack] Launched {version_id} directly; game directory: {client_dir}",
+                server_id=server_id,
+            )
+            self._stream_minecraft_client_output(mc_proc, version_id, server_id)
+            mismatch_note = ""
+            if applied_min != min_mb or applied_max != max_mb:
+                probe_notes = get_last_heap_probe_notes()
+                if probe_notes:
+                    mismatch_note = (
+                        f" — Java rejected {max_mb} MB, so it was auto-reduced "
+                        f"to what your JVM will actually accept: "
+                        + "; ".join(probe_notes)
+                    )
+                else:
+                    mismatch_note = (
+                        " — mismatch: either Config → Min/Max MB wasn't saved "
+                        "before launching, or Java was detected as 32-bit and "
+                        "clamped to 1024 MB max"
+                    )
+            self._append_console_line(
+                f"[Modpack] Heap: -Xms{applied_min}M -Xmx{applied_max}M "
+                f"(requested {min_mb}/{max_mb} MB){mismatch_note}",
+                server_id=server_id,
+            )
+        except Exception as exc:
+            error_text = str(exc)
+            # If the only missing piece is an existing launcher login, give a
+            # clear one-time setup message rather than silently opening it.
+            self.modpack_status.configure(
+                text=f"Could not launch Minecraft directly: {error_text}",
+                text_color=t.DANGER,
+            )
+            self._append_console_line(f"[Modpack] Direct launch failed: {error_text}", server_id=server_id)
+
+    def _stream_minecraft_client_output(self, proc, version_id: str, server_id: str | None) -> None:
+        """Read the Minecraft client's piped stdout/stderr in a background
+        thread and forward each line into the manager's own console instead
+        of leaving it to print to whatever terminal launched the manager."""
+        def read_loop():
+            try:
+                assert proc.stdout is not None
+                for raw_line in proc.stdout:
+                    line = raw_line.rstrip("\r\n")
+                    if not line:
+                        continue
+                    self.after(0, lambda l=line: self._append_console_line(f"[Minecraft] {l}", server_id=server_id))
+            except Exception:
+                pass
+            finally:
+                exit_code = proc.wait()
+                self.after(
+                    0,
+                    lambda: self._append_console_line(
+                        f"[Minecraft] {version_id} exited (code {exit_code}).", server_id=server_id
+                    ),
+                )
+
+        threading.Thread(target=read_loop, daemon=True).start()
+
+    def _import_modpack_zip(self) -> None:
+        srv = self._current_server()
+        if not srv or srv.get("game_type") != "minecraft_java":
+            self.modpack_status.configure(text="Select a Minecraft Java server first.", text_color=t.DANGER)
+            return
+        if not self._eula_var.get():
+            self.modpack_status.configure(text="Accept Mojang's EULA in Config before installing a modpack.", text_color=t.DANGER)
+            return
+        if self._process(srv["id"]).running:
+            messagebox.showwarning("Modpack", "Stop the server before importing a modpack.", parent=self.winfo_toplevel())
+            return
+        path = filedialog.askopenfilename(parent=self.winfo_toplevel(), title="Select Minecraft Modpack",
+                                          filetypes=[("Modpack ZIP", "*.zip"), ("All files", "*.*")])
+        if not path:
+            return
+
+        def launch(java_path_for_pack: str | None = None) -> None:
+            previous_profile = str(srv.get("config", {}).get("active_modpack_profile") or "")
+            profile_id = self._new_modpack_profile(srv, Path(path).stem)
+            self._activate_modpack_profile(srv, profile_id)
+            worker = create_modpack_install_worker(
+                self._server_dir(srv), Path(path), self.curseforge_key_var.get().strip(),
+                java_path=java_path_for_pack or self.java_path.get(),
+                min_mb=self._mem_mb(self.min_mb, 1024), max_mb=self._mem_mb(self.max_mb, 2048),
+                project_name=Path(path).stem,
+            )
+            self._begin_modpack_worker(
+                worker, {"name": Path(path).stem}, None,
+                extra_meta={"profile_id": profile_id, "previous_profile_id": previous_profile},
+            )
+
+        # A ZIP's manifest declares its own Minecraft version, which can be
+        # older than whatever Java the server currently has configured
+        # (e.g. a 1.16.5 pack needs Java 8, not the Java 17/21 a newer
+        # vanilla server on the same profile might be using). The
+        # CurseForge search-and-install flow already resolves the right
+        # runtime before installing; Import ZIP previously just used
+        # self.java_path.get() unconditionally, which could hand a modern
+        # JDK to an old Forge installer and cause it to fail.
+        mc_version = peek_manifest_minecraft_version(Path(path))
+        required_java = required_java_major(mc_version) if mc_version else None
+        if not required_java:
+            launch()
+            return
+        runtime_match = next((r for r in self._java_runtimes if r.major == required_java), None)
+        if runtime_match:
+            self.java_path.set(runtime_match.path)
+            if "program files (x86)" in runtime_match.path.lower():
+                self.min_mb.set(str(min(self._mem_mb(self.min_mb, 1024), 512)))
+                self.max_mb.set(str(min(self._mem_mb(self.max_mb, 2048), 1024)))
+            self._append_console_line(
+                f"[Modpack] Using Java {required_java} for Minecraft {mc_version}: {runtime_match.path}"
+            )
+            launch(runtime_match.path)
+        else:
+            self.modpack_status.configure(
+                text=f"Minecraft {mc_version} needs Java {required_java}; installing it…",
+                text_color=t.MUTED,
+            )
+            self._install_required_java_async(
+                required_java,
+                lambda req=required_java: launch(
+                    next((r.path for r in self._java_runtimes if r.major == req), self.java_path.get())
+                ),
+            )
+
+
+    def _begin_modpack_worker(self, worker, project: dict, file_info: dict | None, extra_meta: dict | None = None) -> None:
+        if self._download_worker is not None and self._download_worker.is_alive():
+            self.modpack_status.configure(text="Another installation is already running.", text_color=t.DANGER)
+            return
+        self._download_worker = worker
+        self._download_meta = {
+            "game": "modpack",
+            "project_id": int(project.get("id") or 0) if isinstance(project, dict) else 0,
+            "file_id": int(file_info.get("id") or 0) if file_info else 0,
+            "project_name": str(project.get("name") or "Modpack") if isinstance(project, dict) else "Modpack",
+        }
+        self._download_meta.update(extra_meta or {})
+        self.modpack_status.configure(text="Installing modpack…", text_color=t.MUTED)
+        self._append_console_line(f"[Modpack] Installing {self._download_meta['project_name']}…")
+        worker.start()
+        self._poll_download()
+
     def _build_mods_tab(self, parent) -> None:
         parent.grid_columnconfigure(0, weight=1)
         parent.grid_rowconfigure(0, weight=1)
@@ -1748,11 +2961,41 @@ class GameServerManagerModule(GameServerFeaturesMixin, ctk.CTkFrame):
         ctk.CTkLabel(self.mc_java_row, text="Java", font=t.font(11), text_color=t.MUTED).pack(side="left")
         self.java_status_label = ctk.CTkLabel(self.mc_java_row, text="Checking…", font=t.font(11), text_color=t.MUTED)
         self.java_status_label.pack(side="left", padx=(8, 0))
-        ctk.CTkButton(self.mc_java_row, text="Re-check", width=70, height=24, **t.secondary_button_style(),
-                      command=self._check_java_async).pack(side="right")
+        ctk.CTkButton(self.mc_java_row, text="Install Required Java", width=135, height=24, **t.secondary_button_style(),
+                      command=self._install_required_java_async).pack(side="right", padx=(6, 0))
+        ctk.CTkButton(self.mc_java_row, text="Refresh Java", width=90, height=24, **t.secondary_button_style(),
+                      command=self._refresh_java_runtimes_async).pack(side="right")
+
+        self.java_runtime_row = ctk.CTkFrame(parent, fg_color="transparent")
+        self.java_runtime_row.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 4))
+        ctk.CTkLabel(self.java_runtime_row, text="Runtime", font=t.font(11), text_color=t.MUTED).pack(side="left")
+        self.java_required_label = ctk.CTkLabel(self.java_runtime_row, text="Required: Java —", font=t.font(10), text_color=t.MUTED)
+        self.java_required_label.pack(side="left", padx=(8, 0))
+        self.java_runtime_menu = ctk.CTkOptionMenu(
+            self.java_runtime_row, values=["Automatic"], width=300,
+            fg_color=t.PANEL_2, button_color=t.ACCENT, button_hover_color=t.ACCENT_HOVER,
+            command=self._on_java_runtime_selected,
+        )
+        self.java_runtime_menu.pack(side="left", padx=(8, 0))
+
+        self.mc_loader_row = ctk.CTkFrame(parent, fg_color="transparent")
+        self.mc_loader_row.grid(row=3, column=0, sticky="ew", padx=12, pady=4)
+        ctk.CTkLabel(self.mc_loader_row, text="Loader", font=t.font(11), text_color=t.MUTED).pack(side="left")
+        self.loader_menu = ctk.CTkOptionMenu(
+            self.mc_loader_row, values=[loader_name(x) for x in loader_choices()], width=140,
+            fg_color=t.PANEL_2, button_color=t.ACCENT, button_hover_color=t.ACCENT_HOVER,
+            command=self._on_mc_loader_selected,
+        )
+        self.loader_menu.pack(side="left", padx=(8, 0))
+        self.loader_version_menu = ctk.CTkOptionMenu(
+            self.mc_loader_row, values=["Vanilla"], width=190,
+            fg_color=t.PANEL_2, button_color=t.ACCENT, button_hover_color=t.ACCENT_HOVER,
+            command=self._on_mc_loader_version_selected,
+        )
+        self.loader_version_menu.pack(side="left", padx=(8, 0))
 
         self.mc_version_row = ctk.CTkFrame(parent, fg_color="transparent")
-        self.mc_version_row.grid(row=2, column=0, sticky="ew", padx=12, pady=4)
+        self.mc_version_row.grid(row=4, column=0, sticky="ew", padx=12, pady=4)
         self.version_menu = ctk.CTkOptionMenu(
             self.mc_version_row, values=["(load versions)"], width=180,
             fg_color=t.PANEL_2, button_color=t.ACCENT, button_hover_color=t.ACCENT_HOVER,
@@ -1764,9 +3007,13 @@ class GameServerManagerModule(GameServerFeaturesMixin, ctk.CTkFrame):
                         command=self._populate_mc_version_menu).pack(side="left", padx=(8, 0))
         ctk.CTkButton(self.mc_version_row, text="Load Versions", width=100, height=26,
                       **t.secondary_button_style(), command=self._load_mc_versions_async).pack(side="left", padx=(8, 0))
+        ctk.CTkButton(self.mc_version_row, text="Check Installed", width=110, height=26,
+                      **t.secondary_button_style(), command=self._check_installed_mc_version).pack(side="left", padx=(8, 0))
+        self.mc_version_status_label = ctk.CTkLabel(self.mc_version_row, text="Installed: —", font=t.font(10), text_color=t.MUTED)
+        self.mc_version_status_label.pack(side="left", padx=(10, 0))
 
         self.mc_bedrock_row = ctk.CTkFrame(parent, fg_color="transparent")
-        self.mc_bedrock_row.grid(row=3, column=0, sticky="ew", padx=12, pady=4)
+        self.mc_bedrock_row.grid(row=5, column=0, sticky="ew", padx=12, pady=4)
         self.bedrock_channel_menu = ctk.CTkOptionMenu(
             self.mc_bedrock_row, values=["Stable", "Preview"], width=120,
             fg_color=t.PANEL_2, button_color=t.ACCENT, button_hover_color=t.ACCENT_HOVER,
@@ -1775,19 +3022,31 @@ class GameServerManagerModule(GameServerFeaturesMixin, ctk.CTkFrame):
         self.bedrock_channel_menu.pack(side="left")
 
         self.mc_mem_row = ctk.CTkFrame(parent, fg_color="transparent")
-        self.mc_mem_row.grid(row=4, column=0, sticky="ew", padx=12, pady=4)
-        self.min_mb = ctk.IntVar(value=1024)
-        self.max_mb = ctk.IntVar(value=2048)
+        self.mc_mem_row.grid(row=6, column=0, sticky="ew", padx=12, pady=4)
+        self.min_mb = ctk.StringVar(value="1024")
+        self.max_mb = ctk.StringVar(value="2048")
         self.java_path = ctk.StringVar(value="java")
         ctk.CTkLabel(self.mc_mem_row, text="Min MB", text_color=t.MUTED, font=t.font(11)).pack(side="left")
         ctk.CTkEntry(self.mc_mem_row, textvariable=self.min_mb, width=70, fg_color=t.PANEL_2,
                      border_color=t.BORDER, text_color=t.TEXT).pack(side="left", padx=(4, 12))
         ctk.CTkLabel(self.mc_mem_row, text="Max MB", text_color=t.MUTED, font=t.font(11)).pack(side="left")
         ctk.CTkEntry(self.mc_mem_row, textvariable=self.max_mb, width=70, fg_color=t.PANEL_2,
-                     border_color=t.BORDER, text_color=t.TEXT).pack(side="left", padx=(4, 0))
+                     border_color=t.BORDER, text_color=t.TEXT).pack(side="left", padx=(4, 8))
+        ctk.CTkButton(self.mc_mem_row, text="Suggest", width=64, height=24, font=t.font(11),
+                      fg_color=t.PANEL_2, hover_color=t.ACCENT_HOVER, text_color=t.TEXT,
+                      command=self._suggest_mc_memory).pack(side="left")
+        self.mc_mem_system_label = ctk.CTkLabel(self.mc_mem_row, text="", text_color=t.MUTED, font=t.font(10))
+        self.mc_mem_system_label.pack(side="left", padx=(10, 0))
+        self._refresh_mc_mem_system_label()
+        # Auto-persist Min/Max MB as the person edits them (like CurseForge's
+        # instance slider, which writes to disk as soon as it changes)
+        # instead of requiring a separate "Save Config" click to stick.
+        self._mc_mem_autosave_job: str | None = None
+        self.min_mb.trace_add("write", lambda *_: self._schedule_mc_mem_autosave())
+        self.max_mb.trace_add("write", lambda *_: self._schedule_mc_mem_autosave())
 
         eula_row = ctk.CTkFrame(parent, fg_color="transparent")
-        eula_row.grid(row=5, column=0, sticky="w", padx=12, pady=4)
+        eula_row.grid(row=7, column=0, sticky="w", padx=12, pady=4)
         ctk.CTkCheckBox(eula_row, text="I agree to Mojang's EULA", variable=self._eula_var,
                         fg_color=t.ACCENT, hover_color=t.ACCENT_HOVER, text_color=t.TEXT).pack(side="left")
         link = ctk.CTkLabel(eula_row, text="(view)", font=t.font(11, "bold"), text_color=t.ACCENT, cursor="hand2")
@@ -1795,7 +3054,7 @@ class GameServerManagerModule(GameServerFeaturesMixin, ctk.CTkFrame):
         link.bind("<Button-1>", lambda _e: webbrowser.open("https://aka.ms/MinecraftEULA"))
 
         dl_row = ctk.CTkFrame(parent, fg_color="transparent")
-        dl_row.grid(row=6, column=0, sticky="ew", padx=12, pady=(4, 10))
+        dl_row.grid(row=8, column=0, sticky="ew", padx=12, pady=(4, 10))
         dl_row.grid_columnconfigure(1, weight=1)
         self.download_btn = ctk.CTkButton(dl_row, text="Download & Install", **t.primary_button_style(),
                                           command=self._start_mc_download)
@@ -1805,10 +3064,10 @@ class GameServerManagerModule(GameServerFeaturesMixin, ctk.CTkFrame):
         self.download_progress.grid(row=0, column=1, sticky="ew", padx=(12, 0))
 
         self.mc_update_row = ctk.CTkFrame(parent, fg_color="transparent")
-        self.mc_update_row.grid(row=7, column=0, sticky="ew", padx=12, pady=(0, 10))
+        self.mc_update_row.grid(row=9, column=0, sticky="ew", padx=12, pady=(0, 10))
         ctk.CTkButton(self.mc_update_row, text="Check for update", width=120, height=26,
                       **t.secondary_button_style(), command=self._check_java_update).pack(side="left")
-        ctk.CTkButton(self.mc_update_row, text="Update server.jar", width=120, height=26,
+        ctk.CTkButton(self.mc_update_row, text="Update Server", width=120, height=26,
                       **t.primary_button_style(), command=self._apply_java_update).pack(side="left", padx=(8, 0))
         self.update_status_label = ctk.CTkLabel(self.mc_update_row, text="", font=t.font(10), text_color=t.MUTED)
         self.update_status_label.pack(side="left", padx=(12, 0))
@@ -1850,22 +3109,31 @@ class GameServerManagerModule(GameServerFeaturesMixin, ctk.CTkFrame):
         if is_java or is_bedrock:
             self.mc_install_panel.grid()
             self.mc_java_row.grid() if is_java else self.mc_java_row.grid_remove()
+            self.java_runtime_row.grid() if is_java else self.java_runtime_row.grid_remove()
+            self.mc_loader_row.grid() if is_java else self.mc_loader_row.grid_remove()
             self.mc_version_row.grid() if is_java else self.mc_version_row.grid_remove()
             self.mc_bedrock_row.grid() if is_bedrock else self.mc_bedrock_row.grid_remove()
             self.mc_mem_row.grid() if is_java else self.mc_mem_row.grid_remove()
             self.mc_update_row.grid() if is_java else self.mc_update_row.grid_remove()
             cfg = srv.setdefault("config", {})
-            self.min_mb.set(int(cfg.get("min_mb", 1024)))
-            self.max_mb.set(int(cfg.get("max_mb", 2048)))
+            self._mc_mem_syncing = True
+            self.min_mb.set(str(int(cfg.get("min_mb", 1024) or 1024)))
+            self.max_mb.set(str(int(cfg.get("max_mb", 2048) or 2048)))
+            self._mc_mem_syncing = False
             self.java_path.set(cfg.get("java_path", "java"))
+            loader = str(cfg.get("loader", "vanilla"))
+            self.loader_menu.set(loader_name(loader))
+            self._mc_selected_loader_version = str(cfg.get("loader_version", ""))
             channel = cfg.get("bedrock_channel", "stable")
             self.bedrock_channel_menu.set("Preview" if channel == "preview" else "Stable")
             if is_java:
-                self._check_java_async()
+                self._check_installed_mc_version()
+                self._refresh_java_runtimes_async()
                 if self._mc_versions:
                     self._populate_mc_version_menu()
                 elif not self._mc_versions_loading:
                     self._load_mc_versions_async()
+                self._load_mc_loader_versions_async(loader)
         else:
             self.mc_install_panel.grid_remove()
 
@@ -2131,8 +3399,8 @@ class GameServerManagerModule(GameServerFeaturesMixin, ctk.CTkFrame):
 
         if srv["game_type"] == "minecraft_java":
             cfg = srv.setdefault("config", {})
-            cfg["min_mb"] = self.min_mb.get()
-            cfg["max_mb"] = self.max_mb.get()
+            cfg["min_mb"] = self._mem_mb(self.min_mb, 1024)
+            cfg["max_mb"] = self._mem_mb(self.max_mb, 2048)
             cfg["java_path"] = self.java_path.get()
             self._persist()
 
@@ -2145,16 +3413,153 @@ class GameServerManagerModule(GameServerFeaturesMixin, ctk.CTkFrame):
 
     # ---- minecraft install (preserved from original module) ----
 
+    def _refresh_java_runtimes_async(self) -> None:
+        self.java_status_label.configure(text="Scanning installed Java runtimes…", text_color=t.MUTED)
+        self.java_required_label.configure(text="Required: Java —")
+        def work():
+            runtimes = discover_java_runtimes()
+            self.after(0, lambda: self._finish_java_runtimes(runtimes))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _finish_java_runtimes(self, runtimes) -> None:
+        self._java_runtimes = runtimes
+        srv = self._current_server()
+        mc_version = str((srv or {}).get("config", {}).get("minecraft_version", ""))
+        required, status = compatibility_text(mc_version, runtimes) if mc_version else (None, "Select a Minecraft version")
+        self._java_required_major = required or 21
+        self.java_required_label.configure(text=f"Required: Java {required}" if required else "Required: Java —", text_color=t.TEXT)
+        self.java_status_label.configure(text=status, text_color=t.SUCCESS if "✓" in status else t.DANGER if "✗" in status else t.MUTED)
+        values = ["Automatic"]
+        for r in runtimes:
+            values.append(f"Java {r.major} — {r.version} — {r.path}")
+        self.java_runtime_menu.configure(values=values)
+        cfg = (srv or {}).setdefault("config", {}) if srv else {}
+        current_path = str(cfg.get("java_path", "java"))
+        selected = "Automatic"
+        if current_path not in ("", "java", "auto"):
+            match = next((r for r in runtimes if Path(r.path).resolve() == Path(current_path).resolve()), None)
+            if match:
+                selected = next((v for v in values if v.endswith(f"— {match.path}")), values[0])
+        elif required:
+            match = recommended_runtime(mc_version, runtimes)
+            if match:
+                self._java_auto_path = match.path
+        self.java_runtime_menu.set(selected)
+        self._update_java_selection(cfg if srv else None)
+
+    def _on_java_runtime_selected(self, value: str) -> None:
+        srv = self._current_server()
+        if not srv:
+            return
+        cfg = srv.setdefault("config", {})
+        if value == "Automatic":
+            cfg["java_path"] = "java"
+            self._update_java_selection(cfg)
+        else:
+            marker = " — "
+            path = value.rsplit(marker, 1)[-1] if marker in value else "java"
+            cfg["java_path"] = path
+            self.java_path.set(path)
+            self._persist()
+            self._check_java_async()
+
+    def _update_java_selection(self, cfg: dict | None) -> None:
+        srv = self._current_server()
+        if not srv:
+            return
+        mc_version = str(cfg.get("minecraft_version", "")) if cfg else ""
+        match = recommended_runtime(mc_version, self._java_runtimes) if mc_version else None
+        if match:
+            self._java_auto_path = match.path
+            self.java_path.set(match.path)
+            self.java_status_label.configure(text=f"✓ Java {match.major} installed — {match.version}", text_color=t.SUCCESS)
+        else:
+            self.java_path.set(str(cfg.get("java_path", "java")) if cfg else "java")
+        self._persist()
+
     def _check_java_async(self) -> None:
-        self.java_status_label.configure(text="Checking…")
+        self._refresh_java_runtimes_async()
+
+    def _java_package_id(self, major: int) -> str:
+        # Microsoft Build of OpenJDK only publishes 11, 17, 21, 25+ — there
+        # is no "Microsoft.OpenJDK.8" package, so requesting it for Java 8
+        # (which many legacy/1.16.5-and-earlier Forge modpacks require)
+        # silently fails. Eclipse Temurin publishes a proper Java 8 build
+        # on WinGet, so use that specifically for major 8 and keep
+        # Microsoft's builds for everything newer where they do exist.
+        if int(major) == 8:
+            return "EclipseAdoptium.Temurin.8.JDK"
+        return f"Microsoft.OpenJDK.{int(major)}"
+
+    def _install_required_java_async(self, required: int | None = None, on_done=None) -> None:
+        srv = self._current_server()
+        if required is None:
+            mc_version = str((srv or {}).get("config", {}).get("minecraft_version", ""))
+            required = required_java_major(mc_version) if mc_version else None
+        if not required:
+            self.java_status_label.configure(text="Select a Minecraft version first", text_color=t.MUTED)
+            return
+        if any(r.major == required for r in self._java_runtimes):
+            self._refresh_java_runtimes_async()
+            if on_done:
+                self.after(100, on_done)
+            return
+
+        import shutil as _shutil
+        winget = _shutil.which("winget")
+        if not winget:
+            self.java_status_label.configure(text="✗ WinGet is not installed", text_color=t.DANGER)
+            self._append_console_line("[Manager] WinGet is required to automatically install Java. Install App Installer/WinGet from Microsoft, then refresh Java.")
+            return
+
+        package_id = self._java_package_id(required)
+        self.java_status_label.configure(text=f"Downloading and installing Java {required}…", text_color=t.ACCENT)
+        self._append_console_line(f"[Manager] Installing {package_id} (64-bit) automatically…")
 
         def work():
-            found, version = mc.check_java(self.java_path.get())
-            self.after(0, lambda: self.java_status_label.configure(
-                text=f"Found — {version}" if found else "Not found — install Java 21+",
-                text_color=t.SUCCESS if found else t.DANGER,
-            ))
+            try:
+                # --architecture x64 pins this to a 64-bit build explicitly —
+                # without it WinGet can still resolve to an x86 package on
+                # some systems/sources, which is exactly the "32-bit JVM
+                # clamps your heap to 1024 MB" problem this is meant to avoid.
+                cmd = [winget, "install", "--id", package_id, "--exact", "--architecture", "x64",
+                       "--accept-source-agreements", "--accept-package-agreements", "--disable-interactivity"]
+                proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=900,
+                                      creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                output = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+                success = proc.returncode == 0
+            except Exception as exc:
+                output = str(exc)
+                success = False
+            self.after(0, lambda: self._finish_java_install(required, success, output, on_done))
         threading.Thread(target=work, daemon=True).start()
+
+    def _finish_java_install(self, required: int, success: bool, output: str, on_done=None) -> None:
+        if success:
+            self._append_console_line(f"[Manager] Java {required} installation command completed. Rescanning installed runtimes…")
+            # Give the MSI/WinGet registration a moment to settle before discovery.
+            def rescan():
+                import time
+                time.sleep(2)
+                runtimes = discover_java_runtimes()
+                self.after(0, lambda: self._finish_java_install_rescan(required, runtimes, on_done))
+            threading.Thread(target=rescan, daemon=True).start()
+        else:
+            self.java_status_label.configure(text=f"✗ Java {required} installation failed", text_color=t.DANGER)
+            tail = output[-1200:] if output else "No installer output."
+            self._append_console_line(f"[Manager] Java {required} installation failed:\n{tail}")
+
+    def _finish_java_install_rescan(self, required: int, runtimes, on_done=None) -> None:
+        self._finish_java_runtimes(runtimes)
+        match = next((r for r in runtimes if r.major == required), None)
+        if match:
+            self.java_status_label.configure(text=f"✓ Java {required} installed — {match.version}", text_color=t.SUCCESS)
+            self._append_console_line(f"[Manager] Java {required} detected: {match.path}")
+            if on_done:
+                self.after(100, on_done)
+        else:
+            self.java_status_label.configure(text=f"✗ Java {required} was not detected after installation", text_color=t.DANGER)
+            self._append_console_line(f"[Manager] Java {required} installation finished, but no Java {required} executable was detected. Click Refresh Java and check the installation.")
 
     def _load_mc_versions_async(self) -> None:
         if self._mc_versions_loading:
@@ -2177,6 +3582,8 @@ class GameServerManagerModule(GameServerFeaturesMixin, ctk.CTkFrame):
         self._mc_versions = versions
         self.config_status.configure(text=f"Loaded {len(versions)} versions.", text_color=t.MUTED)
         self._populate_mc_version_menu()
+        if hasattr(self, "modpack_version_menu"):
+            self._load_modpack_versions()
         if self._pending_mc_download:
             self._pending_mc_download = False
             if self._eula_var.get():
@@ -2187,15 +3594,131 @@ class GameServerManagerModule(GameServerFeaturesMixin, ctk.CTkFrame):
         filtered = [v for v in self._mc_versions if show or v.type == "release"]
         ids = [v.id for v in filtered] or ["(load versions first)"]
         self.version_menu.configure(values=ids)
-        self.version_menu.set(ids[0])
-        self._on_mc_version_selected(ids[0])
+
+        # Never overwrite an already-installed/configured version just because
+        # Mojang's list was refreshed. This is especially important after a
+        # modpack install: SkyFactory 4 is 1.12.2 even though the newest
+        # Minecraft release may be much newer.
+        srv = self._current_server()
+        cfg_version = str((srv or {}).get("config", {}).get("minecraft_version", "")).strip()
+        selected = cfg_version if cfg_version in ids else ids[0]
+        self.version_menu.set(selected)
+        self._mc_selected_version = next(
+            (v for v in self._mc_versions if v.id == selected), None
+        )
+
+    def _check_installed_mc_version(self) -> None:
+        srv = self._current_server()
+        if not srv or srv.get("game_type") != "minecraft_java":
+            return
+        cfg = srv.setdefault("config", {})
+        detected = detect_minecraft_version(self._server_dir(srv))
+        expected = str(cfg.get("minecraft_version") or cfg.get("installed_version") or "").strip()
+        from datetime import datetime
+        cfg["config_version"] = 2
+        cfg["verified_version"] = detected or ""
+        cfg["version_checked_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+        if not detected:
+            cfg["version_status"] = "unknown"
+            self.mc_version_status_label.configure(text="Installed: Unknown", text_color=t.MUTED)
+            self.config_status.configure(text="Couldn't detect the installed Minecraft version. Start the server once, then check again.", text_color=t.MUTED)
+        elif expected and detected != expected:
+            cfg["version_status"] = "mismatch"
+            self.mc_version_status_label.configure(text=f"Installed: {detected} ⚠ expected {expected}", text_color=t.DANGER)
+            self.config_status.configure(text=f"Version mismatch: folder reports Minecraft {detected}, but config expects {expected}.", text_color=t.DANGER)
+        else:
+            cfg["version_status"] = "match"
+            self.mc_version_status_label.configure(text=f"Installed: {detected} ✓", text_color=t.SUCCESS)
+            self.config_status.configure(text=f"Minecraft {detected} verified in this server folder.", text_color=t.SUCCESS)
+        self._persist()
+        self._refresh_overview()
 
     def _on_mc_version_selected(self, version_id: str) -> None:
         if version_id == "(load versions first)":
             self._mc_selected_version = None
             return
         self._mc_selected_version = next((v for v in self._mc_versions if v.id == version_id), None)
+        srv = self._current_server()
+        if srv and self._mc_selected_version:
+            cfg = srv.setdefault("config", {})
+            cfg["minecraft_version"] = self._mc_selected_version.id
+            cfg["config_version"] = 2
+            if cfg.get("installed_version") and cfg.get("installed_version") != self._mc_selected_version.id:
+                cfg["version_status"] = "mismatch"
+            self._persist()
+            self._refresh_java_runtimes_async()
+            self._load_mc_loader_versions_async(srv["config"].get("loader", "vanilla"))
 
+    def _on_mc_loader_selected(self, value: str) -> None:
+        srv = self._current_server()
+        loader = next((k for k in loader_choices() if loader_name(k) == value), "vanilla")
+        if srv:
+            cfg = srv.setdefault("config", {})
+            cfg["loader"] = loader
+            cfg["loader_version"] = ""
+            self._persist()
+        self._mc_selected_loader_version = ""
+        self._load_mc_loader_versions_async(loader)
+
+    def _on_mc_loader_version_selected(self, value: str) -> None:
+        if value in {"Vanilla", "(select Minecraft first)", "(loading…)", "(unavailable)", "(none available)"}:
+            self._mc_selected_loader_version = ""
+            return
+        self._mc_selected_loader_version = value.split(" (", 1)[0]
+        srv = self._current_server()
+        if srv:
+            srv.setdefault("config", {})["loader_version"] = self._mc_selected_loader_version
+            self._persist()
+
+    def _load_mc_loader_versions_async(self, loader: str | None = None) -> None:
+        srv = self._current_server()
+        if not srv or srv.get("game_type") != "minecraft_java":
+            return
+        cfg = srv.setdefault("config", {})
+        loader = loader or str(cfg.get("loader", "vanilla"))
+        mc_version = str(cfg.get("minecraft_version") or (self._mc_selected_version.id if self._mc_selected_version else ""))
+        if loader == "vanilla":
+            self._mc_loader_versions = []
+            self.loader_version_menu.configure(values=["Vanilla"])
+            self.loader_version_menu.set("Vanilla")
+            self._mc_selected_loader_version = ""
+            return
+        if not mc_version:
+            self.loader_version_menu.configure(values=["(select Minecraft first)"])
+            self.loader_version_menu.set("(select Minecraft first)")
+            return
+        if self._mc_loader_versions_loading:
+            return
+        self._mc_loader_versions_loading = True
+        self.loader_version_menu.configure(values=["(loading…)"])
+        self.loader_version_menu.set("(loading…)")
+        def work():
+            versions, error = get_loader_versions(loader, mc_version)
+            self.after(0, lambda: self._finish_mc_loader_versions(loader, versions, error))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _finish_mc_loader_versions(self, loader: str, versions: list, error: str) -> None:
+        self._mc_loader_versions_loading = False
+        if error:
+            self.loader_version_menu.configure(values=["(unavailable)"])
+            self.loader_version_menu.set("(unavailable)")
+            self.config_status.configure(text=error, text_color=t.DANGER)
+            return
+        self._mc_loader_versions = versions
+        values = [v.label for v in versions] or ["(none available)"]
+        self.loader_version_menu.configure(values=values)
+        wanted = self._mc_selected_loader_version or ""
+        # Preserve the configured loader version when the version list is
+        # refreshed. Do not silently replace an installed modpack's Forge
+        # version with the newest Forge release for that Minecraft version.
+        selected = next((v.label for v in versions if v.id == wanted), values[0])
+        self.loader_version_menu.set(selected)
+        if versions:
+            self._mc_selected_loader_version = next(v.id for v in versions if v.label == selected)
+            srv = self._current_server()
+            if srv and loader != "vanilla":
+                srv.setdefault("config", {})["loader_version"] = self._mc_selected_loader_version
+                self._persist()
     def _on_bedrock_channel_selected(self, value: str) -> None:
         srv = self._current_server()
         if srv:
@@ -2231,10 +3754,35 @@ class GameServerManagerModule(GameServerFeaturesMixin, ctk.CTkFrame):
                 self.config_status.configure(text="Load and pick a version first.")
                 self.download_btn.configure(state="normal")
                 return
-            worker = create_minecraft_java_install_worker(dest, self._mc_selected_version)
-            self._download_meta = {"game": "java", "version": self._mc_selected_version.id}
+            cfg = srv.setdefault("config", {})
+            loader = str(cfg.get("loader", "vanilla"))
+            loader_version = str(cfg.get("loader_version", ""))
+            if loader != "vanilla" and not loader_version:
+                self.config_status.configure(text="Select a loader version first.", text_color=t.DANGER)
+                self.download_btn.configure(state="normal")
+                return
+            cfg["minecraft_version"] = self._mc_selected_version.id
+            required_java = required_java_major(self._mc_selected_version.id)
+            java_match = recommended_runtime(self._mc_selected_version.id, self._java_runtimes)
+            if not java_match:
+                self.config_status.configure(
+                    text=f"Java {required_java} is required. Installing it automatically…",
+                    text_color=t.ACCENT,
+                )
+                self.download_btn.configure(state="disabled")
+                def resume_install():
+                    # Re-run the install flow after Java is detected.
+                    self._start_mc_download()
+                self._install_required_java_async(required_java, resume_install)
+                return
+            self.java_path.set(java_match.path)
+            worker = create_minecraft_loader_install_worker(
+                dest, loader, self._mc_selected_version.id, loader_version,
+                java_path=self.java_path.get(), min_mb=self._mem_mb(self.min_mb, 1024), max_mb=self._mem_mb(self.max_mb, 2048),
+            )
+            self._download_meta = {"game": "java", "version": self._mc_selected_version.id, "loader": loader, "loader_version": loader_version}
             self._append_console_line(
-                f"[Manager] Downloading Minecraft {self._mc_selected_version.id} to {dest}…",
+                f"[Manager] Installing Minecraft {self._mc_selected_version.id} with {loader_name(loader)} to {dest}…",
             )
 
         worker.start()
@@ -2303,6 +3851,9 @@ class GameServerManagerModule(GameServerFeaturesMixin, ctk.CTkFrame):
             game = self._download_meta.get("game", "java")
             btn = self.steam_install_btn if game == "steam" else self.download_btn
             btn.configure(state="normal")
+            if game == "modpack":
+                self.modpack_status.configure(text="Install finished unexpectedly — check Console for details.", text_color=t.ACCENT)
+                return
             self.config_status.configure(
                 text="Install finished unexpectedly — check Console for details.",
                 text_color=t.ACCENT,
@@ -2341,7 +3892,14 @@ class GameServerManagerModule(GameServerFeaturesMixin, ctk.CTkFrame):
         if event.kind == "progress":
             self._apply_download_progress(progress, event)
             status = self._steam_progress_status(event) if game == "steam" else ""
-            if game == "steam":
+            if game == "modpack":
+                if event.message:
+                    self.modpack_status.configure(text=event.message, text_color=t.MUTED)
+                elif event.total:
+                    self.modpack_status.configure(text=f"Installing modpack… {event.downloaded / event.total * 100:.0f}%", text_color=t.MUTED)
+            if game == "modpack":
+                pass
+            elif game == "steam":
                 self.config_status.configure(text=status, text_color=t.MUTED)
                 last = self._download_meta.get("last_status", "")
                 if status and status != last:
@@ -2368,9 +3926,142 @@ class GameServerManagerModule(GameServerFeaturesMixin, ctk.CTkFrame):
                     text=f"Downloading… {_human_size(event.downloaded)}",
                     text_color=t.MUTED,
                 )
+        elif event.kind == "error":
+            btn.configure(state="normal")
+            if game == "modpack":
+                self.modpack_status.configure(text=event.message or "Modpack installation failed.", text_color=t.DANGER)
+                srv = self._current_server()
+                profile_id = str(self._download_meta.get("profile_id") or "")
+                if srv and profile_id:
+                    previous = str(self._download_meta.get("previous_profile_id") or "")
+                    self._remove_modpack_profile(srv, profile_id)
+                    if previous:
+                        self._activate_modpack_profile(srv, previous)
+                    self._refresh_modpacks_tab()
+            else:
+                self.config_status.configure(text=event.message or "Installation failed.", text_color=t.DANGER)
+            self._append_console_line(f"[Install] ERROR: {event.message or 'Installation failed.'}")
         elif event.kind == "done":
             srv = self._current_server()
             dest = self._server_dir(srv) if srv else Path(".")
+            if game == "modpack":
+                if self._download_meta.get("loader_repair"):
+                    if not getattr(worker, "loader", ""):
+                        btn.configure(state="normal")
+                        self.modpack_status.configure(text=event.message or "Loader repair failed.", text_color=t.DANGER)
+                        self._download_worker = None
+                        return
+                    cfg = srv.setdefault("config", {}) if srv else {}
+                    profile_id = str(self._download_meta.get("profile_id") or "")
+                    profile = self._modpack_profiles(srv).get(profile_id) if srv and profile_id else None
+                    if profile is not None:
+                        profile.update({
+                            "provider": "curseforge",
+                            "name": getattr(worker, "modpack_name", label if 'label' in locals() else profile.get("name", "Modpack")),
+                            "minecraft_version": getattr(worker, "minecraft_version", ""),
+                            "installed_version": getattr(worker, "minecraft_version", ""),
+                            "loader": getattr(worker, "loader", ""),
+                            "loader_version": getattr(worker, "loader_version", ""),
+                            "java_path": getattr(worker, "java_path", ""),
+                        })
+                    if profile_id:
+                        self._activate_modpack_profile(srv, profile_id)
+                    cfg["loader"] = getattr(worker, "loader", "")
+                    cfg["loader_version"] = getattr(worker, "loader_version", "")
+                    if getattr(worker, "minecraft_version", ""):
+                        cfg["minecraft_version"] = worker.minecraft_version
+                        cfg["installed_version"] = worker.minecraft_version
+                    if getattr(worker, "java_path", ""):
+                        cfg["java_path"] = worker.java_path
+                        self.java_path.set(worker.java_path)
+                    self._persist()
+                    btn.configure(state="normal")
+                    self.modpack_status.configure(text=event.message or "Loader repaired successfully.", text_color=t.SUCCESS)
+                    self._download_worker = None
+                    self._refresh_modpacks_tab()
+                    self._refresh_config_tab()
+                    self._refresh_overview()
+                    self._refresh_mods()
+                    return
+                # A modpack with no detected loader is not a usable install —
+                # it previously fell through here silently, leaving whatever
+                # stale/default "loader" value (usually "vanilla") the server
+                # config already had, while still showing the modpack as
+                # successfully "Loaded". Treat a missing loader as a failure
+                # instead so this can't happen again.
+                if not getattr(worker, "loader", ""):
+                    btn.configure(state="normal")
+                    self.modpack_status.configure(
+                        text="Modpack installed, but no Forge/NeoForge/Fabric/Quilt loader "
+                             "was detected — treating this as a failed install.",
+                        text_color=t.DANGER,
+                    )
+                    profile_id = str(self._download_meta.get("profile_id") or "")
+                    if srv and profile_id:
+                        previous = str(self._download_meta.get("previous_profile_id") or "")
+                        self._remove_modpack_profile(srv, profile_id)
+                        if previous:
+                            self._activate_modpack_profile(srv, previous)
+                        self._refresh_modpacks_tab()
+                    self._download_worker = None
+                    return
+                mc.write_eula(dest)
+                cfg = srv.setdefault("config", {}) if srv else {}
+                cfg["modpack_provider"] = "curseforge"
+                cfg["modpack_name"] = getattr(worker, "modpack_name", self._download_meta.get("project_name", "Modpack"))
+                cfg["modpack_project_id"] = getattr(worker, "project_id", self._download_meta.get("project_id", 0))
+                cfg["modpack_file_id"] = getattr(worker, "file_id", self._download_meta.get("file_id", 0))
+                if getattr(worker, "minecraft_version", ""):
+                    cfg["minecraft_version"] = worker.minecraft_version
+                    cfg["installed_version"] = worker.minecraft_version
+                cfg["loader"] = worker.loader
+                cfg["loader_version"] = getattr(worker, "loader_version", "")
+                # The modpack installer may have selected a different Java
+                # runtime from the normal server setting. Persist that exact
+                # executable for this server so legacy Forge (1.12.x) is not
+                # accidentally launched with Java 17+.
+                pack_java = str(getattr(worker, "java_path", "") or "")
+                if pack_java:
+                    cfg["java_path"] = pack_java
+                    self.java_path.set(pack_java)
+
+                # Mirror the resolved fields onto this modpack's own profile
+                # record too, so switching to another profile and back
+                # restores them (not just the flat cfg fields above).
+                profile_id = str(self._download_meta.get("profile_id") or "")
+                if srv and profile_id:
+                    profile = self._modpack_profiles(srv).setdefault(profile_id, {})
+                    profile.update({
+                        "provider": cfg.get("modpack_provider", "curseforge"),
+                        "name": cfg.get("modpack_name", profile.get("name", "Modpack")),
+                        "project_id": cfg.get("modpack_project_id", 0),
+                        "file_id": cfg.get("modpack_file_id", 0),
+                        "minecraft_version": cfg.get("minecraft_version", ""),
+                        "installed_version": cfg.get("installed_version", ""),
+                        "loader": cfg.get("loader", ""),
+                        "loader_version": cfg.get("loader_version", ""),
+                        "java_path": cfg.get("java_path", ""),
+                    })
+                self._persist()
+
+                # Keep the Config tab's in-memory selections synchronized with
+                # the modpack that was just installed. _refresh_config_tab()
+                # will now preserve cfg["minecraft_version"] instead of
+                # selecting the newest Mojang release.
+                if cfg.get("minecraft_version"):
+                    self._mc_selected_version = next(
+                        (v for v in self._mc_versions if v.id == str(cfg["minecraft_version"])),
+                        self._mc_selected_version,
+                    )
+                self._mc_selected_loader_version = str(cfg.get("loader_version", "") or "")
+                progress.set(1)
+                self.modpack_status.configure(text=f"{event.message} EULA recorded.", text_color=t.SUCCESS)
+                self._append_console_line(f"[Modpack] {event.message}")
+                self._download_worker = None
+                self._refresh_overview()
+                self._refresh_config_tab()
+                self._refresh_mods()
+                return
             if game == "bedrock":
                 mc.write_bedrock_eula_ack(dest)
                 mc.ensure_bedrock_server_properties(dest)
@@ -2378,10 +4069,20 @@ class GameServerManagerModule(GameServerFeaturesMixin, ctk.CTkFrame):
             elif game == "java":
                 mc.write_eula(dest)
                 version = self._download_meta.get("version", "")
+                loader = self._download_meta.get("loader", "vanilla")
+                loader_version = self._download_meta.get("loader_version", "")
             else:
                 version = ""
             if srv and version:
-                srv.setdefault("config", {})["installed_version"] = version
+                cfg = srv.setdefault("config", {})
+                cfg["installed_version"] = version
+                cfg["config_version"] = 2
+                cfg["verified_version"] = version
+                cfg["version_status"] = "match" if cfg.get("minecraft_version", version) == version else "mismatch"
+                cfg["version_checked_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+                if game == "java":
+                    cfg["loader"] = self._download_meta.get("loader", "vanilla")
+                    cfg["loader_version"] = self._download_meta.get("loader_version", "")
                 self._persist()
             progress.set(1)
             btn.configure(state="normal")
@@ -2572,9 +4273,19 @@ class GameServerManagerModule(GameServerFeaturesMixin, ctk.CTkFrame):
     def _build_start_config(self, srv: dict, adapter) -> dict:
         cfg = dict(srv.get("config", {}))
         if adapter.game_type == "minecraft_java":
-            cfg.setdefault("min_mb", self.min_mb.get() if hasattr(self, "min_mb") else 1024)
-            cfg.setdefault("max_mb", self.max_mb.get() if hasattr(self, "max_mb") else 2048)
+            cfg.setdefault("min_mb", self._mem_mb(self.min_mb, 1024) if hasattr(self, "min_mb") else 1024)
+            cfg.setdefault("max_mb", self._mem_mb(self.max_mb, 2048) if hasattr(self, "max_mb") else 2048)
             cfg.setdefault("java_path", self.java_path.get() if hasattr(self, "java_path") else "java")
+            mc_version = str(cfg.get("minecraft_version", ""))
+            if mc_version and str(cfg.get("java_path", "java")) in ("", "java", "auto"):
+                match = recommended_runtime(mc_version, self._java_runtimes)
+                if match:
+                    cfg["java_path"] = match.path
+            if mc_version:
+                required = required_java_major(mc_version)
+                ok = any(r.major == required and Path(r.path).resolve() == Path(str(cfg.get("java_path", "java"))).resolve() for r in self._java_runtimes)
+                if not ok and str(cfg.get("java_path", "java")) in ("", "java", "auto"):
+                    return cfg
         return cfg
 
     def _start_server(self) -> None:
@@ -2589,6 +4300,34 @@ class GameServerManagerModule(GameServerFeaturesMixin, ctk.CTkFrame):
             self._sync_terraria_mode_from_folder(srv)
             self._warn_terraria_mixed_folder(srv, force=True)
         config = self._build_start_config(srv, adapter)
+        if adapter.game_type == "minecraft_java":
+            mc_version = str(config.get("minecraft_version", ""))
+            if mc_version:
+                required = required_java_major(mc_version)
+                java_path = str(config.get("java_path", "java"))
+                ok = False
+                selected_major = None
+                for runtime in self._java_runtimes:
+                    try:
+                        same_path = Path(runtime.path).resolve() == Path(java_path).resolve()
+                    except OSError:
+                        same_path = runtime.path.lower() == java_path.lower()
+                    if same_path:
+                        selected_major = runtime.major
+                        ok = runtime.major == required
+                        break
+                if not ok:
+                    detail = f"Minecraft {mc_version} requires Java {required}."
+                    if selected_major is not None:
+                        detail += f" Selected Java is {selected_major}."
+                    else:
+                        detail += " The required Java runtime is not installed/detected."
+                    self._append_console_line(f"[Manager] {detail}")
+                    if selected_major is None:
+                        self._install_required_java_async(required, lambda: self._start_server())
+                    else:
+                        self._refresh_java_runtimes_async()
+                    return
         error = proc.start(self._server_dir(srv), config, adapter)
         if error:
             self._append_console_line(f"[Manager] {error}")

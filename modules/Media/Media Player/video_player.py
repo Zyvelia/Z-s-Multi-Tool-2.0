@@ -8,7 +8,6 @@
 import os
 import random
 import sys
-import threading
 import time
 import urllib.parse
 
@@ -415,14 +414,6 @@ class VideoPlayerPage(ctk.CTkFrame):
         )
         self.url_btn.pack(side="left", fill="x", expand=True, padx=(0, 6))
 
-        stream_kw = cool_button_kwargs()
-        stream_kw["font"] = ("Segoe UI", 13, "bold")
-        self.find_stream_btn = ctk.CTkButton(
-            self.load_row, text="🕵  Find Stream", command=self.find_stream_url,
-            **stream_kw,
-        )
-        self.find_stream_btn.pack(side="left", fill="x", expand=True)
-
     def _build_volume(self):
         self.volume_frame = ctk.CTkFrame(
             self, fg_color=theme.PANEL, corner_radius=10,
@@ -503,68 +494,6 @@ class VideoPlayerPage(ctk.CTkFrame):
         self._refresh_playlist_count()
         self.status.configure(text="🔗 Added URL to playlist", text_color=theme.TEXT)
 
-    def find_stream_url(self):
-        """Prompts for a *page* URL (a stream site, an embed page — not
-        necessarily a direct media link), scans it headlessly with
-        Playwright for the first .m3u8 HLS manifest it requests over the
-        network, and adds that manifest URL to the playlist exactly like
-        add_url() does. No assumptions are made about the page's
-        structure; this works purely off network interception, so it
-        should hold up across different sites/players.
-
-        Requires Playwright + Chromium:
-            pip install playwright
-            playwright install chromium
-        """
-        dialog = ctk.CTkInputDialog(
-            text="Paste a page URL to scan for an HLS (.m3u8) stream:",
-            title="Find Stream",
-        )
-        raw = dialog.get_input()
-        if raw is None:
-            return
-        page_url = raw.strip()
-        if not page_url:
-            return
-
-        if not _is_url(page_url):
-            self.status.configure(
-                text="⚠ That doesn't look like a valid http(s) URL", text_color=theme.MUTED)
-            return
-
-        self.status.configure(text="🕵 Scanning page for stream…", text_color=theme.MUTED)
-        self.url_btn.configure(state="disabled")
-        self.find_stream_btn.configure(state="disabled")
-
-        def worker():
-            stream_url = None
-            error = None
-            try:
-                from .stream_finder import find_m3u8_sync
-                stream_url = find_m3u8_sync(page_url, timeout=30.0)
-            except Exception as exc:
-                error = str(exc)
-
-            def apply():
-                if self.winfo_exists():
-                    self.url_btn.configure(state="normal")
-                    self.find_stream_btn.configure(state="normal")
-
-                if not self.winfo_exists():
-                    return
-
-                if stream_url:
-                    index = self.engine.add_track(stream_url)
-                    self.song_names.append(_url_display_name(page_url))
-                    self._build_track_row(index, self.song_names[index])
-                    self._refresh_playlist_count()
-                    self.status.configure(text="🎯 Stream found and added", text_color=theme.ACCENT)
-                else:
-                    self.status.configure(text=f"⚠ {error}", text_color=theme.MUTED)
-
-            self.after(0, apply)
-
-        threading.Thread(target=worker, daemon=True).start()
 
     def _build_track_row(self, index, name):
         row = ctk.CTkFrame(

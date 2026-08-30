@@ -419,8 +419,11 @@ class GameServerFeaturesMixin:
     # ------------------------------------------------------------------ auto-start
 
     def _auto_start_servers(self) -> None:
+        # Auto-start is opt-in. Require an explicit confirmation marker so
+        # old/stale `auto_start` values cannot unexpectedly launch a server.
         for srv in self.servers:
-            if srv.get("config", {}).get("auto_start"):
+            cfg = srv.get("config", {})
+            if cfg.get("auto_start") is True and cfg.get("auto_start_confirmed") is True:
                 self._start_server_record(srv)
 
     def _start_server_record(self, srv: dict) -> None:
@@ -440,7 +443,10 @@ class GameServerFeaturesMixin:
         if not srv:
             return
         cfg = srv.setdefault("config", {})
-        cfg["auto_start"] = self.auto_start_var.get()
+        enabled = bool(self.auto_start_var.get())
+        cfg["auto_start"] = enabled
+        # Record that the user explicitly opted in during this version.
+        cfg["auto_start_confirmed"] = enabled
         self._persist()
 
     # ------------------------------------------------------------------ scheduled backups

@@ -103,12 +103,17 @@ Filename: "{tmp}\MicrosoftEdgeWebview2Setup.exe"; Parameters: "/silent /install"
 ; Type: filesandordirs; Name: "{userappdata}\ZsMultiTool"
 
 [Code]
+
+function SendMessageTimeout(hWnd, Msg, wParam, lParam, fuFlags, uTimeout: Integer; var lpdwResult: Integer): Integer; external 'SendMessageTimeoutW@user32.dll stdcall';
+
 var
-  DownloadedNpcap, DownloadedNmap, DownloadedWebView2: Boolean;
+  DownloadedNpcap, DownloadedNmap, DownloadedWebView2, DownloadedYtDlp: Boolean;
 
 const
   WebView2ClientGuid = '{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}';
   WebView2BootstrapperUrl = 'https://go.microsoft.com/fwlink/p/?LinkId=2124703';
+  YtDlpUrl = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe';
+  FfmpegUrl = 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip';
 
 procedure InitializeWizard;
 begin
@@ -181,6 +186,135 @@ begin
     DownloadedWebView2 := True
   else
     Log('WebView2 bootstrapper download failed, ResultCode=' + IntToStr(ResultCode));
+end;
+
+procedure AddToSystemPath(const NewPath: String);
+var
+  PathValue: String;
+  BroadcastResult: Integer;
+begin
+  PathValue := '';
+  if not RegQueryStringValue(HKLM,
+       'SYSTEM\CurrentControlSet\Control\Session Manager\Environment',
+       'Path', PathValue) then
+  begin
+    Log('Could not read the system PATH.');
+    Exit;
+  end;
+
+  if Pos(';' + LowerCase(NewPath) + ';', ';' + LowerCase(PathValue) + ';') = 0 then
+  begin
+    if (PathValue <> '') and (PathValue[Length(PathValue)] <> ';') then
+      PathValue := PathValue + ';';
+    if RegWriteStringValue(HKLM,
+         'SYSTEM\CurrentControlSet\Control\Session Manager\Environment',
+         'Path', PathValue + NewPath) then
+    begin
+      BroadcastResult := 0;
+      SendMessageTimeout($FFFF, $001A, 0, 0, $0002, 5000, BroadcastResult);
+      Log('Added to system PATH: ' + NewPath);
+    end
+    else
+      Log('Could not update system PATH with: ' + NewPath);
+  end
+  else
+    Log('Already in system PATH: ' + NewPath);
+end;
+
+procedure DownloadFfmpeg();
+var
+  CurlExe, PowerShellExe, ZipFile, ExtractDir, TargetDir, BinDir: String;
+  ResultCode: Integer;
+begin
+  TargetDir := ExpandConstant('{app}\tools\ffmpeg');
+  BinDir := TargetDir + '\bin';
+  if FileExists(BinDir + '\ffmpeg.exe') then
+  begin
+    AddToSystemPath(BinDir);
+    Exit;
+  end;
+
+  CurlExe := ExpandConstant('{sys}\curl.exe');
+  PowerShellExe := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
+  if (not FileExists(CurlExe)) or (not FileExists(PowerShellExe)) then
+  begin
+    Log('DownloadFfmpeg: curl.exe or PowerShell not found.');
+    Exit;
+  end;
+
+  ForceDirectories(TargetDir);
+  ZipFile := ExpandConstant('{tmp}\ffmpeg-release-essentials.zip');
+  ExtractDir := ExpandConstant('{tmp}\ffmpeg_extract');
+
+  if not (RunHidden(CurlExe,
+       '-L --fail -o "' + ZipFile + '" "' + FfmpegUrl + '"',
+       ExpandConstant('{tmp}'), ResultCode) and (ResultCode = 0) and FileExists(ZipFile)) then
+  begin
+    Log('DownloadFfmpeg: download failed, ResultCode=' + IntToStr(ResultCode));
+    Exit;
+  end;
+
+  if DirExists(ExtractDir) then
+    DelTree(ExtractDir, True, True, True);
+  ForceDirectories(ExtractDir);
+
+  if not (RunHidden(PowerShellExe,
+       '-NoProfile -ExecutionPolicy Bypass -Command "Expand-Archive -LiteralPath ''' + ZipFile + ''' -DestinationPath ''' + ExtractDir + ''' -Force"',
+       ExpandConstant('{tmp}'), ResultCode) and (ResultCode = 0)) then
+  begin
+    Log('DownloadFfmpeg: extraction failed, ResultCode=' + IntToStr(ResultCode));
+    Exit;
+  end;
+
+  if not Exec(PowerShellExe,
+       '-NoProfile -ExecutionPolicy Bypass -Command "$d=Get-ChildItem -LiteralPath ''' + ExtractDir + ''' -Directory | Select-Object -First 1; if ($null -eq $d) { exit 1 }; Copy-Item -LiteralPath ($d.FullName+''\bin'') -Destination ''' + TargetDir + ''' -Recurse -Force"',
+       ExpandConstant('{tmp}'), SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  begin
+    Log('DownloadFfmpeg: could not copy FFmpeg files.');
+    Exit;
+  end;
+
+  if FileExists(BinDir + '\ffmpeg.exe') then
+    AddToSystemPath(BinDir)
+  else
+    Log('DownloadFfmpeg: ffmpeg.exe was not found after extraction.');
+end;
+
+procedure DownloadYtDlp();
+var
+  CurlExe: String;
+  ResultCode: Integer;
+  TargetDir, TargetFile, TempFile: String;
+begin
+  DownloadedYtDlp := False;
+  TargetDir := ExpandConstant('{app}\tools');
+  TargetFile := TargetDir + '\yt-dlp.exe';
+  if FileExists(TargetFile) then
+    Exit;
+
+  CurlExe := ExpandConstant('{sys}\curl.exe');
+  if not FileExists(CurlExe) then
+  begin
+    Log('DownloadYtDlp: curl.exe not found, skipping yt-dlp auto-download.');
+    Exit;
+  end;
+
+  ForceDirectories(TargetDir);
+  TempFile := ExpandConstant('{tmp}\yt-dlp.exe');
+  if RunHidden(CurlExe,
+       '-L --fail -o "' + TempFile + '" "' + YtDlpUrl + '"',
+       ExpandConstant('{tmp}'), ResultCode) and (ResultCode = 0) and FileExists(TempFile) then
+  begin
+    if FileCopy(TempFile, TargetFile, False) then
+    begin
+      DownloadedYtDlp := True;
+      AddToSystemPath(TargetDir);
+    end
+    else
+      Log('DownloadYtDlp: could not copy yt-dlp.exe into ' + TargetDir);
+  end
+  else
+    Log('DownloadYtDlp: download failed, ResultCode=' + IntToStr(ResultCode));
 end;
 
 procedure DownloadNetTools();
@@ -312,6 +446,8 @@ begin
   if CurStep = ssPostInstall then
   begin
     DownloadNetTools();
+    DownloadYtDlp();
+    DownloadFfmpeg();
     ApplyRunAsAdminToShortcuts();
   end;
 end;

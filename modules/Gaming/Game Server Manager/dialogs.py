@@ -60,6 +60,86 @@ class FileEditorDialog(ctk.CTkToplevel):
         self.destroy()
 
 
+class MicrosoftSignInDialog(ctk.CTkToplevel):
+    """Walks the user through browser-based Microsoft sign-in and collects
+    the redirect URL they paste back afterward.
+
+    Set `self.result` to the pasted text on submit, or leave it None if the
+    user cancels/closes the window. The caller (running on a worker thread)
+    should show this via `master.after(0, ...)` and then `master.wait_window`
+    on it, waking up once `self.result` is available.
+    """
+
+    def __init__(self, master, auth_url: str):
+        super().__init__(master)
+        self.auth_url = auth_url
+        self.result: str | None = None
+
+        self.title("Sign in with Microsoft")
+        self.geometry("520x300")
+        self.minsize(480, 280)
+        self.transient(master.winfo_toplevel())
+        self.grab_set()
+
+        self.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            self,
+            text="A browser window has opened. Sign in with the Microsoft "
+                 "account that owns Minecraft: Java Edition.",
+            font=t.font(12), text_color=t.TEXT, wraplength=460, justify="left", anchor="w",
+        ).grid(row=0, column=0, sticky="ew", padx=16, pady=(16, 8))
+
+        ctk.CTkLabel(
+            self,
+            text="After signing in, the page will look like it failed to "
+                 "load — that's expected. Quickly select the address bar "
+                 "(click it, then Ctrl+A, Ctrl+C) and paste the FULL address "
+                 "below, then click Continue. Microsoft scrubs the token from "
+                 "the visible address after a moment, so grab it fast — if you "
+                 "see '?removed=true', sign in again.",
+            font=t.font(11), text_color=t.MUTED, wraplength=460, justify="left", anchor="w",
+        ).grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 12))
+
+        self.entry = ctk.CTkEntry(
+            self, fg_color=t.PANEL_2, border_color=t.BORDER,
+            placeholder_text="https://login.live.com/oauth20_desktop.srf#access_token=...",
+        )
+        self.entry.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 4))
+        self.entry.bind("<Return>", lambda _e: self._submit())
+        self.entry.focus_set()
+
+        self.error_label = ctk.CTkLabel(self, text="", font=t.font(10), text_color=t.DANGER, anchor="w")
+        self.error_label.grid(row=3, column=0, sticky="ew", padx=16, pady=(0, 8))
+
+        bar = ctk.CTkFrame(self, fg_color="transparent")
+        bar.grid(row=4, column=0, sticky="ew", padx=16, pady=(4, 16))
+        ctk.CTkButton(bar, text="Reopen browser", width=120, **t.secondary_button_style(),
+                      command=self._reopen_browser).pack(side="left")
+        ctk.CTkButton(bar, text="Cancel", width=90, **t.secondary_button_style(),
+                      command=self._cancel).pack(side="right")
+        ctk.CTkButton(bar, text="Continue", width=90, **t.primary_button_style(),
+                      command=self._submit).pack(side="right", padx=(0, 8))
+
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
+
+    def _reopen_browser(self) -> None:
+        import webbrowser
+        webbrowser.open(self.auth_url)
+
+    def _submit(self) -> None:
+        value = self.entry.get().strip()
+        if not value:
+            self.error_label.configure(text="Paste the address you were redirected to first.")
+            return
+        self.result = value
+        self.destroy()
+
+    def _cancel(self) -> None:
+        self.result = None
+        self.destroy()
+
+
 class PalworldSaveHintDialog(ctk.CTkToplevel):
     """One-time hint before saving Palworld server settings."""
 
