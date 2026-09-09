@@ -1,13 +1,8 @@
-from .ui import MangaDexPage
-from .mini_widget import build as build_mini_widget
-
-
 def register(manager):
     manager.register({
         "name": "MangaDex Reader",
         "category": "Media",
-        "desc": "Search, read, and download manga chapters from MangaDex (api.mangadex.org)",
+        "desc": "Search, read, and download MangaDex chapters. OCR + voice + translate on the page for untranslated scans.",
         "icon": "📖",
-        "page_class": MangaDexPage,
-        "widget": build_mini_widget,
+        "qt_page": "modules.Media.MangaDex Reader.ui:MangaDexPage",
     })

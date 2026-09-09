@@ -171,6 +171,74 @@ class LazyPlaylist:
         return song
 
 
+class FilteredPlaylist:
+    """Playlist over a SQL filter — never materializes every id."""
+
+    CHUNK = 256
+
+    def __init__(self, db, query="", artist=None, folder=None):
+        self.db = db
+        self.query = query or ""
+        self.artist = artist
+        self.folder = folder
+        self._len = db.browse_count(query=self.query, artist=artist, folder=folder)
+        self._rows = {}
+        self._lock = threading.Lock()
+
+    def __len__(self):
+        return self._len
+
+    def __bool__(self):
+        return self._len > 0
+
+    def index_of(self, song_id):
+        if song_id is None:
+            return -1
+        try:
+            return self.db.browse_index_of(
+                int(song_id), query=self.query,
+                artist=self.artist, folder=self.folder,
+            )
+        except Exception:
+            return -1
+
+    def _row(self, i):
+        if i < 0:
+            i += self._len
+        if i < 0 or i >= self._len:
+            raise IndexError(i)
+        with self._lock:
+            cached = self._rows.get(i)
+            if cached is not None:
+                return cached
+            start = (i // self.CHUNK) * self.CHUNK
+            chunk = self.db.browse_rows(
+                query=self.query, artist=self.artist, folder=self.folder,
+                offset=start, limit=self.CHUNK,
+            )
+            for j, row in enumerate(chunk):
+                self._rows[start + j] = row
+            if len(self._rows) > self.CHUNK * 12:
+                lo, hi = start - self.CHUNK, start + self.CHUNK * 2
+                self._rows = {k: v for k, v in self._rows.items() if lo <= k < hi}
+            row = self._rows.get(i)
+        if row is None:
+            raise IndexError(i)
+        return row
+
+    def __getitem__(self, i):
+        if isinstance(i, slice):
+            return [self[j] for j in range(*i.indices(len(self)))]
+        row = self._row(i)
+        return self.db.get_path(row["id"])
+
+    def id_at(self, i):
+        return self._row(i)["id"]
+
+    def meta_at(self, i):
+        return self._row(i)
+
+
 class VLCMusicEngine:
     """
     Music playback engine built on libVLC (via python-vlc), replacing the
@@ -216,16 +284,26 @@ class VLCMusicEngine:
         # Guards the Ended/Error poll below from firing more than once
         # per playback attempt (reset every time a new attempt starts).
         self._ended_handled = True
+        self._advance_requested = False
 
         # Background polling thread — mirrors the old engine's design so
         # behavior around the UI stays as close as possible to before.
         # libVLC's own State.Ended is reliable and immediate (no "busy
         # flag lagging by one poll" heuristics needed like SDL_mixer
         # required).
+        try:
+            ev = self.player.event_manager()
+            ev.event_attach(vlc.EventType.MediaPlayerEndReached, self._on_end_reached)
+        except Exception as e:
+            print(f"[VLC] EndReached event: {e}")
         self._monitor_thread = threading.Thread(target=self._monitor_loop,
                                                  daemon=True)
         self._monitor_thread.start()
         self._last_player_state = vlc.State.NothingSpecial
+
+    def _on_end_reached(self, _event):
+        # VLC callback — do not call play() here (deadlocks libVLC).
+        self._advance_requested = True
 
     # ── Private helpers ───────────────────────────────────────
 
@@ -243,9 +321,23 @@ class VLCMusicEngine:
                         and self._last_player_state != vlc.State.Playing):
                     self._apply_volume()
                 self._last_player_state = state
-                if state == vlc.State.Ended and not self._ended_handled:
+                if self._advance_requested and not self._ended_handled:
+                    self._ended_handled = True
+                    self._advance_requested = False
+                    print("[VLC] Track ended — next.")
+                    self.next()
+                elif state == vlc.State.Ended and not self._ended_handled:
                     self._ended_handled = True
                     print("[VLC] Track ended detected by poll.")
+                    self.next()
+                elif (
+                    state == vlc.State.Stopped
+                    and not self._ended_handled
+                    and self._loaded_index >= 0
+                    and self._near_end()
+                ):
+                    self._ended_handled = True
+                    print("[VLC] Track stopped at end — next.")
                     self.next()
                 elif state == vlc.State.Error and not self._ended_handled:
                     self._ended_handled = True
@@ -285,11 +377,20 @@ class VLCMusicEngine:
             if cue_end is not None:
                 media.add_option(f":stop-time={cue_end}")
 
+        self._advance_requested = False
         self._ended_handled = False
         self.player.set_media(media)
         self.player.play()
         self._apply_volume()
         print(f"[VLC] Playing: {os.path.basename(path)} (Index: {self.index})")
+
+    def _near_end(self):
+        try:
+            length = self.get_length() or 0
+            pos = self.get_time() or 0
+        except Exception:
+            return False
+        return length > 0 and pos >= max(0, length - 0.4)
 
     def _retry_with_transcode(self):
         """
@@ -372,25 +473,28 @@ class VLCMusicEngine:
         self._loaded_index = i
         self._current_song_id = (
             int(self.playlist.id_at(i))
-            if isinstance(self.playlist, LazyPlaylist) else None
+            if hasattr(self.playlist, "id_at") else None
         )
 
         path = self.playlist[i]
-        if not os.path.exists(path):
+        if not path or not os.path.exists(path):
             print("[VLC] Missing file:", path)
             return
 
         # Cue-sheet tracks (album.ape + album.cue) share one underlying
-        # audio file — `path` here is already that real file (LazyPlaylist
-        # resolves it via db.get_path), so we just need to know which
+        # audio file — `path` here is already that real file (id_at playlists
+        # resolve it via db.get_path), so we just need to know which
         # slice of it this track covers.
         cue_start = cue_end = None
-        if isinstance(self.playlist, LazyPlaylist):
+        if hasattr(self.playlist, "meta_at"):
             meta = self.playlist.meta_at(i)
             if meta:
                 cue_start = meta.get("cue_start")
                 cue_end = meta.get("cue_end")
 
+        # stop() must not be treated as "track ended → skip".
+        self._ended_handled = True
+        self._advance_requested = False
         self.player.stop()
 
         ext = os.path.splitext(path)[1].lower()
@@ -537,7 +641,7 @@ class VLCMusicEngine:
         """
         if self.index < 0 or not self.playlist:
             return 0
-        if isinstance(self.playlist, LazyPlaylist):
+        if hasattr(self.playlist, "meta_at"):
             meta = self.playlist.meta_at(self.index)
             if meta and meta.get("duration"):
                 return meta["duration"]
@@ -565,7 +669,7 @@ class VLCMusicEngine:
         """
         if self.index < 0 or not self.playlist:
             return None
-        if isinstance(self.playlist, LazyPlaylist):
+        if hasattr(self.playlist, "meta_at"):
             return self.playlist.meta_at(self.index)
         return None
 

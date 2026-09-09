@@ -23,6 +23,8 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit, parse_qs
 
+from core.services import device_trust
+
 from . import storage
 
 
@@ -40,7 +42,7 @@ class _Handler(BaseHTTPRequestHandler):
     def _cors_headers(self):
         origin = self.headers.get("Origin")
         self.send_header("Access-Control-Allow-Origin", origin if origin else "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Device-Id, X-Device-Ts, X-Device-Sig")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Vary", "Origin")
 
@@ -83,6 +85,8 @@ class _Handler(BaseHTTPRequestHandler):
     # -------------------------------------------------
 
     def do_GET(self):
+        if not device_trust.allow_handler(self):
+            return
         parts = urlsplit(self.path)
         path = parts.path
         qs = parse_qs(parts.query)
@@ -97,6 +101,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(404, {"error": "not found"})
 
     def do_POST(self):
+        if not device_trust.allow_handler(self):
+            return
         parts = urlsplit(self.path)
         segs = [s for s in parts.path.split("/") if s]
         # /api/notes                -> create

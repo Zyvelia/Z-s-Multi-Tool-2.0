@@ -37,7 +37,7 @@ GITHUB_REPO = "Z-s-Multi-Tool-2.0"    # repo name only, not a URL
 
 # Keep this in sync with APP_VERSION in pages/settings_page.py.
 # Bump it (and tag a matching vX.Y.Z GitHub Release) each time you ship.
-APP_VERSION = "4.0.0"
+APP_VERSION = "4.0.5"
 
 
 def _repo_slug() -> str:

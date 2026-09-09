@@ -1,89 +1,196 @@
-"""One-screen health check for app dependencies."""
+"""Qt Environment Checker — dependency health and optional pip upgrades."""
 
-import customtkinter as ctk
+from __future__ import annotations
 
-from core import theme
-from core.services.environment_checker import run_all_checks
+import threading
+
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QScrollArea,
+    QVBoxLayout,
+    QWidget,
+)
+
+from core.services.environment_checker import list_outdated_packages, run_all_checks, upgrade_packages
 
 
-class EnvironmentCheckerPage(ctk.CTkFrame):
+def _clear(layout):
+    while layout.count():
+        item = layout.takeAt(0)
+        w = item.widget()
+        if w is not None:
+            w.deleteLater()
 
+
+class EnvironmentCheckerPage(QWidget):
     def __init__(self, parent, manager):
-        super().__init__(parent, fg_color=theme.BG)
+        super().__init__(parent)
         self.manager = manager
-        self._rows: list[ctk.CTkFrame] = []
-        self._build_ui()
+        self._outdated = []
+        self._pkg_busy = False
+
+        root = QVBoxLayout(self)
+        title = QLabel("Environment Checker")
+        title.setObjectName("AccentTitle")
+        root.addWidget(title)
+        sub = QLabel(
+            "Health checks only read your system. Green means ready; red means a feature may be broken. "
+            "Package updates below are a separate, opt-in write (pip install -U)."
+        )
+        sub.setObjectName("Muted")
+        sub.setWordWrap(True)
+        root.addWidget(sub)
+
+        btn_row = QHBoxLayout()
+        recheck = QPushButton("Re-check")
+        recheck.setObjectName("Primary")
+        recheck.clicked.connect(self.run_checks)
+        self.summary = QLabel("")
+        btn_row.addWidget(recheck)
+        btn_row.addWidget(self.summary)
+        btn_row.addStretch(1)
+        root.addLayout(btn_row)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        host = QWidget()
+        self.list_lay = QVBoxLayout(host)
+        scroll.setWidget(host)
+        root.addWidget(scroll, 1)
+
+        pkgs = QFrame()
+        pkgs.setObjectName("Panel")
+        pl = QVBoxLayout(pkgs)
+        pkg_title = QLabel("Python packages")
+        pkg_title.setObjectName("CardTitle")
+        pl.addWidget(pkg_title)
+        pkg_sub = QLabel("Compares this interpreter to PyPI. Update only if you want newer wheels in this env.")
+        pkg_sub.setObjectName("Muted")
+        pkg_sub.setWordWrap(True)
+        pl.addWidget(pkg_sub)
+        prow = QHBoxLayout()
+        scan = QPushButton("Check package updates")
+        scan.clicked.connect(self._scan_packages)
+        self.update_all = QPushButton("Update all outdated")
+        self.update_all.setObjectName("Primary")
+        self.update_all.clicked.connect(self._update_all)
+        self.pkg_status = QLabel("")
+        self.pkg_status.setObjectName("Muted")
+        prow.addWidget(scan)
+        prow.addWidget(self.update_all)
+        prow.addWidget(self.pkg_status, 1)
+        pl.addLayout(prow)
+        self.pkg_host = QWidget()
+        self.pkg_lay = QVBoxLayout(self.pkg_host)
+        pl.addWidget(self.pkg_host)
+        root.addWidget(pkgs)
         self.run_checks()
 
-    def _build_ui(self):
-        header = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=theme.RADIUS)
-        header.pack(fill="x", padx=12, pady=(12, 8))
-
-        ctk.CTkLabel(
-            header, text="🩺  Environment Checker",
-            font=theme.font(22, "bold"), text_color=theme.TEXT,
-        ).pack(anchor="w", padx=14, pady=(12, 4))
-
-        ctk.CTkLabel(
-            header,
-            text=(
-                "This module only reads your system — it does not change anything. "
-                "Each row is something Z's Multi Tool uses; green means ready, red means "
-                "a feature may be broken until you install the fix."
-            ),
-            font=theme.font(12), text_color=theme.MUTED, anchor="w", justify="left", wraplength=720,
-        ).pack(anchor="w", padx=14, pady=(0, 12))
-
-        btn_row = ctk.CTkFrame(header, fg_color="transparent")
-        btn_row.pack(fill="x", padx=14, pady=(0, 12))
-        ctk.CTkButton(
-            btn_row, text="Re-check", width=120, height=34,
-            command=self.run_checks, **theme.primary_button_style(),
-        ).pack(side="left")
-
-        self._summary = ctk.CTkLabel(
-            btn_row, text="", font=theme.font(12, "bold"), text_color=theme.TEXT,
-        )
-        self._summary.pack(side="left", padx=(16, 0))
-
-        self._list = ctk.CTkScrollableFrame(self, fg_color=theme.PANEL, corner_radius=theme.RADIUS)
-        self._list.pack(fill="both", expand=True, padx=12, pady=(0, 12))
-        self._list.grid_columnconfigure(0, weight=1)
-
     def run_checks(self):
-        for w in self._list.winfo_children():
-            w.destroy()
-        self._rows.clear()
-
+        _clear(self.list_lay)
         results = run_all_checks()
         passed = sum(1 for r in results if r["ok"])
         total = len(results)
-        self._summary.configure(
-            text=f"{passed}/{total} checks passed",
-            text_color=theme.SUCCESS if passed == total else "#f1c40f" if passed >= total - 2 else theme.ERROR,
-        )
-
+        self.summary.setText(f"{passed}/{total} checks passed")
+        self.summary.setObjectName("Success" if passed == total else "Danger")
+        self.summary.style().unpolish(self.summary)
+        self.summary.style().polish(self.summary)
         for item in results:
             self._add_row(item)
+        self.list_lay.addStretch(1)
 
     def _add_row(self, item: dict):
-        row = ctk.CTkFrame(self._list, fg_color=theme.PANEL_2, corner_radius=theme.RADIUS_SM)
-        row.pack(fill="x", padx=8, pady=6)
-        row.grid_columnconfigure(1, weight=1)
-
-        icon = "✓" if item["ok"] else "✗"
-        color = theme.SUCCESS if item["ok"] else theme.ERROR
-        ctk.CTkLabel(row, text=icon, font=theme.font(16, "bold"), text_color=color, width=28).grid(
-            row=0, column=0, rowspan=2, padx=(12, 8), pady=12,
-        )
-        ctk.CTkLabel(
-            row, text=item["name"], font=theme.font(13, "bold"), text_color=theme.TEXT, anchor="w",
-        ).grid(row=0, column=1, sticky="w", pady=(10, 0))
-        ctk.CTkLabel(
-            row, text=item["detail"], font=theme.font(11), text_color=theme.MUTED, anchor="w", justify="left",
-        ).grid(row=1, column=1, sticky="w", pady=(2, 10))
+        row = QFrame()
+        row.setObjectName("Panel")
+        lay = QVBoxLayout(row)
+        head = QHBoxLayout()
+        mark = QLabel("✓" if item["ok"] else "✗")
+        mark.setObjectName("Success" if item["ok"] else "Danger")
+        name = QLabel(item["name"])
+        name.setObjectName("CardTitle")
+        head.addWidget(mark)
+        head.addWidget(name, 1)
+        lay.addLayout(head)
+        detail = QLabel(item["detail"])
+        detail.setObjectName("Muted")
+        detail.setWordWrap(True)
+        lay.addWidget(detail)
         if item.get("fix") and not item["ok"]:
-            ctk.CTkLabel(
-                row, text=f"Fix: {item['fix']}", font=theme.font(10), text_color=theme.FAINT,
-                anchor="w", justify="left", wraplength=560,
-            ).grid(row=2, column=1, sticky="w", padx=(0, 12), pady=(0, 10))
+            fix = QLabel(f"Fix: {item['fix']}")
+            fix.setObjectName("Muted")
+            fix.setWordWrap(True)
+            lay.addWidget(fix)
+        self.list_lay.addWidget(row)
+
+    def _scan_packages(self):
+        if self._pkg_busy:
+            return
+        self._pkg_busy = True
+        self.pkg_status.setText("Asking pip…")
+
+        def work():
+            rows, err = list_outdated_packages()
+            QTimer.singleShot(0, lambda: self._show_packages(rows, err))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _show_packages(self, rows, err):
+        self._pkg_busy = False
+        self._outdated = rows
+        _clear(self.pkg_lay)
+        if err:
+            self.pkg_status.setText(err)
+            self.pkg_status.setObjectName("Danger")
+            self.pkg_status.style().unpolish(self.pkg_status)
+            self.pkg_status.style().polish(self.pkg_status)
+            return
+        self.pkg_status.setText("All packages current" if not rows else f"{len(rows)} outdated")
+        self.pkg_status.setObjectName("Success" if not rows else "Muted")
+        self.pkg_status.style().unpolish(self.pkg_status)
+        self.pkg_status.style().polish(self.pkg_status)
+        for item in rows:
+            row = QWidget()
+            hl = QHBoxLayout(row)
+            hl.setContentsMargins(0, 0, 0, 0)
+            lab = QLabel(f"{item['name']}  {item['version']} → {item['latest']}")
+            btn = QPushButton("Update")
+            btn.clicked.connect(lambda _=False, n=item["name"]: self._update_one(n))
+            hl.addWidget(lab, 1)
+            hl.addWidget(btn)
+            self.pkg_lay.addWidget(row)
+
+    def _update_one(self, name: str):
+        self._run_upgrade([name])
+
+    def _update_all(self):
+        names = [r["name"] for r in self._outdated]
+        if not names:
+            self.pkg_status.setText("Scan first — nothing queued.")
+            return
+        self._run_upgrade(names)
+
+    def _run_upgrade(self, names: list[str]):
+        if self._pkg_busy:
+            return
+        self._pkg_busy = True
+        extra = "…" if len(names) > 4 else ""
+        self.pkg_status.setText(f"Updating {', '.join(names[:4])}{extra}…")
+
+        def work():
+            ok, msg = upgrade_packages(names)
+            QTimer.singleShot(0, lambda: self._upgrade_done(ok, msg))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _upgrade_done(self, ok, msg):
+        self._pkg_busy = False
+        self.pkg_status.setText("Updated. Re-scan to confirm." if ok else msg)
+        self.pkg_status.setObjectName("Success" if ok else "Danger")
+        self.pkg_status.style().unpolish(self.pkg_status)
+        self.pkg_status.style().polish(self.pkg_status)
+        if ok:
+            self._scan_packages()

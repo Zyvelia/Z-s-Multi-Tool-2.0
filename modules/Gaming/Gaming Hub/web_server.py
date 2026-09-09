@@ -39,6 +39,8 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
+from core.services import device_trust
+
 from .game_scanner import GameScanner
 from .launcher import GameLauncher
 
@@ -64,7 +66,7 @@ class _Handler(BaseHTTPRequestHandler):
     def _cors_headers(self):
         origin = self.headers.get("Origin")
         self.send_header("Access-Control-Allow-Origin", origin if origin else "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Access-Code")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Access-Code, X-Device-Id, X-Device-Ts, X-Device-Sig")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Vary", "Origin")
 
@@ -104,6 +106,8 @@ class _Handler(BaseHTTPRequestHandler):
     # -------------------------------------------------
 
     def do_GET(self):
+        if not device_trust.allow_handler(self):
+            return
         path = urlsplit(self.path).path
         srv = self._srv()
 
@@ -129,6 +133,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(404, {"ok": False, "error": "not found"})
 
     def do_POST(self):
+        if not device_trust.allow_handler(self):
+            return
         path = urlsplit(self.path).path
         srv = self._srv()
 

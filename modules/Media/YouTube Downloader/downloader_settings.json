@@ -1,7 +1,10 @@
 {
-  "output_dir": "C:/Users/cyber/Downloads",
-  "cookie_file": "C:/Users/cyber/Music/Cookies.txt",
+  "output_dir": "",
+  "cookie_file": "",
   "format": "mp3",
-  "type": "playlist",
-  "quality": "320"
+  "type": "video",
+  "quality": "192",
+  "remote_port": 8767,
+  "auto_start_remote": false,
+  "access_code": ""
 }

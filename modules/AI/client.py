@@ -42,8 +42,11 @@ class AIClientError(Exception):
 
 @dataclass
 class ChatMessage:
-    role: str  # "system" | "user" | "assistant"
-    content: str
+    role: str  # "system" | "user" | "assistant" | "tool"
+    content: str = ""
+    tool_calls: list | None = None
+    tool_call_id: str | None = None
+    name: str | None = None
 
 
 @dataclass
@@ -149,7 +152,7 @@ class AIClient:
         client = self._get_sdk_client()
         full_text_parts: List[str] = []
 
-        payload = [{"role": m.role, "content": m.content} for m in messages]
+        payload = [_message_payload(m) for m in messages]
 
         try:
             stream = client.chat.completions.create(
@@ -191,7 +194,7 @@ class AIClient:
     def simple_chat(self, messages: List[ChatMessage], max_tokens: Optional[int] = None) -> str:
         """Non-streaming helper, used by the AI builder for structured requests."""
         client = self._get_sdk_client()
-        payload = [{"role": m.role, "content": m.content} for m in messages]
+        payload = [_message_payload(m) for m in messages]
         try:
             resp = client.chat.completions.create(
                 model=self.config.model,
@@ -209,3 +212,74 @@ class AIClient:
             raise AIClientError(f"API error: {e}") from e
         except Exception as e:  # noqa: BLE001
             raise AIClientError(f"Unexpected error: {e}") from e
+
+    def complete_with_tools(
+        self,
+        messages: List[ChatMessage],
+        tools: list,
+        stop_event: threading.Event,
+    ) -> ChatMessage:
+        """One non-streaming completion that may include tool_calls."""
+        if stop_event.is_set():
+            return ChatMessage(role="assistant", content="")
+
+        client = self._get_sdk_client()
+        payload = [_message_payload(m) for m in messages]
+        kwargs = {
+            "model": self.config.model,
+            "messages": payload,
+        }
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = "auto"
+
+        try:
+            resp = client.chat.completions.create(**kwargs)
+        except AuthenticationError as e:
+            raise AIClientError(f"Authentication failed: invalid API key. ({e})") from e
+        except (APIConnectionError, APITimeoutError) as e:
+            raise AIClientError(f"Network error: {e}") from e
+        except RateLimitError as e:
+            raise AIClientError(f"Rate limited by provider: {e}") from e
+        except APIError as e:
+            raise AIClientError(f"API error: {e}") from e
+        except Exception as e:  # noqa: BLE001
+            if stop_event.is_set():
+                return ChatMessage(role="assistant", content="")
+            raise AIClientError(f"Unexpected error: {e}") from e
+
+        choice = resp.choices[0].message
+        raw_calls = getattr(choice, "tool_calls", None) or []
+        tool_calls = []
+        for call in raw_calls:
+            fn = getattr(call, "function", None)
+            tool_calls.append({
+                "id": getattr(call, "id", "") or "",
+                "type": "function",
+                "function": {
+                    "name": getattr(fn, "name", "") if fn is not None else "",
+                    "arguments": (getattr(fn, "arguments", None) or "{}") if fn is not None else "{}",
+                },
+            })
+        return ChatMessage(
+            role="assistant",
+            content=choice.content or "",
+            tool_calls=tool_calls or None,
+        )
+
+
+def _message_payload(message: ChatMessage) -> dict:
+    if message.role == "tool":
+        payload = {"role": "tool", "content": message.content or ""}
+        if message.tool_call_id:
+            payload["tool_call_id"] = message.tool_call_id
+        if message.name:
+            payload["name"] = message.name
+        return payload
+    if message.tool_calls:
+        return {
+            "role": "assistant",
+            "content": message.content or None,
+            "tool_calls": message.tool_calls,
+        }
+    return {"role": message.role, "content": message.content or ""}

@@ -29,9 +29,13 @@ APPS = [
     ("yt", "YouTube Downloader", "⬇️", "Send a link, get a download"),
     ("notes", "Notes", "📝", "Read and edit your notes"),
     ("games", "Gaming Hub", "🎮", "Launch a game on this PC"),
+    ("gsm", "Game servers", "🖥", "Start / stop dedicated servers"),
     ("soundboard", "Soundboard", "🔊", "Play a sound out loud"),
     ("send", "Quick Send", "📤", "Send files to/from this PC"),
-    ("arcade", "Arcade", "🕹️", "Browser games — Brick Breaker, Pong, and more"),
+    ("social", "Night page", "🟠", "Jukebox, soundboard, limited console"),
+    ("arcade", "Arcade", "🕹️", "Browser games — Pong and more"),
+    ("messages", "Messages", "💬", "Chat with this PC from your phone"),
+    ("chat", "AI Chat", "🤖", "Talk to the same model / agent as the PC"),
 ]
 
 

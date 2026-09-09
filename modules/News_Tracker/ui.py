@@ -1,38 +1,31 @@
-"""
-ui.py
-CustomTkinter UI for the Game Stats & News plugin.
+"""Qt Game Stats & News — headlines, feeds, weather, stats, encrypted keys."""
 
-Tabs:
-    Home       -> Top headlines, full width. Each headline can be
-                  "kept" (bookmarked) with one click.
-    My Feeds   -> User-defined keyword/topic feeds (e.g. "AI", "F1",
-                  "hometown team") that fetch their own headlines.
-    Game Stats -> Look up a player's stats using a stored API key —
-                  built-in support for Fortnite and Steam, plus a
-                  generic path for any other game's REST API.
-    API Keys   -> Add, view (masked), and remove API keys. Keys are
-                  encrypted at rest via crypto_store.py.
-    Saved      -> Every headline the user has kept, across all feeds.
-
-Module ⚙ settings -> Custom feeds, country, headline count,
-                  auto-refresh interval, and stored data management.
-
-API calls run on background threads so the UI never freezes; results are
-marshalled back to the main thread via `after()`.
-"""
+from __future__ import annotations
 
 import threading
 import webbrowser
 from datetime import datetime
 
-import customtkinter as ctk
-from tkinter import messagebox
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import (
+    QComboBox,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPushButton,
+    QScrollArea,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
-from . import news
-from . import storage
-from . import crypto_store
-from . import game_providers
-from core import theme
+from modules.News_Tracker import crypto_store
+from modules.News_Tracker import game_providers
+from modules.News_Tracker import news
+from modules.News_Tracker import storage
+from modules.News_Tracker import weather
 
 REFRESH_INTERVAL_OPTIONS = {
     "Off": 0,
@@ -42,229 +35,233 @@ REFRESH_INTERVAL_OPTIONS = {
     "Every hour": 60,
 }
 
-# Providers offered in the "Add API Key" form. Includes everything in
-# game_providers.PROVIDERS (used for actual game-stat lookups) plus
-# "newsapi", which isn't a game but reuses the same encrypted-key UI so
-# there's one consistent place to manage every key this plugin uses.
 KEY_PROVIDER_ORDER = ["fortnite", "steam", "clash_of_clans", "clash_royale", "brawl_stars", "newsapi", "custom"]
 KEY_PROVIDER_INFO = dict(game_providers.PROVIDERS)
 KEY_PROVIDER_INFO["newsapi"] = {
     "name": "News (NewsAPI.org)",
     "icon": "📰",
     "id_label": None,
-    "key_help": "Optional — without a key, headlines come from Google News RSS automatically, no key required.",
+    "key_help": "Optional — without a key, headlines come from Google News RSS automatically.",
     "key_url": "https://newsapi.org/register",
     "needs_extra": False,
 }
-
-# Providers selectable for an actual stats lookup (excludes "newsapi",
-# which isn't a game).
 GAME_PROVIDER_ORDER = ["fortnite", "steam", "clash_of_clans", "clash_royale", "brawl_stars", "custom"]
 
 
-def _get_news_page(manager):
-    if manager is None:
-        return None
-    current = getattr(manager, "current", None)
-    if current is None:
-        return None
-    inner = getattr(current, "_inner", current)
-    if inner.__class__.__name__ == "WeatherNewsUI":
-        return inner
-    return None
+def _clear(layout):
+    while layout.count():
+        item = layout.takeAt(0)
+        w = item.widget()
+        if w is not None:
+            w.deleteLater()
+        elif item.layout() is not None:
+            _clear(item.layout())
 
 
-class WeatherNewsUI(ctk.CTkFrame):
+def _scroll(layout) -> QScrollArea:
+    scroll = QScrollArea()
+    scroll.setWidgetResizable(True)
+    inner = QWidget()
+    inner.setLayout(layout)
+    scroll.setWidget(inner)
+    return scroll
 
-    MODULE_SETTINGS_TITLE = "Feeds & preferences"
 
-    @staticmethod
-    def build_module_settings(parent, manager):
-        from .settings_panel import GameStatsNewsSettingsPanel
-        return GameStatsNewsSettingsPanel(parent, manager)
-
-    def __init__(self, master, manager=None):
-        super().__init__(master, fg_color=theme.BG)
+class WeatherNewsUI(QWidget):
+    def __init__(self, parent, manager):
+        super().__init__(parent)
         self.manager = manager
-
-        self._home_news_data = None
-        self._feed_news_data = None
+        self.settings = storage.get_settings()
         self._active_feed_name = None
-        self._auto_refresh_job = None
-
-        self._gs_key_options = []       # [{"id", "label", "provider", ...}]
+        self._gs_key_options = []
         self._gs_selected_key_id = None
         self._add_key_provider_id = "fortnite"
-        self._add_key_value_visible = False
+        self._key_visible = False
 
-        self.settings = storage.get_settings()
+        root = QVBoxLayout(self)
+        title = QLabel("Game Stats & News")
+        title.setObjectName("AccentTitle")
+        root.addWidget(title)
 
-        self.grid_rowconfigure(0, weight=1)
-        self.grid_columnconfigure(0, weight=1)
+        self.weather_strip = QLabel("Weather: loading…")
+        self.weather_strip.setObjectName("Muted")
+        self.weather_strip.setWordWrap(True)
+        root.addWidget(self.weather_strip)
 
-        self.tabview = ctk.CTkTabview(self)
-        self.tabview.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self._build_home(), "Home")
+        self.tabs.addTab(self._build_feeds(), "My Feeds")
+        self.tabs.addTab(self._build_game_stats(), "Game Stats")
+        self.tabs.addTab(self._build_saved(), "Saved")
+        root.addWidget(self.tabs, 1)
 
-        self.tab_home = self.tabview.add("Home")
-        self.tab_feeds = self.tabview.add("My Feeds")
-        self.tab_game_stats = self.tabview.add("Game Stats")
-        self.tab_api_keys = self.tabview.add("API Keys")
-        self.tab_saved = self.tabview.add("Saved")
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.timeout.connect(self._on_auto_refresh_tick)
 
-        self._build_home_tab()
-        self._build_feeds_tab()
-        self._build_game_stats_tab()
-        self._build_api_keys_tab()
-        self._build_saved_tab()
-
-        # Initial load
         self.refresh_home()
-        self._render_saved_tab()
-        self._render_api_keys_list()
-        self._refresh_game_stats_key_menu()
+        self._render_saved()
+        self._refresh_gs_keys()
+        self._load_weather()
         self._schedule_auto_refresh()
 
-    # ------------------------------------------------------------------
-    # HOME TAB
-    # ------------------------------------------------------------------
+    @staticmethod
+    def build_qt_module_settings(parent, manager):
+        return _NewsSettings(parent, manager)
 
-    def _build_home_tab(self):
-        tab = self.tab_home
-        tab.grid_rowconfigure(2, weight=1)
-        tab.grid_columnconfigure(0, weight=1)
+    def _build_home(self):
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        header = QHBoxLayout()
+        h = QLabel("Top Headlines")
+        h.setObjectName("CardTitle")
+        self.updated = QLabel("Last updated: —")
+        self.updated.setObjectName("Muted")
+        header.addWidget(h)
+        header.addStretch(1)
+        header.addWidget(self.updated)
+        lay.addLayout(header)
+        search = QHBoxLayout()
+        self.news_search = QLineEdit()
+        self.news_search.setPlaceholderText("Search headlines by keyword…")
+        self.news_search.returnPressed.connect(self.refresh_home)
+        go = QPushButton("Search")
+        go.setObjectName("Primary")
+        go.clicked.connect(self.refresh_home)
+        self.home_refresh = QPushButton("Refresh")
+        self.home_refresh.clicked.connect(self.refresh_home)
+        search.addWidget(self.news_search, 1)
+        search.addWidget(go)
+        search.addWidget(self.home_refresh)
+        lay.addLayout(search)
+        self.home_list = QVBoxLayout()
+        lay.addWidget(_scroll(self.home_list), 1)
+        return page
 
-        header = ctk.CTkFrame(tab, fg_color="transparent")
-        header.grid(row=0, column=0, sticky="ew", padx=5, pady=(5, 0))
-        header.grid_columnconfigure(0, weight=1)
+    def _build_feeds(self):
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        t = QLabel("My Custom Feeds")
+        t.setObjectName("CardTitle")
+        hint = QLabel("Add feeds in module settings, then pick one below.")
+        hint.setObjectName("Muted")
+        hint.setWordWrap(True)
+        lay.addWidget(t)
+        lay.addWidget(hint)
+        row = QHBoxLayout()
+        self.feed_pick = QComboBox()
+        self.feed_pick.currentTextChanged.connect(self._on_feed_selected)
+        self.feed_refresh = QPushButton("Refresh")
+        self.feed_refresh.clicked.connect(self.refresh_feed)
+        row.addWidget(self.feed_pick, 1)
+        row.addWidget(self.feed_refresh)
+        lay.addLayout(row)
+        self.feed_list = QVBoxLayout()
+        lay.addWidget(_scroll(self.feed_list), 1)
+        self._reload_feed_picker()
+        return page
 
-        ctk.CTkLabel(
-            header, text="📰  Top Headlines",
-            font=ctk.CTkFont(size=20, weight="bold")
-        ).grid(row=0, column=0, sticky="w")
+    def _build_game_stats(self):
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        t = QLabel("Game Stats")
+        t.setObjectName("CardTitle")
+        lay.addWidget(t)
+        bar = QFrame()
+        bar.setObjectName("Panel")
+        bl = QHBoxLayout(bar)
+        self.gs_key = QComboBox()
+        self.gs_key.currentIndexChanged.connect(self._on_gs_key)
+        self.gs_id = QLineEdit()
+        self.gs_id.setPlaceholderText("Player identifier")
+        self.gs_id.returnPressed.connect(self._lookup_stats)
+        self.gs_btn = QPushButton("Look up")
+        self.gs_btn.setObjectName("Primary")
+        self.gs_btn.clicked.connect(self._lookup_stats)
+        bl.addWidget(QLabel("Key"))
+        bl.addWidget(self.gs_key, 1)
+        bl.addWidget(self.gs_id, 1)
+        bl.addWidget(self.gs_btn)
+        lay.addWidget(bar)
+        self.gs_list = QVBoxLayout()
+        lay.addWidget(_scroll(self.gs_list), 1)
+        return page
 
-        self.last_updated_label = ctk.CTkLabel(
-            header, text="Last updated: —",
-            font=ctk.CTkFont(size=12), text_color=theme.MUTED
-        )
-        self.last_updated_label.grid(row=0, column=1, sticky="e")
+    def _build_saved(self):
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        header = QHBoxLayout()
+        t = QLabel("Saved Articles")
+        t.setObjectName("CardTitle")
+        clear = QPushButton("Clear all")
+        clear.setObjectName("Danger")
+        clear.clicked.connect(self._clear_saved_confirm)
+        header.addWidget(t)
+        header.addStretch(1)
+        header.addWidget(clear)
+        lay.addLayout(header)
+        self.saved_list = QVBoxLayout()
+        lay.addWidget(_scroll(self.saved_list), 1)
+        return page
 
-        search_row = ctk.CTkFrame(tab, fg_color="transparent")
-        search_row.grid(row=1, column=0, sticky="ew", padx=5, pady=(10, 5))
-        search_row.grid_columnconfigure(0, weight=1)
+    def on_show(self):
+        self.settings = storage.get_settings()
+        self._reload_feed_picker()
+        self._refresh_gs_keys()
+        self._schedule_auto_refresh()
 
-        self.news_search_entry = ctk.CTkEntry(
-            search_row, placeholder_text="Search headlines by keyword…", height=36
-        )
-        self.news_search_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
-        self.news_search_entry.bind("<Return>", lambda e: self.refresh_home())
+    def _load_weather(self):
+        def work():
+            try:
+                data = weather.get_weather(unit=self.settings.get("temp_unit", "C"))
+                err = None
+            except weather.WeatherError as exc:
+                data, err = None, str(exc)
+            except Exception as exc:
+                data, err = None, str(exc)
+            QTimer.singleShot(0, lambda: self._apply_weather(data, err))
 
-        ctk.CTkButton(
-            search_row, text="Search", width=90, height=36,
-            fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
-            command=self.refresh_home
-        ).grid(row=0, column=1, padx=(0, 8))
+        threading.Thread(target=work, daemon=True).start()
 
-        self.home_news_refresh_btn = ctk.CTkButton(
-            search_row, text="🔄 Refresh", width=100, height=36,
-            command=self.refresh_home
-        )
-        self.home_news_refresh_btn.grid(row=0, column=2)
-
-        self.home_news_scroll = ctk.CTkScrollableFrame(tab, label_text="", fg_color="transparent")
-        self.home_news_scroll.grid(row=2, column=0, sticky="nsew", padx=5, pady=(5, 5))
-        self.home_news_scroll.grid_columnconfigure(0, weight=1)
-
-        self.home_news_status_label = ctk.CTkLabel(
-            self.home_news_scroll, text="Loading headlines…", justify="left", anchor="w"
-        )
-        self.home_news_status_label.grid(row=0, column=0, sticky="ew", pady=10)
+    def _apply_weather(self, data, err):
+        if err or not data:
+            self.weather_strip.setText(f"Weather unavailable: {err or 'no data'}")
+            return
+        unit = data.get("unit", "C")
+        bits = [
+            f"{data.get('icon', '')} {data.get('location', '')}",
+            f"{data.get('temperature')}°{unit}",
+            data.get("condition", ""),
+            f"wind {data.get('windspeed')}",
+        ]
+        forecast = data.get("forecast") or []
+        if forecast:
+            bits.append(" · ".join(f"{h['time']} {h['icon']} {h['temp']}°" for h in forecast[:4]))
+        self.weather_strip.setText("  ·  ".join(str(b) for b in bits if b))
 
     def refresh_home(self):
-        query = self.news_search_entry.get().strip() or None
-        self._fetch_news_into(
-            query=query,
-            scroll_frame=self.home_news_scroll,
-            refresh_btn=self.home_news_refresh_btn,
-            on_loaded=self._on_home_news_loaded,
-        )
+        query = self.news_search.text().strip() or None
+        self._fetch_news(query, self.home_list, self.home_refresh, self._touch_timestamp)
 
-    def _on_home_news_loaded(self, data, error):
-        self._home_news_data = data
-        self._render_headline_list(
-            data, error, self.home_news_scroll, self.home_news_refresh_btn, "🔄 Refresh"
-        )
-        self._touch_timestamp()
-
-    # ------------------------------------------------------------------
-    # MY FEEDS TAB
-    # ------------------------------------------------------------------
-
-    def _build_feeds_tab(self):
-        tab = self.tab_feeds
-        tab.grid_rowconfigure(2, weight=1)
-        tab.grid_columnconfigure(0, weight=1)
-
-        top = ctk.CTkFrame(tab, fg_color="transparent")
-        top.grid(row=0, column=0, sticky="ew", padx=5, pady=(5, 0))
-        top.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(
-            top, text="📌  My Custom Feeds", font=ctk.CTkFont(size=20, weight="bold")
-        ).grid(row=0, column=0, sticky="w")
-
-        ctk.CTkLabel(
-            tab,
-            text="Track any topic — a company, a hobby, a hometown team. Add feeds in "
-                 "⚙ settings, then pick one below to see the latest headlines.",
-            text_color=theme.MUTED, justify="left", wraplength=700, anchor="w"
-        ).grid(row=1, column=0, sticky="ew", padx=5, pady=(4, 10))
-
-        self.feeds_body = ctk.CTkFrame(tab, fg_color="transparent")
-        self.feeds_body.grid(row=2, column=0, sticky="nsew", padx=5, pady=(0, 5))
-        self.feeds_body.grid_rowconfigure(1, weight=1)
-        self.feeds_body.grid_columnconfigure(0, weight=1)
-
-        self._render_feeds_tab()
-
-    def _render_feeds_tab(self):
-        """Rebuild the feed picker + headline list (called after feeds change)."""
-        self._clear_frame(self.feeds_body)
+    def _reload_feed_picker(self):
         feeds = storage.get_custom_feeds()
-
-        if not feeds:
-            ctk.CTkLabel(
-                self.feeds_body,
-                text="No custom feeds yet. Open ⚙ settings → Custom Feeds to add one "
-                     "(e.g. name: \"F1\", keywords: \"Formula 1\").",
-                justify="left", wraplength=700, anchor="w"
-            ).grid(row=0, column=0, sticky="w", pady=10)
-            return
-
-        picker_row = ctk.CTkFrame(self.feeds_body, fg_color="transparent")
-        picker_row.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-
         names = [f["name"] for f in feeds]
-        if self._active_feed_name not in names:
-            self._active_feed_name = names[0]
-
-        self.feed_selector = ctk.CTkSegmentedButton(
-            picker_row, values=names, command=self._on_feed_selected
-        )
-        self.feed_selector.set(self._active_feed_name)
-        self.feed_selector.grid(row=0, column=0, sticky="w")
-
-        self.feed_refresh_btn = ctk.CTkButton(
-            picker_row, text="🔄 Refresh", width=90, command=self.refresh_feed
-        )
-        self.feed_refresh_btn.grid(row=0, column=1, padx=(10, 0))
-
-        self.feed_news_scroll = ctk.CTkScrollableFrame(self.feeds_body, label_text="", fg_color="transparent")
-        self.feed_news_scroll.grid(row=1, column=0, sticky="nsew")
-        self.feed_news_scroll.grid_columnconfigure(0, weight=1)
-
-        self.refresh_feed()
+        self.feed_pick.blockSignals(True)
+        self.feed_pick.clear()
+        if not names:
+            self.feed_pick.addItem("(no feeds — add in settings)")
+            self._active_feed_name = None
+        else:
+            self.feed_pick.addItems(names)
+            if self._active_feed_name not in names:
+                self._active_feed_name = names[0]
+            self.feed_pick.setCurrentText(self._active_feed_name)
+        self.feed_pick.blockSignals(False)
+        if names:
+            self.refresh_feed()
 
     def _on_feed_selected(self, name):
+        if name.startswith("("):
+            return
         self._active_feed_name = name
         self.refresh_feed()
 
@@ -272,584 +269,564 @@ class WeatherNewsUI(ctk.CTkFrame):
         feeds = {f["name"]: f["query"] for f in storage.get_custom_feeds()}
         if not self._active_feed_name or self._active_feed_name not in feeds:
             return
-        query = feeds[self._active_feed_name]
+        self._fetch_news(feeds[self._active_feed_name], self.feed_list, self.feed_refresh)
 
-        self._fetch_news_into(
-            query=query,
-            scroll_frame=self.feed_news_scroll,
-            refresh_btn=self.feed_refresh_btn,
-            on_loaded=self._on_feed_news_loaded,
-        )
+    def _fetch_news(self, query, layout, btn, extra=None):
+        btn.setEnabled(False)
+        btn.setText("Loading…")
+        _clear(layout)
+        loading = QLabel("Loading headlines…")
+        loading.setObjectName("Muted")
+        layout.addWidget(loading)
+        layout.addStretch(1)
+        country = self.settings.get("country", "us")
+        page_size = self.settings.get("page_size", 15)
 
-    def _on_feed_news_loaded(self, data, error):
-        self._feed_news_data = data
-        self._render_headline_list(
-            data, error, self.feed_news_scroll, self.feed_refresh_btn, "🔄 Refresh"
-        )
+        def work():
+            try:
+                data = news.get_headlines(query=query, country=country, page_size=page_size)
+                error = None
+            except Exception as exc:
+                data, error = None, str(exc)
+            QTimer.singleShot(0, lambda: self._render_headlines(data, error, layout, btn, extra))
 
-    # ------------------------------------------------------------------
-    # GAME STATS TAB
-    # ------------------------------------------------------------------
+        threading.Thread(target=work, daemon=True).start()
 
-    def _build_game_stats_tab(self):
-        tab = self.tab_game_stats
-        tab.grid_rowconfigure(2, weight=1)
-        tab.grid_columnconfigure(0, weight=1)
+    def _touch_timestamp(self):
+        self.updated.setText(f"Last updated: {datetime.now().strftime('%H:%M:%S')}")
 
-        header = ctk.CTkFrame(tab, fg_color="transparent")
-        header.grid(row=0, column=0, sticky="ew", padx=5, pady=(5, 0))
-        ctk.CTkLabel(
-            header, text="🕹️  Game Stats", font=ctk.CTkFont(size=20, weight="bold")
-        ).grid(row=0, column=0, sticky="w")
+    def _render_headlines(self, data, error, layout, btn, extra=None):
+        btn.setEnabled(True)
+        btn.setText("Refresh")
+        _clear(layout)
+        if extra:
+            extra()
+        if error:
+            err = QLabel(error)
+            err.setObjectName("Danger")
+            layout.addWidget(err)
+            layout.addStretch(1)
+            return
+        articles = data or []
+        if not articles:
+            empty = QLabel("No headlines.")
+            empty.setObjectName("Muted")
+            layout.addWidget(empty)
+            layout.addStretch(1)
+            return
+        for article in articles:
+            layout.addWidget(self._headline_card(article))
+        layout.addStretch(1)
 
-        # -- lookup bar -----------------------------------------------
-        bar = ctk.CTkFrame(tab, fg_color=theme.PANEL_2, corner_radius=10)
-        bar.grid(row=1, column=0, sticky="ew", padx=5, pady=(12, 10))
-        bar.grid_columnconfigure(1, weight=1)
+    def _headline_card(self, article):
+        card = QFrame()
+        card.setObjectName("Panel")
+        lay = QHBoxLayout(card)
+        col = QVBoxLayout()
+        title = QPushButton(article.get("title") or "(untitled)")
+        title.setStyleSheet("text-align: left;")
+        title.clicked.connect(lambda _=False, u=article.get("url"): self._open(u))
+        src = QLabel(article.get("source") or "")
+        src.setObjectName("Muted")
+        col.addWidget(title)
+        col.addWidget(src)
+        lay.addLayout(col, 1)
+        saved = storage.is_article_saved(article.get("url"))
+        star = QPushButton("★" if saved else "☆")
+        star.clicked.connect(lambda _=False, a=article, b=star: self._toggle_save(a, b))
+        lay.addWidget(star)
+        return card
 
-        ctk.CTkLabel(bar, text="Key").grid(row=0, column=0, padx=(15, 8), pady=15)
+    def _toggle_save(self, article, btn):
+        url = article.get("url")
+        if storage.is_article_saved(url):
+            storage.remove_saved_article(url)
+            btn.setText("☆")
+        else:
+            storage.save_article(article)
+            btn.setText("★")
+        self._render_saved()
 
-        self.gs_key_menu = ctk.CTkOptionMenu(
-            bar, values=["No API keys yet"], command=self._on_gs_key_selected, width=220
-        )
-        self.gs_key_menu.grid(row=0, column=1, sticky="w", pady=15)
+    def _open(self, url):
+        if url:
+            webbrowser.open(url)
 
-        self.gs_identifier_entry = ctk.CTkEntry(bar, placeholder_text="Player identifier", width=200)
-        self.gs_identifier_entry.grid(row=0, column=2, padx=(10, 10), pady=15)
-        self.gs_identifier_entry.bind("<Return>", lambda e: self._on_game_stats_lookup())
-
-        self.gs_lookup_btn = ctk.CTkButton(
-            bar, text="Look Up", width=100, fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
-            command=self._on_game_stats_lookup
-        )
-        self.gs_lookup_btn.grid(row=0, column=3, padx=(0, 15), pady=15)
-
-        # -- results ----------------------------------------------------
-        self.gs_results_scroll = ctk.CTkScrollableFrame(tab, label_text="", fg_color="transparent")
-        self.gs_results_scroll.grid(row=2, column=0, sticky="nsew", padx=5, pady=(0, 5))
-        self.gs_results_scroll.grid_columnconfigure(0, weight=1)
-
-        self._render_gs_placeholder(
-            "No API keys added yet. Head to the API Keys tab to add one — "
-            "Fortnite and Steam work out of the box, or add a custom API for any other game."
-        )
-
-    def _render_gs_placeholder(self, text):
-        self._clear_frame(self.gs_results_scroll)
-        ctk.CTkLabel(
-            self.gs_results_scroll, text=text, text_color=theme.MUTED,
-            justify="left", wraplength=700, anchor="w"
-        ).grid(row=0, column=0, sticky="ew", pady=20, padx=5)
-
-    def _refresh_game_stats_key_menu(self):
+    def _refresh_gs_keys(self):
         keys = [k for k in crypto_store.list_keys() if k["provider"] in GAME_PROVIDER_ORDER]
         self._gs_key_options = keys
-
+        self.gs_key.blockSignals(True)
+        self.gs_key.clear()
         if not keys:
-            self.gs_key_menu.configure(values=["No API keys yet"], state="disabled")
-            self.gs_key_menu.set("No API keys yet")
-            self.gs_identifier_entry.configure(state="disabled")
-            self.gs_lookup_btn.configure(state="disabled")
+            self.gs_key.addItem("No API keys yet — add in settings")
+            self.gs_id.setEnabled(False)
+            self.gs_btn.setEnabled(False)
             self._gs_selected_key_id = None
+        else:
+            for k in keys:
+                info = game_providers.PROVIDERS.get(k["provider"], {})
+                self.gs_key.addItem(f"{info.get('icon', '🔑')} {info.get('name', k['provider'])} — {k['label']}", k["id"])
+            self.gs_id.setEnabled(True)
+            self.gs_btn.setEnabled(True)
+            self._gs_selected_key_id = keys[0]["id"]
+            self._update_gs_placeholder(keys[0]["provider"])
+        self.gs_key.blockSignals(False)
+
+    def _on_gs_key(self, idx):
+        if idx < 0 or idx >= len(self._gs_key_options):
             return
+        k = self._gs_key_options[idx]
+        self._gs_selected_key_id = k["id"]
+        self._update_gs_placeholder(k["provider"])
 
-        labels = []
-        for k in keys:
-            info = game_providers.PROVIDERS.get(k["provider"], {})
-            icon = info.get("icon", "🔑")
-            name = info.get("name", k["provider"])
-            labels.append(f"{icon} {name} — {k['label']}")
-
-        self.gs_key_menu.configure(values=labels, state="normal")
-        self.gs_key_menu.set(labels[0])
-        self.gs_identifier_entry.configure(state="normal")
-        self.gs_lookup_btn.configure(state="normal")
-        self._gs_selected_key_id = keys[0]["id"]
-        self._update_gs_identifier_placeholder(keys[0]["provider"])
-
-    def _on_gs_key_selected(self, label):
-        for i, k in enumerate(self._gs_key_options):
-            info = game_providers.PROVIDERS.get(k["provider"], {})
-            candidate = f"{info.get('icon', '🔑')} {info.get('name', k['provider'])} — {k['label']}"
-            if candidate == label:
-                self._gs_selected_key_id = k["id"]
-                self._update_gs_identifier_placeholder(k["provider"])
-                return
-
-    def _update_gs_identifier_placeholder(self, provider):
+    def _update_gs_placeholder(self, provider):
         info = game_providers.PROVIDERS.get(provider, {})
-        self.gs_identifier_entry.configure(placeholder_text=info.get("id_label", "Player identifier"))
+        self.gs_id.setPlaceholderText(info.get("id_label", "Player identifier"))
 
-    def _on_game_stats_lookup(self):
+    def _lookup_stats(self):
         if not self._gs_selected_key_id:
             return
-        identifier = self.gs_identifier_entry.get().strip()
-
+        identifier = self.gs_id.text().strip()
         entry = crypto_store.get_entry(self._gs_selected_key_id)
         if not entry or not entry.get("token"):
-            self._render_gs_placeholder("⚠️ Couldn't read that key — try removing and re-adding it in API Keys.")
+            self._gs_message("Couldn't read that key — try removing and re-adding it in settings.")
             return
+        self.gs_btn.setEnabled(False)
+        self.gs_btn.setText("Looking up…")
+        self._gs_message("Looking up player…")
+        provider, token, extra = entry["provider"], entry["token"], entry.get("extra", {})
 
-        self.gs_lookup_btn.configure(state="disabled", text="Looking up…")
-        self._render_gs_placeholder("Looking up player…")
-
-        provider = entry["provider"]
-        token = entry["token"]
-        extra = entry.get("extra", {})
-
-        def worker():
+        def work():
             try:
                 result = game_providers.fetch_stats(provider, identifier, token, extra)
                 error = None
             except game_providers.GameStatsError as exc:
-                result = None
-                error = str(exc)
-            except Exception as exc:  # noqa: BLE001
-                result = None
-                error = f"Unexpected error: {exc}"
-            self.after(0, lambda: self._on_gs_result(result, error))
+                result, error = None, str(exc)
+            except Exception as exc:
+                result, error = None, f"Unexpected error: {exc}"
+            QTimer.singleShot(0, lambda: self._gs_result(result, error))
 
-        threading.Thread(target=worker, daemon=True).start()
+        threading.Thread(target=work, daemon=True).start()
 
-    def _on_gs_result(self, result, error):
-        self.gs_lookup_btn.configure(state="normal", text="Look Up")
+    def _gs_message(self, text):
+        _clear(self.gs_list)
+        lbl = QLabel(text)
+        lbl.setObjectName("Muted")
+        lbl.setWordWrap(True)
+        self.gs_list.addWidget(lbl)
+        self.gs_list.addStretch(1)
 
+    def _gs_result(self, result, error):
+        self.gs_btn.setEnabled(True)
+        self.gs_btn.setText("Look up")
         if error or not result:
-            self._render_gs_placeholder(f"⚠️ {error or 'No result.'}")
+            self._gs_message(error or "No result.")
             return
+        _clear(self.gs_list)
+        card = QFrame()
+        card.setObjectName("Panel")
+        cl = QVBoxLayout(card)
+        player = QLabel(result.get("player", "—"))
+        player.setObjectName("CardTitle")
+        cl.addWidget(player)
+        for label, value in result.get("rows", []):
+            row = QHBoxLayout()
+            k = QLabel(str(label))
+            k.setObjectName("Muted")
+            v = QLabel(str(value))
+            row.addWidget(k)
+            row.addWidget(v, 1)
+            cl.addLayout(row)
+        self.gs_list.addWidget(card)
+        self.gs_list.addStretch(1)
 
-        self._clear_frame(self.gs_results_scroll)
-
-        card = ctk.CTkFrame(self.gs_results_scroll, fg_color=theme.PANEL_2, corner_radius=10)
-        card.grid(row=0, column=0, sticky="ew", pady=5, padx=5)
-        card.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(
-            card, text=result.get("player", "—"),
-            font=ctk.CTkFont(size=17, weight="bold"), anchor="w"
-        ).grid(row=0, column=0, sticky="w", padx=18, pady=(16, 10))
-
-        rows = result.get("rows", [])
-        for i, (label, value) in enumerate(rows):
-            row_frame = ctk.CTkFrame(card, fg_color="transparent")
-            row_frame.grid(row=i + 1, column=0, sticky="ew", padx=18, pady=4)
-            row_frame.grid_columnconfigure(1, weight=1)
-
-            ctk.CTkLabel(row_frame, text=str(label), text_color=theme.MUTED, anchor="w", width=160).grid(
-                row=0, column=0, sticky="w"
-            )
-            ctk.CTkLabel(row_frame, text=str(value), anchor="w", font=ctk.CTkFont(weight="bold")).grid(
-                row=0, column=1, sticky="w"
-            )
-
-        ctk.CTkFrame(card, fg_color="transparent", height=10).grid(row=len(rows) + 1, column=0)
-
-    # ------------------------------------------------------------------
-    # API KEYS TAB
-    # ------------------------------------------------------------------
-
-    def _build_api_keys_tab(self):
-        tab = self.tab_api_keys
-        tab.grid_columnconfigure(0, weight=1)
-        tab.grid_rowconfigure(0, weight=1)
-
-        scroll = ctk.CTkScrollableFrame(tab, label_text="", fg_color="transparent")
-        scroll.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
-        scroll.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(
-            scroll, text="🔑  API Keys", font=ctk.CTkFont(size=20, weight="bold")
-        ).grid(row=0, column=0, sticky="w", pady=(0, 4))
-
-        ctk.CTkLabel(
-            scroll,
-            text="Keys are encrypted before they're written to disk, and decrypted only in memory "
-                 "right before a request goes out. (They can't be hashed instead — a hashed key "
-                 "can't be sent back to the API to authenticate, since hashing can't be reversed.)",
-            text_color=theme.MUTED, justify="left", wraplength=760, anchor="w"
-        ).grid(row=1, column=0, sticky="ew", pady=(0, 15))
-
-        # -- existing keys ----------------------------------------------
-        self.keys_list_frame = ctk.CTkFrame(scroll, fg_color="transparent")
-        self.keys_list_frame.grid(row=2, column=0, sticky="ew", pady=(0, 20))
-        self.keys_list_frame.grid_columnconfigure(0, weight=1)
-
-        # -- add-key form -------------------------------------------------
-        form = ctk.CTkFrame(scroll, fg_color=theme.PANEL_2, corner_radius=10)
-        form.grid(row=3, column=0, sticky="ew")
-        form.grid_columnconfigure(1, weight=1)
-
-        ctk.CTkLabel(
-            form, text="Add a Key", font=ctk.CTkFont(size=15, weight="bold")
-        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=18, pady=(16, 10))
-
-        ctk.CTkLabel(form, text="Provider").grid(row=1, column=0, sticky="w", padx=18, pady=6)
-        provider_labels = [
-            f"{KEY_PROVIDER_INFO[p]['icon']} {KEY_PROVIDER_INFO[p]['name']}" for p in KEY_PROVIDER_ORDER
-        ]
-        self.add_key_provider_menu = ctk.CTkOptionMenu(
-            form, values=provider_labels, command=self._on_add_key_provider_changed, width=220
-        )
-        self.add_key_provider_menu.set(provider_labels[0])
-        self.add_key_provider_menu.grid(row=1, column=1, sticky="w", padx=18, pady=6)
-
-        self.add_key_hint_label = ctk.CTkLabel(
-            form, text="", text_color=theme.MUTED, justify="left", wraplength=650, anchor="w"
-        )
-        self.add_key_hint_label.grid(row=2, column=0, columnspan=2, sticky="ew", padx=18, pady=(0, 8))
-
-        ctk.CTkLabel(form, text="Label").grid(row=3, column=0, sticky="w", padx=18, pady=6)
-        self.add_key_label_entry = ctk.CTkEntry(
-            form, placeholder_text="e.g. my main account (optional)", width=300
-        )
-        self.add_key_label_entry.grid(row=3, column=1, sticky="w", padx=18, pady=6)
-
-        ctk.CTkLabel(form, text="Key").grid(row=4, column=0, sticky="w", padx=18, pady=6)
-        key_value_row = ctk.CTkFrame(form, fg_color="transparent")
-        key_value_row.grid(row=4, column=1, sticky="w", padx=18, pady=6)
-
-        self.add_key_value_entry = ctk.CTkEntry(key_value_row, width=300, show="•")
-        self.add_key_value_entry.grid(row=0, column=0, padx=(0, 6))
-
-        self.add_key_show_btn = ctk.CTkButton(
-            key_value_row, text="👁", width=32, command=self._toggle_add_key_visibility
-        )
-        self.add_key_show_btn.grid(row=0, column=1)
-
-        # -- custom-provider-only extra fields ---------------------------
-        self.add_key_custom_frame = ctk.CTkFrame(form, fg_color="transparent")
-        self.add_key_custom_frame.grid_columnconfigure(1, weight=1)
-
-        ctk.CTkLabel(self.add_key_custom_frame, text="Base URL").grid(row=0, column=0, sticky="w", pady=4)
-        self.custom_base_url_entry = ctk.CTkEntry(
-            self.add_key_custom_frame,
-            placeholder_text="https://api.example.com/stats/{id}  (or ?name= is added automatically)",
-            width=420
-        )
-        self.custom_base_url_entry.grid(row=0, column=1, sticky="ew", padx=(10, 0), pady=4)
-
-        ctk.CTkLabel(self.add_key_custom_frame, text="Auth header").grid(row=1, column=0, sticky="w", pady=4)
-        header_row = ctk.CTkFrame(self.add_key_custom_frame, fg_color="transparent")
-        header_row.grid(row=1, column=1, sticky="w", padx=(10, 0), pady=4)
-        self.custom_header_name_entry = ctk.CTkEntry(header_row, placeholder_text="Header name (e.g. Authorization)", width=220)
-        self.custom_header_name_entry.grid(row=0, column=0, padx=(0, 6))
-        self.custom_header_prefix_entry = ctk.CTkEntry(header_row, placeholder_text="Prefix (e.g. \"Bearer \")", width=140)
-        self.custom_header_prefix_entry.grid(row=0, column=1)
-
-        ctk.CTkLabel(self.add_key_custom_frame, text="ID query param").grid(row=2, column=0, sticky="w", pady=4)
-        self.custom_id_param_entry = ctk.CTkEntry(
-            self.add_key_custom_frame, placeholder_text="name  (only used if the URL has no {id})", width=220
-        )
-        self.custom_id_param_entry.grid(row=2, column=1, sticky="w", padx=(10, 0), pady=4)
-
-        ctk.CTkButton(
-            form, text="Save Key", fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
-            command=self._on_save_key
-        ).grid(row=6, column=0, columnspan=2, sticky="w", padx=18, pady=(14, 18))
-
-        self._on_add_key_provider_changed(provider_labels[0])
-
-    def _provider_id_from_label(self, label):
-        for p in KEY_PROVIDER_ORDER:
-            if f"{KEY_PROVIDER_INFO[p]['icon']} {KEY_PROVIDER_INFO[p]['name']}" == label:
-                return p
-        return KEY_PROVIDER_ORDER[0]
-
-    def _on_add_key_provider_changed(self, label):
-        provider = self._provider_id_from_label(label)
-        self._add_key_provider_id = provider
-        info = KEY_PROVIDER_INFO[provider]
-
-        hint = info.get("key_help", "")
-        if info.get("key_url"):
-            hint += f"  ({info['key_url']})"
-        self.add_key_hint_label.configure(text=hint)
-
-        if info.get("needs_extra"):
-            self.add_key_custom_frame.grid(row=5, column=0, columnspan=2, sticky="ew", padx=18, pady=(4, 4))
-        else:
-            self.add_key_custom_frame.grid_forget()
-
-    def _toggle_add_key_visibility(self):
-        self._add_key_value_visible = not self._add_key_value_visible
-        self.add_key_value_entry.configure(show="" if self._add_key_value_visible else "•")
-        self.add_key_show_btn.configure(text="🙈" if self._add_key_value_visible else "👁")
-
-    def _on_save_key(self):
-        provider = self._add_key_provider_id
-        label = self.add_key_label_entry.get().strip()
-        value = self.add_key_value_entry.get().strip()
-
-        extra = {}
-        if KEY_PROVIDER_INFO[provider].get("needs_extra"):
-            base_url = self.custom_base_url_entry.get().strip()
-            if not base_url:
-                messagebox.showwarning("Add API Key", "Custom providers need a base URL.")
-                return
-            extra = {
-                "base_url": base_url,
-                "header_name": self.custom_header_name_entry.get().strip(),
-                "header_prefix": self.custom_header_prefix_entry.get().strip(),
-                "id_param": self.custom_id_param_entry.get().strip(),
-            }
-
-        try:
-            crypto_store.add_key(provider, label, value, extra=extra)
-        except ValueError as exc:
-            messagebox.showwarning("Add API Key", str(exc))
-            return
-
-        self.add_key_label_entry.delete(0, "end")
-        self.add_key_value_entry.delete(0, "end")
-        self.custom_base_url_entry.delete(0, "end")
-        self.custom_header_name_entry.delete(0, "end")
-        self.custom_header_prefix_entry.delete(0, "end")
-        self.custom_id_param_entry.delete(0, "end")
-
-        self._render_api_keys_list()
-        self._refresh_game_stats_key_menu()
-
-    def _render_api_keys_list(self):
-        self._clear_frame(self.keys_list_frame)
-        keys = crypto_store.list_keys()
-
-        if not keys:
-            ctk.CTkLabel(
-                self.keys_list_frame, text="No keys added yet.", text_color=theme.MUTED
-            ).grid(row=0, column=0, sticky="w")
-            return
-
-        for i, k in enumerate(keys):
-            info = KEY_PROVIDER_INFO.get(k["provider"], {"icon": "🔑", "name": k["provider"]})
-            row = ctk.CTkFrame(self.keys_list_frame, fg_color=theme.PANEL_2, corner_radius=8)
-            row.grid(row=i, column=0, sticky="ew", pady=3)
-            row.grid_columnconfigure(1, weight=1)
-
-            ctk.CTkLabel(row, text=info["icon"], font=ctk.CTkFont(size=18)).grid(
-                row=0, column=0, rowspan=2, padx=(15, 10), pady=10
-            )
-
-            ctk.CTkLabel(
-                row, text=f"{info['name']}  —  {k['label']}", anchor="w",
-                font=ctk.CTkFont(weight="bold")
-            ).grid(row=0, column=1, sticky="w", pady=(10, 0))
-
-            ctk.CTkLabel(
-                row, text=k["preview"], anchor="w", text_color=theme.MUTED,
-                font=ctk.CTkFont(family="Consolas", size=12)
-            ).grid(row=1, column=1, sticky="w", pady=(0, 10))
-
-            ctk.CTkButton(
-                row, text="Remove", width=80, fg_color=theme.DANGER_BG,
-                hover_color=theme.DANGER_HOVER, text_color=theme.DANGER,
-                command=lambda kid=k["id"]: self._remove_key(kid)
-            ).grid(row=0, column=2, rowspan=2, padx=15, pady=10)
-
-    def _remove_key(self, key_id):
-        crypto_store.remove_key(key_id)
-        self._render_api_keys_list()
-        self._refresh_game_stats_key_menu()
-
-    # ------------------------------------------------------------------
-    # SAVED TAB
-    # ------------------------------------------------------------------
-
-    def _build_saved_tab(self):
-        tab = self.tab_saved
-        tab.grid_rowconfigure(1, weight=1)
-        tab.grid_columnconfigure(0, weight=1)
-
-        top = ctk.CTkFrame(tab, fg_color="transparent")
-        top.grid(row=0, column=0, sticky="ew", padx=5, pady=(5, 5))
-        top.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(
-            top, text="⭐  Saved Articles", font=ctk.CTkFont(size=20, weight="bold")
-        ).grid(row=0, column=0, sticky="w")
-
-        ctk.CTkButton(
-            top, text="Clear all", width=90, fg_color=theme.DANGER_BG, hover_color=theme.DANGER_HOVER, text_color=theme.DANGER,
-            command=self._clear_saved_confirm
-        ).grid(row=0, column=1, sticky="e")
-
-        self.saved_scroll = ctk.CTkScrollableFrame(tab, label_text="", fg_color="transparent")
-        self.saved_scroll.grid(row=1, column=0, sticky="nsew", padx=5, pady=(0, 5))
-        self.saved_scroll.grid_columnconfigure(0, weight=1)
-
-    def _render_saved_tab(self):
-        self._clear_frame(self.saved_scroll)
+    def _render_saved(self):
+        _clear(self.saved_list)
         saved = storage.get_saved_articles()
-
         if not saved:
-            ctk.CTkLabel(
-                self.saved_scroll,
-                text="Nothing kept yet. Click the ☆ next to any headline to save it here.",
-                justify="left"
-            ).grid(row=0, column=0, sticky="w", pady=10)
+            empty = QLabel("Nothing kept yet. Click ☆ next to any headline to save it here.")
+            empty.setObjectName("Muted")
+            self.saved_list.addWidget(empty)
+            self.saved_list.addStretch(1)
             return
-
-        for i, item in enumerate(saved):
-            row_frame = ctk.CTkFrame(self.saved_scroll, fg_color=theme.PANEL_2, corner_radius=8)
-            row_frame.grid(row=i, column=0, sticky="ew", pady=3)
-            row_frame.grid_columnconfigure(0, weight=1)
-
-            title_btn = ctk.CTkButton(
-                row_frame, text=item["title"], anchor="w",
-                fg_color="transparent", hover_color=("gray80", "gray25"),
-                text_color=("black", "white"), font=ctk.CTkFont(size=13),
-                command=lambda url=item.get("url"): self._open_link(url)
-            )
-            title_btn.grid(row=0, column=0, sticky="ew", padx=(5, 5), pady=(6, 0))
-
-            remove_btn = ctk.CTkButton(
-                row_frame, text="🗑", width=30, fg_color="transparent",
-                hover_color=("gray80", "gray25"), text_color=("black", "white"),
-                command=lambda url=item.get("url"): self._remove_saved(url)
-            )
-            remove_btn.grid(row=0, column=1, rowspan=2, padx=(0, 8))
-
-            ctk.CTkLabel(
-                row_frame, text=item.get("source", "Unknown"),
-                font=ctk.CTkFont(size=11), text_color=theme.MUTED, anchor="w"
-            ).grid(row=1, column=0, sticky="w", padx=10, pady=(0, 6))
+        for item in saved:
+            card = QFrame()
+            card.setObjectName("Panel")
+            lay = QHBoxLayout(card)
+            col = QVBoxLayout()
+            btn = QPushButton(item.get("title") or "(untitled)")
+            btn.setStyleSheet("text-align: left;")
+            btn.clicked.connect(lambda _=False, u=item.get("url"): self._open(u))
+            src = QLabel(item.get("source") or "Unknown")
+            src.setObjectName("Muted")
+            col.addWidget(btn)
+            col.addWidget(src)
+            lay.addLayout(col, 1)
+            rm = QPushButton("Remove")
+            rm.setObjectName("Danger")
+            rm.clicked.connect(lambda _=False, u=item.get("url"): self._remove_saved(u))
+            lay.addWidget(rm)
+            self.saved_list.addWidget(card)
+        self.saved_list.addStretch(1)
 
     def _remove_saved(self, url):
         storage.remove_saved_article(url)
-        self._render_saved_tab()
-        # Refresh star states wherever this article might currently be shown
-        self._refresh_save_buttons()
+        self._render_saved()
 
     def _clear_saved_confirm(self):
         if not storage.get_saved_articles():
             return
-        if messagebox.askyesno("Clear saved articles", "Remove all saved articles? This cannot be undone."):
-            storage.clear_saved_articles()
-            self._render_saved_tab()
-            self._refresh_save_buttons()
-
-    # ------------------------------------------------------------------
-    # Auto-refresh
-    # ------------------------------------------------------------------
+        if QMessageBox.question(
+            self, "Clear saved articles",
+            "Remove all saved articles? This cannot be undone.",
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        storage.clear_saved_articles()
+        self._render_saved()
 
     def _schedule_auto_refresh(self):
-        if self._auto_refresh_job is not None:
-            self.after_cancel(self._auto_refresh_job)
-            self._auto_refresh_job = None
-
+        self._refresh_timer.stop()
         minutes = self.settings.get("refresh_interval_minutes", 0)
         if minutes and minutes > 0:
-            self._auto_refresh_job = self.after(minutes * 60 * 1000, self._on_auto_refresh_tick)
+            self._refresh_timer.start(minutes * 60 * 1000)
 
     def _on_auto_refresh_tick(self):
         self.refresh_home()
         if storage.get_custom_feeds():
             self.refresh_feed()
+        self._load_weather()
         self._schedule_auto_refresh()
 
-    # ------------------------------------------------------------------
-    # Shared helpers
-    # ------------------------------------------------------------------
 
-    def _fetch_news_into(self, query, scroll_frame, refresh_btn, on_loaded):
-        refresh_btn.configure(state="disabled", text="Loading…")
-        self._clear_frame(scroll_frame)
-        ctk.CTkLabel(scroll_frame, text="Loading headlines…").grid(row=0, column=0, pady=10)
+def _news_page(manager):
+    if manager is None:
+        return None
+    current = getattr(manager, "current", None)
+    if current is None:
+        return None
+    inner = getattr(current, "_inner", current)
+    if isinstance(inner, WeatherNewsUI):
+        return inner
+    return None
 
-        country = self.settings.get("country", "us")
-        page_size = self.settings.get("page_size", 15)
 
-        def worker():
-            try:
-                data = news.get_headlines(query=query, country=country, page_size=page_size)
-                error = None
-            except news.NewsError as exc:
-                data = None
-                error = str(exc)
-            except Exception as exc:  # noqa: BLE001
-                data = None
-                error = f"Unexpected error: {exc}"
-            self.after(0, lambda: on_loaded(data, error))
+class _NewsSettings(QWidget):
+    def __init__(self, parent, manager):
+        super().__init__(parent)
+        self.manager = manager
+        self.settings = storage.get_settings()
+        lay = QVBoxLayout(self)
 
-        threading.Thread(target=worker, daemon=True).start()
+        feeds_t = QLabel("Custom feeds")
+        feeds_t.setObjectName("CardTitle")
+        lay.addWidget(feeds_t)
+        add = QHBoxLayout()
+        self.feed_name = QLineEdit()
+        self.feed_name.setPlaceholderText("Feed name (e.g. F1)")
+        self.feed_query = QLineEdit()
+        self.feed_query.setPlaceholderText("Keywords (e.g. Formula 1)")
+        add_btn = QPushButton("Add feed")
+        add_btn.setObjectName("Primary")
+        add_btn.clicked.connect(self._add_feed)
+        add.addWidget(self.feed_name)
+        add.addWidget(self.feed_query, 1)
+        add.addWidget(add_btn)
+        lay.addLayout(add)
+        self.feed_host = QVBoxLayout()
+        lay.addLayout(self.feed_host)
 
-    def _render_headline_list(self, data, error, scroll_frame, refresh_btn, refresh_btn_text):
-        refresh_btn.configure(state="normal", text=refresh_btn_text)
-        self._clear_frame(scroll_frame)
+        prefs = QLabel("Preferences")
+        prefs.setObjectName("CardTitle")
+        lay.addWidget(prefs)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Headline country"))
+        self.country = QLineEdit(self.settings.get("country", "us"))
+        self.country.editingFinished.connect(self._save_country)
+        row.addWidget(self.country)
+        row.addStretch(1)
+        lay.addLayout(row)
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel("Headlines per feed"))
+        self.page_size = QLineEdit(str(self.settings.get("page_size", 15)))
+        self.page_size.editingFinished.connect(self._save_page_size)
+        row2.addWidget(self.page_size)
+        row2.addStretch(1)
+        lay.addLayout(row2)
+        row3 = QHBoxLayout()
+        row3.addWidget(QLabel("Auto-refresh"))
+        self.refresh = QComboBox()
+        for label, mins in REFRESH_INTERVAL_OPTIONS.items():
+            self.refresh.addItem(label, mins)
+        current = self.settings.get("refresh_interval_minutes", 0)
+        idx = self.refresh.findData(current)
+        self.refresh.setCurrentIndex(idx if idx >= 0 else 0)
+        self.refresh.currentIndexChanged.connect(self._save_refresh)
+        row3.addWidget(self.refresh)
+        row3.addStretch(1)
+        lay.addLayout(row3)
 
-        if error or data is None:
-            ctk.CTkLabel(
-                scroll_frame,
-                text=f"⚠️ Could not load headlines.\n{error or 'Unknown error'}",
-                text_color="#e06c75", justify="left"
-            ).grid(row=0, column=0, sticky="w", pady=10)
-            return
-
-        if not data:
-            ctk.CTkLabel(scroll_frame, text="No headlines found.").grid(
-                row=0, column=0, pady=10
-            )
-            return
-
-        for i, item in enumerate(data):
-            self._build_headline_row(scroll_frame, i, item)
-
-    def _build_headline_row(self, parent, row_index, item):
-        row_frame = ctk.CTkFrame(parent, fg_color=theme.PANEL_2, corner_radius=8)
-        row_frame.grid(row=row_index, column=0, sticky="ew", pady=3)
-        row_frame.grid_columnconfigure(0, weight=1)
-
-        title_btn = ctk.CTkButton(
-            row_frame, text=item["title"], anchor="w",
-            fg_color="transparent", hover_color=("gray80", "gray25"),
-            text_color=("black", "white"), font=ctk.CTkFont(size=13),
-            command=lambda url=item.get("url"): self._open_link(url)
+        keys_t = QLabel("API keys (encrypted)")
+        keys_t.setObjectName("CardTitle")
+        hint = QLabel(
+            "Keys are encrypted at rest via crypto_store — they are never written as plaintext. "
+            f"Stored at {crypto_store.storage_path()}"
         )
-        title_btn.grid(row=0, column=0, sticky="ew", padx=(5, 5), pady=(6, 0))
+        hint.setObjectName("Muted")
+        hint.setWordWrap(True)
+        lay.addWidget(keys_t)
+        lay.addWidget(hint)
+        self.keys_host = QVBoxLayout()
+        lay.addLayout(self.keys_host)
 
-        is_saved = storage.is_article_saved(item.get("url"))
-        save_btn = ctk.CTkButton(
-            row_frame, text=("★" if is_saved else "☆"), width=30,
-            fg_color="transparent", hover_color=("gray80", "gray25"),
-            text_color=("#e0b03e" if is_saved else ("black", "white")),
-            command=lambda i=item: self._toggle_save(i)
+        form = QFrame()
+        form.setObjectName("Panel")
+        fl = QVBoxLayout(form)
+        self.provider = QComboBox()
+        for p in KEY_PROVIDER_ORDER:
+            info = KEY_PROVIDER_INFO[p]
+            self.provider.addItem(f"{info['icon']} {info['name']}", p)
+        self.provider.currentIndexChanged.connect(self._provider_changed)
+        self.key_help = QLabel("")
+        self.key_help.setObjectName("Muted")
+        self.key_help.setWordWrap(True)
+        self.key_label = QLineEdit()
+        self.key_label.setPlaceholderText("Label (optional)")
+        self.key_value = QLineEdit()
+        self.key_value.setEchoMode(QLineEdit.EchoMode.Password)
+        self.key_value.setPlaceholderText("API key")
+        show = QPushButton("Show")
+        show.clicked.connect(self._toggle_key)
+        key_row = QHBoxLayout()
+        key_row.addWidget(self.key_value, 1)
+        key_row.addWidget(show)
+        self.custom_url = QLineEdit()
+        self.custom_url.setPlaceholderText("Base URL (custom APIs — may include {id})")
+        self.custom_header = QLineEdit()
+        self.custom_header.setPlaceholderText("Auth header name")
+        self.custom_prefix = QLineEdit()
+        self.custom_prefix.setPlaceholderText("Prefix (e.g. Bearer )")
+        self.custom_param = QLineEdit()
+        self.custom_param.setPlaceholderText("ID query param if URL has no {id}")
+        save_key = QPushButton("Save key")
+        save_key.setObjectName("Primary")
+        save_key.clicked.connect(self._save_key)
+        fl.addWidget(self.provider)
+        fl.addWidget(self.key_help)
+        fl.addWidget(self.key_label)
+        fl.addLayout(key_row)
+        fl.addWidget(self.custom_url)
+        fl.addWidget(self.custom_header)
+        fl.addWidget(self.custom_prefix)
+        fl.addWidget(self.custom_param)
+        fl.addWidget(save_key)
+        lay.addWidget(form)
+
+        data_t = QLabel("Your data")
+        data_t.setObjectName("CardTitle")
+        path = QLabel(f"Feeds & articles: {storage.storage_path()}")
+        path.setObjectName("Muted")
+        path.setWordWrap(True)
+        lay.addWidget(data_t)
+        lay.addWidget(path)
+        danger = QHBoxLayout()
+        clear = QPushButton("Clear saved articles")
+        clear.setObjectName("Danger")
+        clear.clicked.connect(self._clear_saved)
+        reset = QPushButton("Reset all data")
+        reset.setObjectName("Danger")
+        reset.clicked.connect(self._reset_all)
+        danger.addWidget(clear)
+        danger.addWidget(reset)
+        danger.addStretch(1)
+        lay.addLayout(danger)
+        lay.addStretch(1)
+
+        self._render_feeds()
+        self._render_keys()
+        self._provider_changed()
+
+    def _page(self):
+        return _news_page(self.manager)
+
+    def _render_feeds(self):
+        _clear(self.feed_host)
+        feeds = storage.get_custom_feeds()
+        if not feeds:
+            empty = QLabel("No custom feeds yet.")
+            empty.setObjectName("Muted")
+            self.feed_host.addWidget(empty)
+            return
+        for feed in feeds:
+            row = QHBoxLayout()
+            lbl = QLabel(f"{feed['name']}  —  \"{feed['query']}\"")
+            rm = QPushButton("Remove")
+            rm.setObjectName("Danger")
+            rm.clicked.connect(lambda _=False, n=feed["name"]: self._remove_feed(n))
+            wrap = QWidget()
+            row.addWidget(lbl, 1)
+            row.addWidget(rm)
+            wrap.setLayout(row)
+            self.feed_host.addWidget(wrap)
+
+    def _add_feed(self):
+        name = self.feed_name.text().strip()
+        query = self.feed_query.text().strip()
+        if not name or not query:
+            QMessageBox.warning(self, "Add feed", "Please enter both a feed name and keywords.")
+            return
+        storage.add_custom_feed(name, query)
+        self.feed_name.clear()
+        self.feed_query.clear()
+        self._render_feeds()
+        page = self._page()
+        if page:
+            page._reload_feed_picker()
+
+    def _remove_feed(self, name):
+        storage.remove_custom_feed(name)
+        page = self._page()
+        if page is not None and page._active_feed_name == name:
+            page._active_feed_name = None
+        self._render_feeds()
+        if page:
+            page._reload_feed_picker()
+
+    def _save_country(self):
+        value = self.country.text().strip().lower() or "us"
+        self.settings = storage.update_setting("country", value)
+        page = self._page()
+        if page:
+            page.settings = self.settings
+
+    def _save_page_size(self):
+        try:
+            value = max(1, min(50, int(self.page_size.text().strip())))
+        except ValueError:
+            value = self.settings.get("page_size", 15)
+        self.page_size.setText(str(value))
+        self.settings = storage.update_setting("page_size", value)
+        page = self._page()
+        if page:
+            page.settings = self.settings
+
+    def _save_refresh(self):
+        minutes = int(self.refresh.currentData() or 0)
+        self.settings = storage.update_setting("refresh_interval_minutes", minutes)
+        page = self._page()
+        if page:
+            page.settings = self.settings
+            page._schedule_auto_refresh()
+
+    def _toggle_key(self):
+        self._key_visible = not getattr(self, "_key_visible", False)
+        self.key_value.setEchoMode(
+            QLineEdit.EchoMode.Normal if self._key_visible else QLineEdit.EchoMode.Password
         )
-        save_btn.grid(row=0, column=1, rowspan=2, padx=(0, 8))
 
-        ctk.CTkLabel(
-            row_frame, text=item.get("source", "Unknown"),
-            font=ctk.CTkFont(size=11), text_color=theme.MUTED, anchor="w"
-        ).grid(row=1, column=0, sticky="w", padx=10, pady=(0, 6))
+    def _provider_changed(self):
+        provider = self.provider.currentData() or "fortnite"
+        info = KEY_PROVIDER_INFO[provider]
+        hint = info.get("key_help", "")
+        if info.get("key_url"):
+            hint += f"  ({info['key_url']})"
+        self.key_help.setText(hint)
+        extra = bool(info.get("needs_extra"))
+        self.custom_url.setVisible(extra)
+        self.custom_header.setVisible(extra)
+        self.custom_prefix.setVisible(extra)
+        self.custom_param.setVisible(extra)
 
-    def _toggle_save(self, item):
-        url = item.get("url")
-        if storage.is_article_saved(url):
-            storage.remove_saved_article(url)
-        else:
-            storage.save_article(item)
-        self._render_saved_tab()
-        self._refresh_save_buttons()
+    def _save_key(self):
+        provider = self.provider.currentData() or "fortnite"
+        extra = {}
+        if KEY_PROVIDER_INFO[provider].get("needs_extra"):
+            base_url = self.custom_url.text().strip()
+            if not base_url:
+                QMessageBox.warning(self, "Add API key", "Custom providers need a base URL.")
+                return
+            extra = {
+                "base_url": base_url,
+                "header_name": self.custom_header.text().strip(),
+                "header_prefix": self.custom_prefix.text().strip(),
+                "id_param": self.custom_param.text().strip(),
+            }
+        try:
+            crypto_store.add_key(provider, self.key_label.text().strip(), self.key_value.text().strip(), extra=extra)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Add API key", str(exc))
+            return
+        self.key_label.clear()
+        self.key_value.clear()
+        self.custom_url.clear()
+        self.custom_header.clear()
+        self.custom_prefix.clear()
+        self.custom_param.clear()
+        self._render_keys()
+        page = self._page()
+        if page:
+            page._refresh_gs_keys()
 
-    def _refresh_save_buttons(self):
-        """Re-render any currently visible headline lists so ☆/★ stays in sync."""
-        if self._home_news_data is not None:
-            self._render_headline_list(
-                self._home_news_data, None, self.home_news_scroll,
-                self.home_news_refresh_btn, "🔄 Refresh"
-            )
-        if self._feed_news_data is not None and hasattr(self, "feed_news_scroll"):
-            self._render_headline_list(
-                self._feed_news_data, None, self.feed_news_scroll,
-                self.feed_refresh_btn, "🔄 Refresh"
-            )
+    def _render_keys(self):
+        _clear(self.keys_host)
+        keys = crypto_store.list_keys()
+        if not keys:
+            empty = QLabel("No keys added yet.")
+            empty.setObjectName("Muted")
+            self.keys_host.addWidget(empty)
+            return
+        for k in keys:
+            info = KEY_PROVIDER_INFO.get(k["provider"], {"icon": "🔑", "name": k["provider"]})
+            card = QFrame()
+            card.setObjectName("Panel")
+            hl = QHBoxLayout(card)
+            col = QVBoxLayout()
+            name = QLabel(f"{info['icon']} {info['name']}  —  {k['label']}")
+            name.setObjectName("CardTitle")
+            preview = QLabel(k["preview"])
+            preview.setObjectName("Muted")
+            col.addWidget(name)
+            col.addWidget(preview)
+            hl.addLayout(col, 1)
+            rm = QPushButton("Remove")
+            rm.setObjectName("Danger")
+            rm.clicked.connect(lambda _=False, kid=k["id"]: self._remove_key(kid))
+            hl.addWidget(rm)
+            self.keys_host.addWidget(card)
 
-    def _open_link(self, url):
-        if url:
-            webbrowser.open(url)
+    def _remove_key(self, key_id):
+        crypto_store.remove_key(key_id)
+        self._render_keys()
+        page = self._page()
+        if page:
+            page._refresh_gs_keys()
 
-    def _clear_frame(self, frame):
-        for child in frame.winfo_children():
-            child.destroy()
+    def _clear_saved(self):
+        page = self._page()
+        if page is not None:
+            page._clear_saved_confirm()
+            return
+        if not storage.get_saved_articles():
+            return
+        if QMessageBox.question(self, "Clear saved articles", "Remove all saved articles?") != QMessageBox.StandardButton.Yes:
+            return
+        storage.clear_saved_articles()
 
-    def _touch_timestamp(self):
-        now = datetime.now().strftime("%H:%M:%S")
-        self.last_updated_label.configure(text=f"Last updated: {now}")
+    def _reset_all(self):
+        if QMessageBox.question(
+            self, "Reset all data",
+            "This will remove all custom feeds, saved articles, and preferences "
+            "(API keys are stored separately and are not affected). Continue?",
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        storage.clear_all_data()
+        self.settings = storage.get_settings()
+        page = self._page()
+        if page is not None:
+            page.settings = self.settings
+            page._active_feed_name = None
+            page._reload_feed_picker()
+            page._render_saved()
+            page._schedule_auto_refresh()
+        self._render_feeds()
+        self.country.setText(self.settings.get("country", "us"))
+        self.page_size.setText(str(self.settings.get("page_size", 15)))
+        self.refresh.setCurrentIndex(0)

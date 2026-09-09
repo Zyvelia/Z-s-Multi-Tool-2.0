@@ -103,11 +103,23 @@ END;
 
 
 def default_db_path():
-    """Local (non-network) location for the library index file."""
-    base = os.environ.get("APPDATA") or os.path.expanduser("~/.config")
-    d = os.path.join(base, "MusicPlayerApp")
-    os.makedirs(d, exist_ok=True)
-    return os.path.join(d, "library.db")
+    """Per-user AppData location for the library index file, routed
+    through ZsMultiTool's shared core/paths.py convention. Falls back to
+    a standalone location if core.paths isn't importable (e.g. running
+    this module outside the full app)."""
+    try:
+        from core.paths import data_path, migrate_legacy_path
+        new_path = data_path("media_player", "library.db")
+        legacy = os.path.join(
+            os.environ.get("APPDATA") or os.path.expanduser("~/.config"),
+            "MusicPlayerApp", "library.db",
+        )
+        return migrate_legacy_path(new_path, legacy)
+    except ImportError:
+        base = os.environ.get("APPDATA") or os.path.expanduser("~/.config")
+        d = os.path.join(base, "MusicPlayerApp")
+        os.makedirs(d, exist_ok=True)
+        return os.path.join(d, "library.db")
 
 
 def normalize_path(path: str) -> str:
@@ -137,6 +149,12 @@ def _read_tags(path):
                         title = tags["title"][0]
                     if "artist" in tags:
                         artist = tags["artist"][0]
+                    elif "albumartist" in tags:
+                        # Some rips (compilations, OSTs) only tag
+                        # Album Artist (TPE2) and leave the per-track
+                        # Artist (TPE1) blank — better than showing
+                        # nothing.
+                        artist = tags["albumartist"][0]
                     if "album" in tags:
                         album = tags["album"][0]
                 except (TypeError, KeyError, IndexError):
@@ -207,6 +225,8 @@ class Library:
             "CREATE INDEX IF NOT EXISTS idx_songs_sort ON songs("
             "artist COLLATE NOCASE, album COLLATE NOCASE, title COLLATE NOCASE)"
         )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_songs_path ON songs(path)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_songs_artist ON songs(artist COLLATE NOCASE)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_songs_scan_gen ON songs(scan_gen)")
         conn.commit()
 
@@ -634,3 +654,91 @@ class Library:
             f"WHERE id IN ({placeholders})", ids
         ).fetchall()
         return {r["id"]: dict(r) for r in rows}
+
+    def _browse_clause(self, query="", artist=None, folder=None):
+        clauses = []
+        params = []
+        query = (query or "").strip()
+        if query:
+            if self._has_fts:
+                terms = [t.replace('"', "") for t in query.split() if t]
+                match = " ".join(f'"{t}"*' for t in terms) if terms else ""
+                if match:
+                    clauses.append(
+                        "songs.id IN (SELECT rowid FROM songs_fts WHERE songs_fts MATCH ?)"
+                    )
+                    params.append(match)
+                else:
+                    query = ""
+            if query and not self._has_fts:
+                like = f"%{query}%"
+                clauses.append(
+                    "(title LIKE ? OR artist LIKE ? OR album LIKE ? OR path LIKE ?)"
+                )
+                params.extend((like, like, like, like))
+        if artist == "":
+            clauses.append("(artist IS NULL OR artist='')")
+        elif artist:
+            clauses.append("artist = ?")
+            params.append(artist)
+        if folder:
+            prefix = normalize_path(folder)
+            clauses.append("path LIKE ?")
+            params.append(prefix + "%")
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        return where, params
+
+    def browse_count(self, query="", artist=None, folder=None):
+        where, params = self._browse_clause(query, artist, folder)
+        row = self._conn().execute(
+            "SELECT COUNT(*) FROM songs" + where, params
+        ).fetchone()
+        return int(row[0] if row else 0)
+
+    def browse_index_of(self, song_id, query="", artist=None, folder=None):
+        song = self.get_song(song_id)
+        if not song:
+            return -1
+        where, params = self._browse_clause(query, artist, folder)
+        sa = song.get("artist") or ""
+        sl = song.get("album") or ""
+        st = song.get("title") or ""
+        extra = (
+            " AND (COALESCE(artist,'') COLLATE NOCASE < ?"
+            " OR (COALESCE(artist,'') COLLATE NOCASE = ? AND COALESCE(album,'') COLLATE NOCASE < ?)"
+            " OR (COALESCE(artist,'') COLLATE NOCASE = ? AND COALESCE(album,'') COLLATE NOCASE = ? AND COALESCE(title,'') COLLATE NOCASE < ?)"
+            " OR (COALESCE(artist,'') COLLATE NOCASE = ? AND COALESCE(album,'') COLLATE NOCASE = ? AND COALESCE(title,'') COLLATE NOCASE = ? AND id < ?))"
+        )
+        if where:
+            sql = "SELECT COUNT(*) FROM songs" + where + extra
+        else:
+            sql = "SELECT COUNT(*) FROM songs WHERE 1=1" + extra
+        row = self._conn().execute(
+            sql,
+            (*params, sa, sa, sl, sa, sl, st, sa, sl, st, int(song_id)),
+        ).fetchone()
+        return int(row[0] if row else 0)
+
+    def browse_rows(self, query="", artist=None, folder=None, offset=0, limit=200):
+        where, params = self._browse_clause(query, artist, folder)
+        rows = self._conn().execute(
+            "SELECT id, path, title, artist, album, duration, audio_path, cue_start, cue_end FROM songs"
+            + where
+            + " ORDER BY COALESCE(artist,'') COLLATE NOCASE, COALESCE(album,'') COLLATE NOCASE,"
+            + " COALESCE(title,'') COLLATE NOCASE, id"
+            + " LIMIT ? OFFSET ?",
+            (*params, int(limit), int(offset)),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def list_artists(self, limit=2500):
+        rows = self._conn().execute(
+            "SELECT artist, COUNT(*) AS n FROM songs "
+            "GROUP BY artist ORDER BY artist COLLATE NOCASE LIMIT ?",
+            (int(limit),),
+        ).fetchall()
+        out = []
+        for row in rows:
+            name = (row["artist"] or "").strip()
+            out.append((name, int(row["n"])))
+        return out

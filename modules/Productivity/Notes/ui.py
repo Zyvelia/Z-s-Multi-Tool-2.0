@@ -1,361 +1,239 @@
-# modules/notes/ui.py
-#
-# General-purpose note-taking: free-form title + body text, with zero or
-# more attached links per note. Not a checklist/shopping-list layout —
-# just information you want to keep, with the option to attach reference
-# links to it.
+"""Qt Notes — list, editor, pin, links."""
+
+from __future__ import annotations
 
 import webbrowser
-from tkinter import messagebox
 
-import customtkinter as ctk
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QMessageBox,
+    QPlainTextEdit,
+    QPushButton,
+    QSplitter,
+    QVBoxLayout,
+    QWidget,
+)
 
-from core import theme
-from . import storage
+import importlib
+
+storage = importlib.import_module("modules.Productivity.Notes.storage")
 
 
-class NotesPage(ctk.CTkFrame):
-
+class NotesPage(QWidget):
     def __init__(self, parent, manager):
-        super().__init__(parent, fg_color=theme.BG)
+        super().__init__(parent)
         self.manager = manager
+        self.current_id = None
+        self.links = []
 
-        self.current_note_id = None   # None = new/unsaved note
-        self.link_rows = []           # [{"frame", "label_var", "url_var"}]
+        root = QVBoxLayout(self)
+        header = QHBoxLayout()
+        title = QLabel("Notes")
+        title.setObjectName("AccentTitle")
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Search notes…")
+        self.search.textChanged.connect(self.refresh_list)
+        header.addWidget(title)
+        header.addWidget(self.search, 1)
+        root.addLayout(header)
 
-        self._build_ui()
+        split = QSplitter(Qt.Orientation.Horizontal)
+        left = QWidget()
+        ll = QVBoxLayout(left)
+        new = QPushButton("+ New note")
+        new.setObjectName("Primary")
+        new.clicked.connect(self._new)
+        self.list = QListWidget()
+        self.list.currentItemChanged.connect(self._on_select)
+        ll.addWidget(new)
+        ll.addWidget(self.list, 1)
+
+        right = QWidget()
+        rl = QVBoxLayout(right)
+        top = QHBoxLayout()
+        self.title_edit = QLineEdit()
+        self.title_edit.setPlaceholderText("Note title…")
+        self.pin_btn = QPushButton("☆")
+        self.pin_btn.setFixedWidth(42)
+        self.pin_btn.clicked.connect(self._toggle_pin)
+        delete = QPushButton("Delete")
+        delete.setObjectName("Danger")
+        delete.clicked.connect(self._delete)
+        top.addWidget(self.title_edit, 1)
+        top.addWidget(self.pin_btn)
+        top.addWidget(delete)
+        rl.addLayout(top)
+
+        rl.addWidget(QLabel("Links"))
+        self.links_host = QWidget()
+        self.links_lay = QVBoxLayout(self.links_host)
+        self.links_lay.setContentsMargins(0, 0, 0, 0)
+        rl.addWidget(self.links_host)
+        add_row = QHBoxLayout()
+        self.link_label = QLineEdit()
+        self.link_label.setPlaceholderText("Label (optional)")
+        self.link_url = QLineEdit()
+        self.link_url.setPlaceholderText("https://…")
+        self.link_url.returnPressed.connect(self._add_link)
+        add_link = QPushButton("Add link")
+        add_link.clicked.connect(self._add_link)
+        add_row.addWidget(self.link_label)
+        add_row.addWidget(self.link_url, 1)
+        add_row.addWidget(add_link)
+        rl.addLayout(add_row)
+
+        self.body = QPlainTextEdit()
+        rl.addWidget(self.body, 1)
+        save = QPushButton("Save note")
+        save.setObjectName("Primary")
+        save.clicked.connect(self._save)
+        rl.addWidget(save)
+
+        split.addWidget(left)
+        split.addWidget(right)
+        split.setStretchFactor(1, 3)
+        root.addWidget(split, 1)
         self.refresh_list()
-        self._new_note()
+        self._new()
 
-    # =====================================================
-    # LAYOUT
-    # =====================================================
+    @staticmethod
+    def build_qt_module_settings(parent, manager):
+        from core.qt.remote_common import SimpleRemoteSettings, ensure_manager_server
 
-    def _build_ui(self):
-        header = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=theme.RADIUS)
-        header.pack(fill="x", padx=theme.PAD_LG, pady=(theme.PAD_LG, theme.PAD))
-
-        ctk.CTkLabel(
-            header,
-            text="📝  Notes",
-            font=theme.font(22, "bold"),
-            text_color=theme.TEXT
-        ).pack(side="left", padx=theme.PAD_LG, pady=14)
-
-        self.search_var = ctk.StringVar()
-        search_entry = ctk.CTkEntry(
-            header,
-            placeholder_text="Search notes...",
-            textvariable=self.search_var,
-            width=240,
-            height=34,
-            fg_color=theme.PANEL_2,
-            border_width=0,
-            corner_radius=theme.RADIUS_SM,
-            text_color=theme.TEXT
+        web_mod = importlib.import_module("modules.Productivity.Notes.web_server")
+        return SimpleRemoteSettings(
+            parent,
+            manager,
+            get_server=lambda: ensure_manager_server(
+                manager, "notes_web_server", web_mod.NotesWebServer
+            ),
+            app_key="notes",
+            default_port=8768,
+            title="Remote access (notes on phone)",
+            hint="Phone can read and edit notes over your tailnet. Hub Go Live maps this too.",
         )
-        search_entry.pack(side="right", padx=(0, theme.PAD_LG), pady=14)
-        self.search_var.trace_add("write", lambda *_: self.refresh_list())
 
-        body = ctk.CTkFrame(self, fg_color="transparent")
-        body.pack(fill="both", expand=True, padx=theme.PAD_LG, pady=(0, theme.PAD_LG))
-        body.grid_columnconfigure(0, weight=0, minsize=280)
-        body.grid_columnconfigure(1, weight=1)
-        body.grid_rowconfigure(0, weight=1)
-
-        # ── Left: note list ─────────────────────────────
-        list_panel = ctk.CTkFrame(body, **theme.panel_style())
-        list_panel.grid(row=0, column=0, sticky="nsew", padx=(0, theme.PAD))
-        list_panel.grid_rowconfigure(1, weight=1)
-        list_panel.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkButton(
-            list_panel,
-            text="+ New Note",
-            height=36,
-            command=self._new_note,
-            **theme.primary_button_style()
-        ).grid(row=0, column=0, sticky="ew", padx=theme.PAD, pady=theme.PAD)
-
-        self.list_frame = ctk.CTkScrollableFrame(
-            list_panel,
-            fg_color="transparent"
-        )
-        self.list_frame.grid(row=1, column=0, sticky="nsew", padx=(6, 6), pady=(0, 6))
-        self.list_frame.grid_columnconfigure(0, weight=1)
-
-        # ── Right: editor ────────────────────────────────
-        editor_panel = ctk.CTkFrame(body, **theme.panel_style())
-        editor_panel.grid(row=0, column=1, sticky="nsew")
-        editor_panel.grid_rowconfigure(2, weight=1)
-        editor_panel.grid_columnconfigure(0, weight=1)
-
-        top_row = ctk.CTkFrame(editor_panel, fg_color="transparent")
-        top_row.grid(row=0, column=0, sticky="ew", padx=theme.PAD_LG, pady=(theme.PAD_LG, 8))
-        top_row.grid_columnconfigure(0, weight=1)
-
-        self.title_entry = ctk.CTkEntry(
-            top_row,
-            placeholder_text="Note title...",
-            font=theme.font(18, "bold"),
-            fg_color=theme.PANEL_2,
-            border_width=0,
-            corner_radius=theme.RADIUS_SM,
-            text_color=theme.TEXT,
-            height=42
-        )
-        self.title_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
-
-        self.pin_btn = ctk.CTkButton(
-            top_row, text="☆", width=42, height=42,
-            command=self._toggle_pin,
-            **theme.secondary_button_style()
-        )
-        self.pin_btn.grid(row=0, column=1, padx=(0, 8))
-
-        ctk.CTkButton(
-            top_row, text="🗑", width=42, height=42,
-            command=self._delete_note,
-            **theme.danger_button_style()
-        ).grid(row=0, column=2)
-
-        # links section
-        links_section = ctk.CTkFrame(editor_panel, fg_color="transparent")
-        links_section.grid(row=1, column=0, sticky="ew", padx=theme.PAD_LG, pady=(0, 8))
-        links_section.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(
-            links_section, text="LINKS", font=theme.font(10, "bold"),
-            text_color=theme.FAINT, anchor="w"
-        ).grid(row=0, column=0, sticky="w")
-
-        self.links_frame = ctk.CTkFrame(links_section, fg_color="transparent")
-        self.links_frame.grid(row=1, column=0, sticky="ew", pady=(4, 6))
-        self.links_frame.grid_columnconfigure(0, weight=1)
-
-        add_link_row = ctk.CTkFrame(links_section, fg_color="transparent")
-        add_link_row.grid(row=2, column=0, sticky="ew")
-        add_link_row.grid_columnconfigure(1, weight=1)
-
-        self.new_link_label = ctk.CTkEntry(
-            add_link_row, placeholder_text="Label (optional)",
-            width=140, height=30, fg_color=theme.PANEL_2, border_width=0,
-            corner_radius=theme.RADIUS_SM, text_color=theme.TEXT
-        )
-        self.new_link_label.grid(row=0, column=0, padx=(0, 6))
-
-        self.new_link_url = ctk.CTkEntry(
-            add_link_row, placeholder_text="https://...",
-            height=30, fg_color=theme.PANEL_2, border_width=0,
-            corner_radius=theme.RADIUS_SM, text_color=theme.TEXT
-        )
-        self.new_link_url.grid(row=0, column=1, sticky="ew", padx=(0, 6))
-        self.new_link_url.bind("<Return>", lambda _e: self._add_link_row())
-
-        ctk.CTkButton(
-            add_link_row, text="Add Link", width=90, height=30,
-            command=self._add_link_row,
-            **theme.secondary_button_style()
-        ).grid(row=0, column=2)
-
-        # body text
-        self.body_text = ctk.CTkTextbox(
-            editor_panel,
-            fg_color=theme.PANEL_2,
-            corner_radius=theme.RADIUS_SM,
-            text_color=theme.TEXT,
-            border_width=0,
-            font=theme.font(13),
-            wrap="word"
-        )
-        self.body_text.grid(row=2, column=0, sticky="nsew", padx=theme.PAD_LG, pady=(0, 8))
-
-        ctk.CTkButton(
-            editor_panel,
-            text="Save Note",
-            height=38,
-            command=self._save_note,
-            **theme.primary_button_style()
-        ).grid(row=3, column=0, sticky="ew", padx=theme.PAD_LG, pady=(0, theme.PAD_LG))
-
-    # =====================================================
-    # NOTE LIST
-    # =====================================================
+    def on_show(self):
+        self.refresh_list()
 
     def refresh_list(self):
-        for w in self.list_frame.winfo_children():
-            w.destroy()
+        self.list.blockSignals(True)
+        self.list.clear()
+        notes = storage.search_notes(self.search.text())
+        for note in notes:
+            title = note.get("title") or "Untitled"
+            if note.get("pinned"):
+                title = "📌 " + title
+            item = QListWidgetItem(title)
+            item.setData(Qt.ItemDataRole.UserRole, note["id"])
+            self.list.addItem(item)
+            if note["id"] == self.current_id:
+                self.list.setCurrentItem(item)
+        self.list.blockSignals(False)
 
-        notes = storage.search_notes(self.search_var.get())
-
-        if not notes:
-            ctk.CTkLabel(
-                self.list_frame,
-                text="No notes yet." if not self.search_var.get() else "No matches.",
-                font=theme.font(12),
-                text_color=theme.MUTED
-            ).grid(row=0, column=0, sticky="w", padx=6, pady=10)
+    def _on_select(self, item):
+        if item is None:
             return
+        note = storage.get_note(item.data(Qt.ItemDataRole.UserRole))
+        if note:
+            self._load(note)
 
-        for i, note in enumerate(notes):
-            self._build_list_item(note, i)
+    def _clear_links(self):
+        while self.links_lay.count():
+            item = self.links_lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        self.links = []
 
-    def _build_list_item(self, note, row):
-        selected = note["id"] == self.current_note_id
+    def _render_links(self):
+        while self.links_lay.count():
+            item = self.links_lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        for i, link in enumerate(self.links):
+            row = QWidget()
+            hl = QHBoxLayout(row)
+            hl.setContentsMargins(0, 0, 0, 0)
+            display = link.get("label") or link.get("url") or ""
+            btn = QPushButton(f"🔗 {display}")
+            btn.setStyleSheet("text-align: left;")
+            btn.clicked.connect(lambda _=False, u=link.get("url"): self._open_link(u))
+            rm = QPushButton("✕")
+            rm.setFixedWidth(28)
+            rm.clicked.connect(lambda _=False, idx=i: self._remove_link(idx))
+            hl.addWidget(btn, 1)
+            hl.addWidget(rm)
+            self.links_lay.addWidget(row)
 
-        item = ctk.CTkFrame(
-            self.list_frame,
-            fg_color=theme.PANEL_HOVER if selected else theme.PANEL_2,
-            corner_radius=theme.RADIUS_SM,
-            border_width=1,
-            border_color=theme.ACCENT if selected else theme.BORDER
-        )
-        item.grid(row=row, column=0, sticky="ew", pady=4)
-        item.grid_columnconfigure(0, weight=1)
+    def _add_link(self):
+        url = self.link_url.text().strip()
+        if not url:
+            return
+        self.links.append({"label": self.link_label.text().strip(), "url": url})
+        self.link_label.clear()
+        self.link_url.clear()
+        self._render_links()
 
-        title = note.get("title", "Untitled")
-        if note.get("pinned"):
-            title = "📌 " + title
-
-        ctk.CTkLabel(
-            item, text=title, font=theme.font(13, "bold"),
-            text_color=theme.TEXT, anchor="w"
-        ).grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 0))
-
-        snippet = (note.get("body", "") or "").strip().replace("\n", " ")
-        if len(snippet) > 60:
-            snippet = snippet[:57] + "..."
-        link_count = len(note.get("links", []))
-        meta = snippet or "(empty note)"
-        if link_count:
-            meta += f"   🔗 {link_count}"
-
-        ctk.CTkLabel(
-            item, text=meta, font=theme.font(11),
-            text_color=theme.MUTED, anchor="w"
-        ).grid(row=1, column=0, sticky="ew", padx=10, pady=(2, 8))
-
-        for widget in (item,) + tuple(item.winfo_children()):
-            widget.bind("<Button-1>", lambda _e, n=note: self._load_note(n))
-
-    # =====================================================
-    # EDITOR
-    # =====================================================
-
-    def _clear_links_ui(self):
-        for row in self.link_rows:
-            row["frame"].destroy()
-        self.link_rows = []
-
-    def _add_link_row(self, label="", url=""):
-        # called both by the "Add Link" button (reads the new-link entries)
-        # and internally when loading an existing note's saved links
-        if label == "" and url == "":
-            label = self.new_link_label.get().strip()
-            url = self.new_link_url.get().strip()
-            if not url:
-                return
-            self.new_link_label.delete(0, "end")
-            self.new_link_url.delete(0, "end")
-
-        row_frame = ctk.CTkFrame(self.links_frame, fg_color=theme.PANEL_2, corner_radius=6)
-        row_frame.grid(row=len(self.link_rows), column=0, sticky="ew", pady=2)
-        row_frame.grid_columnconfigure(0, weight=1)
-
-        display = label if label else url
-        link_label = ctk.CTkLabel(
-            row_frame, text=f"🔗 {display}", font=theme.font(12),
-            text_color=theme.ACCENT, anchor="w", cursor="hand2"
-        )
-        link_label.grid(row=0, column=0, sticky="ew", padx=8, pady=6)
-        link_label.bind("<Button-1>", lambda _e, u=url: self._open_link(u))
-
-        entry = {"frame": row_frame, "label": label, "url": url}
-
-        ctk.CTkButton(
-            row_frame, text="✕", width=24, height=24, corner_radius=12,
-            fg_color=theme.PANEL, hover_color=theme.DANGER_HOVER,
-            text_color=theme.MUTED, font=theme.font(10, "bold"),
-            command=lambda: self._remove_link_row(entry)
-        ).grid(row=0, column=1, padx=6)
-
-        self.link_rows.append(entry)
-
-    def _remove_link_row(self, entry):
-        entry["frame"].destroy()
-        self.link_rows.remove(entry)
-        # re-pack remaining rows so there's no gap
-        for i, row in enumerate(self.link_rows):
-            row["frame"].grid(row=i, column=0, sticky="ew", pady=2)
+    def _remove_link(self, idx):
+        if 0 <= idx < len(self.links):
+            self.links.pop(idx)
+            self._render_links()
 
     def _open_link(self, url):
         if not url:
             return
         if not url.startswith(("http://", "https://")):
             url = "https://" + url
-        try:
-            webbrowser.open(url)
-        except Exception as e:
-            messagebox.showerror("Couldn't Open Link", str(e))
+        webbrowser.open(url)
 
-    def _new_note(self):
-        self.current_note_id = None
-        self.title_entry.delete(0, "end")
-        self.body_text.delete("1.0", "end")
-        self._clear_links_ui()
-        self.pin_btn.configure(text="☆")
-        self.title_entry.focus_set()
+    def _new(self):
+        self.current_id = None
+        self.title_edit.clear()
+        self.body.clear()
+        self._clear_links()
+        self.pin_btn.setText("☆")
+        self.title_edit.setFocus()
         self.refresh_list()
 
-    def _load_note(self, note):
-        self.current_note_id = note["id"]
-        self.title_entry.delete(0, "end")
-        self.title_entry.insert(0, note.get("title", ""))
-        self.body_text.delete("1.0", "end")
-        self.body_text.insert("1.0", note.get("body", ""))
-        self._clear_links_ui()
-        for link in note.get("links", []):
-            self._add_link_row(label=link.get("label", ""), url=link.get("url", ""))
-        self.pin_btn.configure(text="📌" if note.get("pinned") else "☆")
-        self.refresh_list()
+    def _load(self, note):
+        self.current_id = note["id"]
+        self.title_edit.setText(note.get("title") or "")
+        self.body.setPlainText(note.get("body") or "")
+        self.links = list(note.get("links") or [])
+        self._render_links()
+        self.pin_btn.setText("📌" if note.get("pinned") else "☆")
 
-    def _save_note(self):
-        title = self.title_entry.get().strip()
-        body = self.body_text.get("1.0", "end-1c")
-        links = [{"label": r["label"], "url": r["url"]} for r in self.link_rows]
-
-        if self.current_note_id is None:
-            note = storage.create_note(title=title, body=body, links=links)
-            self.current_note_id = note["id"]
+    def _save(self):
+        title = self.title_edit.text().strip()
+        body = self.body.toPlainText()
+        if self.current_id is None:
+            note = storage.create_note(title=title, body=body, links=self.links)
+            self.current_id = note["id"]
         else:
-            storage.update_note(self.current_note_id, title=title, body=body, links=links)
-
+            storage.update_note(self.current_id, title=title, body=body, links=self.links)
         self.refresh_list()
 
-    def _delete_note(self):
-        if self.current_note_id is None:
-            self._new_note()
+    def _delete(self):
+        if self.current_id is None:
+            self._new()
             return
-
-        if messagebox.askyesno("Delete Note", "Delete this note? This can't be undone."):
-            storage.delete_note(self.current_note_id)
-            self._new_note()
+        if QMessageBox.question(self, "Delete note", "Delete this note? This can't be undone.") != QMessageBox.StandardButton.Yes:
+            return
+        storage.delete_note(self.current_id)
+        self._new()
 
     def _toggle_pin(self):
-        if self.current_note_id is None:
-            messagebox.showinfo("Save First", "Save the note before pinning it.")
+        if self.current_id is None:
+            QMessageBox.information(self, "Save first", "Save the note before pinning it.")
             return
-        note = storage.toggle_pin(self.current_note_id)
+        note = storage.toggle_pin(self.current_id)
         if note:
-            self.pin_btn.configure(text="📌" if note.get("pinned") else "☆")
+            self.pin_btn.setText("📌" if note.get("pinned") else "☆")
             self.refresh_list()
-
-    # =====================================================
-    # LIFECYCLE
-    # =====================================================
-
-    def on_show(self):
-        # Picks up notes changed elsewhere (there's nowhere else that
-        # edits notes right now, but this keeps behavior consistent with
-        # other pages if that ever changes) and re-highlights selection.
-        self.refresh_list()

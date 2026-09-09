@@ -1,672 +1,399 @@
-# modules/remote_hub/ui.py
-#
-# The whole point of this module: one page, one button, reachable from
-# your phone as a single URL — https://<this-device>.<tailnet>/ — that
-# links out to whichever of Music Player / Security Vault / YouTube
-# Downloader you've got live, each on its own fixed Tailscale HTTPS port
-# (see APP_HTTPS_PORTS in core/services/tailscale_service.py). No more
-# hunting for three different addresses or flipping switches in three
-# different apps before you can reach the one you actually want.
-#
-# "Go Live" does four things, in order:
-#   1. Connects to your tailnet if you aren't already (tailscale up).
-#   2. Makes sure each app's own local web server is running — creating
-#      it on demand from its saved settings if you've never actually
-#      opened that app's page this session (same lazy pattern App.__init__
-#      already uses for its own auto-start-on-launch feature).
-#   3. Points Tailscale's `serve` feature at each one on its own port.
-#   4. Builds and serves the hub landing page itself on the default
-#      address (443) — see core/services/hub_service.py.
-#
-# "Go Offline" reverses step 3 and 4 only — it leaves the loopback
-# servers running (they're harmless; 127.0.0.1 only) so "Go Live" again
-# is instant, but nothing is reachable from your tailnet until you do.
+"""Qt Remote Hub — same HubController as the CTk page."""
 
-import importlib
-import json
-import os
+from __future__ import annotations
+
+import io
 import threading
 
-import customtkinter as ctk
-from tkinter import messagebox
-
 import qrcode
-from PIL import Image
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QPixmap
+from PySide6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QMessageBox,
+    QPushButton,
+    QScrollArea,
+    QVBoxLayout,
+    QWidget,
+)
 
-from core import theme
-from core.services import hub_service
-from core.services.tailscale_service import APP_HTTPS_PORTS
+from core.services import device_trust, hub_service
+from modules.Network.remote_hub.controller import APPS, HubController
 
 STATUS_POLL_MS = 4000
 
-APPS = [
-    ("vault", "🔒 Security Vault"),
-    ("music", "🎵 Music Player"),
-    ("yt", "⬇️ YouTube Downloader"),
-    ("notes", "📝 Notes"),
-    ("games", "🎮 Gaming Hub"),
-    ("soundboard", "🔊 Soundboard"),
-    ("send", "📤 Quick Send"),
-    ("arcade", "🕹️ Arcade"),
-]
 
-
-class HubController:
-    """
-    All the "actually talk to Tailscale and the per-app web servers"
-    logic, with no UI attached. Pulled out of RemoteHubPage so the
-    dashboard mini widget (mini_widget.py) can drive the exact same
-    Go Live / Go Offline behavior from a single button without needing
-    the full Remote Hub page to have been opened first.
-
-    Every method here is blocking — callers run them off the Tk main
-    thread (see RemoteHubPage._on_go_live / mini_widget.py for the
-    pattern) and hop back with .after(0, ...) to touch widgets.
-    """
-
-    def __init__(self, manager):
-        self.manager = manager
-        self.tailscale = manager.container.tailscale_service
-
-    # =====================================================
-    # LAZY SERVER ACCESS — mirrors core/app.py's own auto-start logic,
-    # for the case where you go live before ever opening a given app's
-    # own page this session.
-    # =====================================================
-
-    def _get_vault_web_server(self):
-        return self.manager.container.vault_web_server
-
-    def _get_music_web_server(self):
-        existing = getattr(self.manager, "music_web_server", None)
-        if existing:
-            return existing
-        # Music Player now lives at modules/Media/Media Player/ — the space
-        # in the folder name means it can't be written as a normal
-        # `from modules.x import y` statement, so we go through
-        # importlib with the dotted path as a plain string instead.
-        music_db = importlib.import_module("modules.Media.Media Player.db")
-        web_server_mod = importlib.import_module("modules.Media.Media Player.web_server")
-        server = web_server_mod.MusicWebServer(library=music_db.Library())
-        self.manager.music_web_server = server
-        return server
-
-    def _get_yt_web_server(self):
-        existing = getattr(self.manager, "yt_web_server", None)
-        if existing:
-            return existing
-        # Now at modules/Media/YouTube Downloader/ — same importlib
-        # workaround as Music Player above.
-        yt_ui = importlib.import_module("modules.Media.YouTube Downloader.ui")
-        yt_web_server_mod = importlib.import_module("modules.Media.YouTube Downloader.web_server")
-        YTWebServer = yt_web_server_mod.YTWebServer
-        settings = {}
-        try:
-            if os.path.exists(yt_ui.SETTINGS_FILE):
-                with open(yt_ui.SETTINGS_FILE) as f:
-                    settings = json.load(f)
-        except Exception:
-            settings = {}
-        output_dir = settings.get("output_dir") or os.path.expanduser("~")
-        server = YTWebServer(
-            get_output_dir=lambda: output_dir,
-            get_cookie_file=lambda: settings.get("cookie_file", ""),
-            get_ffmpeg_dir=lambda: None,
-            default_format=settings.get("format", "mp4"),
-            default_type=settings.get("type", "video"),
-            default_quality=settings.get("quality", "192"),
-        )
-        server.access_code = settings.get("access_code", "")
-        self.manager.yt_web_server = server
-        return server
-
-    def _get_notes_web_server(self):
-        existing = getattr(self.manager, "notes_web_server", None)
-        if existing:
-            return existing
-        # Now at modules/Productivity/Notes/
-        web_server_mod = importlib.import_module("modules.Productivity.Notes.web_server")
-        server = web_server_mod.NotesWebServer()
-        self.manager.notes_web_server = server
-        return server
-
-    def _get_quick_send_web_server(self):
-        existing = getattr(self.manager, "quick_send_web_server", None)
-        if existing:
-            return existing
-        # Now at modules/Network/quick_send/ (gained the Network category
-        # prefix, but the folder itself is unchanged)
-        web_server_mod = importlib.import_module("modules.Network.quick_send.web_server")
-        server = web_server_mod.QuickSendWebServer()
-        self.manager.quick_send_web_server = server
-        return server
-
-    def _get_games_web_server(self):
-        # Same lazy-create-and-stash pattern Gaming Hub's own page uses
-        # (modules/gaming_hub/ui.py) — sharing the "gaming_hub_web_server"
-        # attribute name on the manager means whichever page opens first
-        # (this one or Gaming Hub itself) creates it, and the other reuses it.
-        existing = getattr(self.manager, "gaming_hub_web_server", None)
-        if existing:
-            return existing
-        # Now at modules/Gaming/Gaming Hub/
-        web_server_mod = importlib.import_module("modules.Gaming.Gaming Hub.web_server")
-        server = web_server_mod.GamingHubWebServer()
-        self.manager.gaming_hub_web_server = server
-        return server
-
-    def _get_soundboard_web_server(self):
-        # Same lazy-create-and-stash pattern as Gaming Hub above — mirrors
-        # modules/soundboard/ui.py's own RemoteAccessPanel wiring, sharing
-        # the "soundboard_web_server" attribute name on the manager.
-        existing = getattr(self.manager, "soundboard_web_server", None)
-        if existing:
-            return existing
-        # Now at modules/Media/soundboard/ (gained the Media category
-        # prefix, but the folder itself is unchanged)
-        web_server_mod = importlib.import_module("modules.Media.soundboard.web_server")
-        server = web_server_mod.SoundboardWebServer()
-        self.manager.soundboard_web_server = server
-        return server
-
-    def _get_arcade_web_server(self):
-        existing = getattr(self.manager, "arcade_web_server", None)
-        if existing:
-            return existing
-        web_server_mod = importlib.import_module("modules.Gaming.Arcade.web_server")
-        server = web_server_mod.ArcadeWebServer()
-        self.manager.arcade_web_server = server
-        return server
-
-    def _ports(self):
-        vault_cfg = self.tailscale.load_config()
-        music_db = importlib.import_module("modules.Media.Media Player.db")
-        music_port = int(music_db.Library().get_setting("remote_port", "8766") or 8766)
-
-        yt_ui = importlib.import_module("modules.Media.YouTube Downloader.ui")
-        yt_settings = {}
-        try:
-            if os.path.exists(yt_ui.SETTINGS_FILE):
-                with open(yt_ui.SETTINGS_FILE) as f:
-                    yt_settings = json.load(f)
-        except Exception:
-            pass
-        yt_port = int(yt_settings.get("remote_port", 8767) or 8767)
-
-        return {
-            "vault": int(vault_cfg.get("web_port", 8765) or 8765),
-            "music": music_port,
-            "yt": yt_port,
-            "notes": 8768,  # no Settings tab yet for Notes, so this is fixed
-            "send": 8769,  # no Settings tab yet for Quick Send either, so this is fixed;
-            # this is just the local loopback port — enable_app_serve() below maps
-            # it to the fixed public port in APP_HTTPS_PORTS["send"] (8449), which
-            # is what the mobile app's ModulePorts.send expects
-            # Gaming Hub's own page (modules/gaming_hub/ui.py) always starts
-            # its loopback server on APP_HTTPS_PORTS["games"] via
-            # RemoteAccessPanel — matching that here means whichever page
-            # starts it first, the other one finds it already running.
-            "games": APP_HTTPS_PORTS["games"],
-            # Same deal for Soundboard (modules/soundboard/ui.py).
-            "soundboard": APP_HTTPS_PORTS["soundboard"],
-            "arcade": APP_HTTPS_PORTS["arcade"],
-        }
-
-    # =====================================================
-    # GO LIVE / GO OFFLINE / STATUS — blocking, call off-thread
-    # =====================================================
-
-    def go_live_sync(self):
-        """
-        Runs the full "Go Live" sequence. Returns (fatal, errors):
-          fatal  -- a message if we couldn't even attempt to go live
-                    (Tailscale missing, or couldn't connect), else None
-          errors -- per-app warnings collected along the way; only
-                    meaningful when fatal is None
-        """
-        errors = []
-
-        status = self.tailscale.get_status()
-        if not status["installed"]:
-            return "Tailscale isn't installed on this device.", []
-        if not status["running"]:
-            cfg = self.tailscale.load_config()
-            ok, msg = self.tailscale.connect(
-                hostname=cfg.get("hostname") or None,
-                auth_key=cfg.get("auth_key") or None,
-                accept_routes=cfg.get("accept_routes", True),
-            )
-            if not ok:
-                return f"Couldn't connect to Tailscale: {msg}", []
-            status = self.tailscale.get_status()
-
-        ports = self._ports()
-
-        vault_srv = self._get_vault_web_server()
-        if not vault_srv.is_running():
-            ok, msg = vault_srv.start(ports["vault"])
-            if not ok:
-                errors.append(f"Security Vault server: {msg}")
-        if vault_srv.is_running():
-            ok, msg = self.tailscale.enable_app_serve("vault", ports["vault"])
-            if not ok:
-                errors.append(f"Security Vault Tailscale: {msg}")
-
-        music_srv = self._get_music_web_server()
-        if not music_srv.is_running():
-            ok, msg = music_srv.start(ports["music"])
-            if not ok:
-                errors.append(f"Music Player server: {msg}")
-        if music_srv.is_running():
-            ok, msg = self.tailscale.enable_app_serve("music", ports["music"])
-            if not ok:
-                errors.append(f"Music Player Tailscale: {msg}")
-
-        yt_srv = self._get_yt_web_server()
-        if not yt_srv.is_running():
-            ok, msg = yt_srv.start(ports["yt"])
-            if not ok:
-                errors.append(f"YouTube Downloader server: {msg}")
-        if yt_srv.is_running():
-            ok, msg = self.tailscale.enable_app_serve("yt", ports["yt"])
-            if not ok:
-                errors.append(f"YouTube Downloader Tailscale: {msg}")
-
-        notes_srv = self._get_notes_web_server()
-        if not notes_srv.is_running():
-            ok, msg = notes_srv.start(ports["notes"])
-            if not ok:
-                errors.append(f"Notes server: {msg}")
-        if notes_srv.is_running():
-            ok, msg = self.tailscale.enable_app_serve("notes", ports["notes"])
-            if not ok:
-                errors.append(f"Notes Tailscale: {msg}")
-
-        quick_send_srv = self._get_quick_send_web_server()
-        if not quick_send_srv.is_running():
-            ok, msg = quick_send_srv.start(ports["send"])
-            if not ok:
-                errors.append(f"Quick Send server: {msg}")
-        if quick_send_srv.is_running():
-            ok, msg = self.tailscale.enable_app_serve("send", ports["send"])
-            if not ok:
-                errors.append(f"Quick Send Tailscale: {msg}")
-
-        games_srv = self._get_games_web_server()
-        if not games_srv.is_running():
-            ok, msg = games_srv.start(ports["games"])
-            if not ok:
-                errors.append(f"Gaming Hub server: {msg}")
-        if games_srv.is_running():
-            ok, msg = self.tailscale.enable_app_serve("games", ports["games"])
-            if not ok:
-                errors.append(f"Gaming Hub Tailscale: {msg}")
-
-        soundboard_srv = self._get_soundboard_web_server()
-        if not soundboard_srv.is_running():
-            ok, msg = soundboard_srv.start(ports["soundboard"])
-            if not ok:
-                errors.append(f"Soundboard server: {msg}")
-        if soundboard_srv.is_running():
-            ok, msg = self.tailscale.enable_app_serve("soundboard", ports["soundboard"])
-            if not ok:
-                errors.append(f"Soundboard Tailscale: {msg}")
-
-        arcade_srv = self._get_arcade_web_server()
-        if not arcade_srv.is_running():
-            ok, msg = arcade_srv.start(ports["arcade"])
-            if not ok:
-                errors.append(f"Arcade server: {msg}")
-        if arcade_srv.is_running():
-            ok, msg = self.tailscale.enable_app_serve("arcade", ports["arcade"])
-            if not ok:
-                errors.append(f"Arcade Tailscale: {msg}")
-
-        live_apps = [key for key in ("vault", "music", "yt", "notes", "games", "soundboard",
-                                      "send", "arcade")
-                     if self.tailscale.is_app_serving(key)]
-        hostname = status.get("hostname") or "this-device"
-        hub_path = hub_service.write_hub_html(hostname, live_apps)
-        ok, msg = self.tailscale.enable_hub_page(hub_path)
-        if not ok:
-            errors.append(f"Hub landing page: {msg}")
-
-        return None, errors
-
-    def go_offline_sync(self):
-        self.tailscale.disable_hub_page()
-        for key, _ in APPS:
-            self.tailscale.disable_app_serve(key)
-
-    def get_status_sync(self):
-        status = self.tailscale.get_status()
-        live_apps = {key: self.tailscale.is_app_serving(key) for key, _ in APPS} \
-            if status["running"] else {key: False for key, _ in APPS}
-        return status, live_apps
-
-
-class RemoteHubPage(ctk.CTkFrame):
-
+class RemoteHubPage(QWidget):
     def __init__(self, parent, manager):
-        super().__init__(parent, fg_color=theme.BG)
+        super().__init__(parent)
         self.manager = manager
-        self.tailscale = manager.container.tailscale_service
         self.controller = HubController(manager)
-
-        self._poll_job = None
-
-        wrap = ctk.CTkScrollableFrame(self, fg_color="transparent")
-        wrap.pack(fill="both", expand=True, padx=12, pady=12)
-
-        self._build_header(wrap)
-        self._build_go_live_panel(wrap)
-        self._build_qr_panel(wrap)
-        self._build_inbox_panel(wrap)
-        self._build_status_panel(wrap)
-
-        self._refresh_status()
-        self._start_polling()
-
-    def destroy(self):
-        if self._poll_job:
-            try:
-                self.after_cancel(self._poll_job)
-            except Exception:
-                pass
-        super().destroy()
-
-    # =====================================================
-    # UI
-    # =====================================================
-
-    def _build_header(self, parent):
-        ctk.CTkLabel(
-            parent, text="📡 Remote Hub",
-            font=theme.font(22, "bold"), text_color=theme.TEXT,
-        ).pack(anchor="w", pady=(0, 4))
-        ctk.CTkLabel(
-            parent,
-            text="One address for your phone that links to whichever of your apps are live, "
-                 "instead of remembering three. Reachable only from devices on your own "
-                 "Tailscale network.",
-            font=theme.font(12), text_color=theme.MUTED, anchor="w", justify="left", wraplength=760,
-        ).pack(anchor="w", pady=(0, 16))
-
-    def _build_go_live_panel(self, parent):
-        panel = ctk.CTkFrame(
-            parent, fg_color=theme.PANEL, corner_radius=theme.RADIUS,
-            border_width=1, border_color=theme.BORDER,
-        )
-        panel.pack(fill="x", pady=(0, 12))
-
-        self.hub_status_label = ctk.CTkLabel(
-            panel, text="Checking…", font=theme.font(14), text_color=theme.MUTED,
-            anchor="w", justify="left", wraplength=700,
-        )
-        self.hub_status_label.pack(fill="x", padx=16, pady=(16, 10))
-
-        row = ctk.CTkFrame(panel, fg_color="transparent")
-        row.pack(fill="x", padx=16, pady=(0, 16))
-
-        self.go_live_btn = ctk.CTkButton(
-            row, text="🟢 Go Live",
-            fg_color=theme.SUCCESS, hover_color=theme.ACCENT_HOVER,
-            text_color="#0b0d10", height=42, font=theme.font(14, "bold"),
-            corner_radius=theme.RADIUS_SM,
-            command=self._on_go_live,
-        )
-        self.go_live_btn.pack(side="left", fill="x", expand=True, padx=(0, 6))
-
-        self.go_offline_btn = ctk.CTkButton(
-            row, text="⚪ Go Offline",
-            fg_color=theme.DANGER_BG, hover_color=theme.DANGER_HOVER,
-            text_color=theme.DANGER, height=42, font=theme.font(14, "bold"),
-            corner_radius=theme.RADIUS_SM,
-            command=self._on_go_offline,
-        )
-        self.go_offline_btn.pack(side="left", fill="x", expand=True, padx=(6, 0))
-
-    def _hub_url(self, hostname: str) -> str:
-        return f"https://{hostname}/"
-
-    def _build_qr_panel(self, parent):
-        panel = ctk.CTkFrame(
-            parent, fg_color=theme.PANEL, corner_radius=theme.RADIUS,
-            border_width=1, border_color=theme.BORDER,
-        )
-        panel.pack(fill="x", pady=(0, 12))
-        panel.grid_columnconfigure(1, weight=1)
-
-        self._qr_image_label = ctk.CTkLabel(panel, text="", width=160, height=160)
-        self._qr_image_label.grid(row=0, column=0, rowspan=3, padx=16, pady=16)
-
-        ctk.CTkLabel(
-            panel, text="Scan on your phone",
-            font=theme.font(14, "bold"), text_color=theme.TEXT, anchor="w",
-        ).grid(row=0, column=1, sticky="w", padx=(0, 16), pady=(16, 4))
-
-        self._qr_url_label = ctk.CTkLabel(
-            panel, text="Go Live to generate a QR code for your hub URL.",
-            font=theme.font(12), text_color=theme.MUTED, anchor="w", justify="left", wraplength=480,
-        )
-        self._qr_url_label.grid(row=1, column=1, sticky="ew", padx=(0, 16), pady=(0, 10))
-
-        ctk.CTkButton(
-            panel, text="Copy hub link", width=130, height=32,
-            command=self._copy_hub_link, **theme.secondary_button_style(),
-        ).grid(row=2, column=1, sticky="w", padx=(0, 16), pady=(0, 16))
-
         self._hub_link = ""
+        self._app_labels = {}
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        body = QWidget()
+        self._body = QVBoxLayout(body)
+        self._body.setContentsMargins(20, 16, 20, 20)
+        self._body.setSpacing(12)
+        scroll.setWidget(body)
+        outer.addWidget(scroll)
+
+        self._build_header()
+        self._build_go_live()
+        self._build_trust()
+        self._build_qr()
+        self._build_inbox()
+        self._build_status()
+        self._body.addStretch(1)
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(STATUS_POLL_MS)
+        self._timer.timeout.connect(self._refresh_status)
+        self._timer.start()
+        self._refresh_status()
+
+    def on_hide(self):
+        self._timer.stop()
+
+    def on_show(self):
+        if not self._timer.isActive():
+            self._timer.start()
+        self._refresh_status()
+
+    def _panel(self):
+        frame = QFrame()
+        frame.setObjectName("Panel")
+        lay = QVBoxLayout(frame)
+        lay.setContentsMargins(16, 14, 16, 14)
+        lay.setSpacing(8)
+        return frame, lay
+
+    def _build_header(self):
+        title = QLabel("📡 Remote Hub")
+        title.setObjectName("AccentTitle")
+        hint = QLabel(
+            "One address for your phone that links to whichever of your apps are live, "
+            "instead of remembering three. Reachable only from devices on your own Tailscale network."
+        )
+        hint.setObjectName("Muted")
+        hint.setWordWrap(True)
+        self._body.addWidget(title)
+        self._body.addWidget(hint)
+
+    def _build_go_live(self):
+        frame, lay = self._panel()
+        self.hub_status = QLabel("Checking…")
+        self.hub_status.setObjectName("Muted")
+        self.hub_status.setWordWrap(True)
+        lay.addWidget(self.hub_status)
+        row = QHBoxLayout()
+        self.go_live_btn = QPushButton("Go Live")
+        self.go_live_btn.setObjectName("Primary")
+        self.go_live_btn.clicked.connect(self._on_go_live)
+        self.go_offline_btn = QPushButton("Go Offline")
+        self.go_offline_btn.setObjectName("Danger")
+        self.go_offline_btn.clicked.connect(self._on_go_offline)
+        row.addWidget(self.go_live_btn)
+        row.addWidget(self.go_offline_btn)
+        lay.addLayout(row)
+        self._body.addWidget(frame)
+
+    def _build_trust(self):
+        frame, lay = self._panel()
+        title = QLabel("This phone only")
+        title.setObjectName("CardTitle")
+        hint = QLabel(
+            "Pair your phone with a one-time code. After you turn on "
+            "“Only paired phones”, a stolen copy of the app stops when you "
+            "revoke it here. This is not malware detection — revoke is the kill switch. "
+            "The Night page still uses invite keys so friends can join."
+        )
+        hint.setObjectName("Muted")
+        hint.setWordWrap(True)
+        lay.addWidget(title)
+        lay.addWidget(hint)
+        self.required_box = QCheckBox(
+            "Only paired phones can use Vault, Chat, servers, notes, and the rest"
+        )
+        self.required_box.setChecked(device_trust.is_required())
+        self.required_box.toggled.connect(self._on_trust_required)
+        lay.addWidget(self.required_box)
+        row = QHBoxLayout()
+        issue = QPushButton("Issue pairing code")
+        issue.clicked.connect(self._on_issue_pair_code)
+        self.pair_code = QLabel("")
+        self.pair_code.setObjectName("AccentTitle")
+        self.pair_hint = QLabel("Go Live first, then type the code in the phone app → Settings.")
+        self.pair_hint.setObjectName("Muted")
+        row.addWidget(issue)
+        row.addWidget(self.pair_code)
+        row.addWidget(self.pair_hint, 1)
+        lay.addLayout(row)
+        self.device_host = QWidget()
+        self.device_lay = QVBoxLayout(self.device_host)
+        self.device_lay.setContentsMargins(0, 4, 0, 0)
+        lay.addWidget(self.device_host)
+        self._body.addWidget(frame)
+        self._refresh_device_list()
+
+    def _build_qr(self):
+        frame, lay = self._panel()
+        row = QHBoxLayout()
+        self.qr_label = QLabel()
+        self.qr_label.setFixedSize(160, 160)
+        self.qr_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        col = QVBoxLayout()
+        scan = QLabel("Scan on your phone")
+        scan.setObjectName("CardTitle")
+        self.qr_url = QLabel("Go Live to generate a QR code for your hub URL.")
+        self.qr_url.setObjectName("Muted")
+        self.qr_url.setWordWrap(True)
+        self.qr_url.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        copy = QPushButton("Copy hub link")
+        copy.clicked.connect(self._copy_hub_link)
+        col.addWidget(scan)
+        col.addWidget(self.qr_url)
+        col.addWidget(copy, alignment=Qt.AlignmentFlag.AlignLeft)
+        col.addStretch(1)
+        row.addWidget(self.qr_label)
+        row.addLayout(col, 1)
+        lay.addLayout(row)
+        self._body.addWidget(frame)
+
+    def _build_inbox(self):
+        frame, lay = self._panel()
+        title = QLabel("Unified inbox")
+        title.setObjectName("CardTitle")
+        hint = QLabel(
+            "Recent files from Quick Send — same list appears on the phone hub page when Send is live."
+        )
+        hint.setObjectName("Muted")
+        hint.setWordWrap(True)
+        lay.addWidget(title)
+        lay.addWidget(hint)
+        self.inbox_host = QWidget()
+        self.inbox_lay = QVBoxLayout(self.inbox_host)
+        self.inbox_lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(self.inbox_host)
+        self._body.addWidget(frame)
+
+    def _build_status(self):
+        frame, lay = self._panel()
+        title = QLabel("Per-app status")
+        title.setObjectName("CardTitle")
+        lay.addWidget(title)
+        for key, label in APPS:
+            row = QHBoxLayout()
+            name = QLabel(label)
+            status = QLabel("Off")
+            status.setObjectName("Muted")
+            row.addWidget(name)
+            row.addStretch(1)
+            row.addWidget(status)
+            lay.addLayout(row)
+            self._app_labels[key] = status
+        note = QLabel(
+            "Fine-grained on/off for a single app still lives in that app's own "
+            "⚙ settings — this page is for the phone-facing address as a whole."
+        )
+        note.setObjectName("Muted")
+        note.setWordWrap(True)
+        lay.addWidget(note)
+        self._body.addWidget(frame)
+
+    def _on_trust_required(self, on):
+        device_trust.set_required(bool(on))
+        self._refresh_device_list()
+
+    def _on_issue_pair_code(self):
+        code = device_trust.issue_pair_code()
+        self.pair_code.setText(code)
+        self.pair_hint.setText("Valid about 10 minutes. Enter it on the phone, then flip the switch.")
+
+    def _on_revoke_device(self, device_id):
+        box = QMessageBox.question(
+            self,
+            "Revoke this phone?",
+            "That copy of the app will stop talking to this PC until you pair again.",
+        )
+        if box != QMessageBox.StandardButton.Yes:
+            return
+        device_trust.revoke(device_id)
+        self._refresh_device_list()
+
+    def _clear_layout(self, layout):
+        while layout.count():
+            item = layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+
+    def _refresh_device_list(self):
+        self._clear_layout(self.device_lay)
+        devices = device_trust.list_devices()
+        if not devices:
+            empty = QLabel("No phones paired yet.")
+            empty.setObjectName("Muted")
+            self.device_lay.addWidget(empty)
+            return
+        for d in devices:
+            row = QHBoxLayout()
+            revoked = d.get("revoked")
+            label = QLabel(f"{d.get('label') or 'phone'}{' — revoked' if revoked else ''}")
+            if revoked:
+                label.setObjectName("Muted")
+            row.addWidget(label, 1)
+            if not revoked:
+                btn = QPushButton("Revoke")
+                btn.setObjectName("Danger")
+                btn.clicked.connect(lambda _=False, i=d.get("id"): self._on_revoke_device(i))
+                row.addWidget(btn)
+            self.device_lay.addLayout(row)
 
     def _copy_hub_link(self):
         if not self._hub_link:
-            messagebox.showinfo("Remote Hub", "Go Live first — then the hub link will be ready to copy.")
+            QMessageBox.information(self, "Remote Hub", "Go Live first — then the hub link will be ready to copy.")
             return
-        try:
-            self.clipboard_clear()
-            self.clipboard_append(self._hub_link)
-            messagebox.showinfo("Remote Hub", "Hub link copied to clipboard.")
-        except Exception:
-            messagebox.showerror("Remote Hub", "Could not copy link.")
+        QApplication.clipboard().setText(self._hub_link)
+        QMessageBox.information(self, "Remote Hub", "Hub link copied to clipboard.")
 
-    def _set_qr(self, url: str | None):
+    def _set_qr(self, url):
         self._hub_link = url or ""
         if not url:
-            self._qr_image_label.configure(image=None, text="")
-            self._qr_url_label.configure(text="Go Live to generate a QR code for your hub URL.")
+            self.qr_label.clear()
+            self.qr_url.setText("Go Live to generate a QR code for your hub URL.")
             return
-        self._qr_url_label.configure(text=url)
+        self.qr_url.setText(url)
         qr = qrcode.QRCode(box_size=4, border=2)
         qr.add_data(url)
         qr.make(fit=True)
         img = qr.make_image(fill_color="#0f1115", back_color="#e8ecf1").convert("RGB")
-        img = img.resize((150, 150), Image.NEAREST)
-        self._qr_ctk = ctk.CTkImage(light_image=img, dark_image=img, size=(150, 150))
-        self._qr_image_label.configure(image=self._qr_ctk, text="")
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        pix = QPixmap()
+        pix.loadFromData(buf.getvalue(), "PNG")
+        self.qr_label.setPixmap(pix.scaled(150, 150, Qt.AspectRatioMode.KeepAspectRatio))
 
-    def _build_inbox_panel(self, parent):
-        panel = ctk.CTkFrame(
-            parent, fg_color=theme.PANEL, corner_radius=theme.RADIUS,
-            border_width=1, border_color=theme.BORDER,
-        )
-        panel.pack(fill="x", pady=(0, 12))
-        panel.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(
-            panel, text="Unified inbox",
-            font=theme.font(14, "bold"), text_color=theme.TEXT,
-        ).pack(anchor="w", padx=16, pady=(14, 4))
-
-        ctk.CTkLabel(
-            panel,
-            text="Recent files from Quick Send — same list appears on the phone hub page when Send is live.",
-            font=theme.font(11), text_color=theme.MUTED, anchor="w", justify="left", wraplength=700,
-        ).pack(anchor="w", padx=16, pady=(0, 8))
-
-        self._inbox_frame = ctk.CTkFrame(panel, fg_color="transparent")
-        self._inbox_frame.pack(fill="x", padx=16, pady=(0, 14))
-
-    def _refresh_inbox(self, live_apps: dict):
-        for w in self._inbox_frame.winfo_children():
-            w.destroy()
+    def _refresh_inbox(self, live_apps):
+        self._clear_layout(self.inbox_lay)
         if not live_apps.get("send"):
-            ctk.CTkLabel(
-                self._inbox_frame, text="Quick Send is off — start it from Go Live or the Quick Send module.",
-                font=theme.font(11), text_color=theme.FAINT, anchor="w",
-            ).pack(anchor="w")
+            lab = QLabel("Quick Send is off — start it from Go Live or the Quick Send module.")
+            lab.setObjectName("Muted")
+            self.inbox_lay.addWidget(lab)
             return
         entries = hub_service._recent_quick_send(8)
         if not entries:
-            ctk.CTkLabel(
-                self._inbox_frame, text="No files received yet.",
-                font=theme.font(11), text_color=theme.FAINT, anchor="w",
-            ).pack(anchor="w")
+            lab = QLabel("No files received yet.")
+            lab.setObjectName("Muted")
+            self.inbox_lay.addWidget(lab)
             return
         for entry in entries:
-            row = ctk.CTkFrame(self._inbox_frame, fg_color=theme.PANEL_2, corner_radius=theme.RADIUS_SM)
-            row.pack(fill="x", pady=3)
-            name = entry.get("filename") or "file"
-            when = hub_service._time_ago(entry.get("received_at", 0))
-            ctk.CTkLabel(row, text=name, font=theme.font(12), text_color=theme.TEXT, anchor="w").pack(
-                side="left", padx=10, pady=8,
-            )
-            ctk.CTkLabel(row, text=when, font=theme.font(11), text_color=theme.MUTED).pack(
-                side="right", padx=10, pady=8,
-            )
-
-    def _build_status_panel(self, parent):
-        panel = ctk.CTkFrame(
-            parent, fg_color=theme.PANEL, corner_radius=theme.RADIUS,
-            border_width=1, border_color=theme.BORDER,
-        )
-        panel.pack(fill="x")
-
-        ctk.CTkLabel(
-            panel, text="Per-app status",
-            font=theme.font(14, "bold"), text_color=theme.TEXT,
-        ).pack(anchor="w", padx=16, pady=(14, 6))
-
-        self._app_labels = {}
-        for key, label in APPS:
-            row = ctk.CTkFrame(panel, fg_color="transparent")
-            row.pack(fill="x", padx=16, pady=4)
-            ctk.CTkLabel(
-                row, text=label, font=theme.font(13), text_color=theme.TEXT,
-            ).pack(side="left")
-            lbl = ctk.CTkLabel(
-                row, text="⚪ Off", font=theme.font(13), text_color=theme.MUTED,
-            )
-            lbl.pack(side="right")
-            self._app_labels[key] = lbl
-
-        ctk.CTkLabel(
-            panel,
-            text="Fine-grained on/off for a single app still lives in that app's own "
-                 "⚙ settings — this page is for the phone-facing address as a whole.",
-            font=theme.font(11), text_color=theme.MUTED, anchor="w", justify="left", wraplength=700,
-        ).pack(fill="x", padx=16, pady=(10, 14))
-
-    # =====================================================
-    # GO LIVE / GO OFFLINE — delegates to HubController so the page and
-    # the dashboard mini widget do exactly the same thing.
-    # =====================================================
+            row = QHBoxLayout()
+            name = QLabel(entry.get("filename") or "file")
+            when = QLabel(hub_service._time_ago(entry.get("received_at", 0)))
+            when.setObjectName("Muted")
+            row.addWidget(name, 1)
+            row.addWidget(when)
+            self.inbox_lay.addLayout(row)
 
     def _on_go_live(self):
-        self.go_live_btn.configure(state="disabled", text="Starting…")
+        self.go_live_btn.setEnabled(False)
+        self.go_live_btn.setText("Starting…")
 
         def work():
             fatal, errors = self.controller.go_live_sync()
             if fatal:
-                self.after(0, lambda: self._go_live_failed(fatal))
+                QTimer.singleShot(0, lambda: self._go_live_failed(fatal))
             else:
-                self.after(0, lambda: self._go_live_done(errors))
+                QTimer.singleShot(0, lambda: self._go_live_done(errors))
 
         threading.Thread(target=work, daemon=True).start()
 
     def _go_live_failed(self, msg):
-        self.go_live_btn.configure(state="normal", text="🟢 Go Live")
-        messagebox.showerror("Couldn't go live", msg)
+        self.go_live_btn.setEnabled(True)
+        self.go_live_btn.setText("Go Live")
+        QMessageBox.critical(self, "Couldn't go live", msg)
         self._refresh_status()
 
     def _go_live_done(self, errors):
-        self.go_live_btn.configure(state="normal", text="🟢 Go Live")
+        self.go_live_btn.setEnabled(True)
+        self.go_live_btn.setText("Go Live")
         if errors:
-            messagebox.showwarning(
-                "Went live with some issues",
+            QMessageBox.warning(
+                self, "Went live with some issues",
                 "Some apps didn't come up cleanly:\n\n" + "\n".join(errors),
             )
         self._refresh_status()
 
     def _on_go_offline(self):
-        self.go_offline_btn.configure(state="disabled", text="Stopping…")
+        self.go_offline_btn.setEnabled(False)
+        self.go_offline_btn.setText("Stopping…")
 
         def work():
             self.controller.go_offline_sync()
-            self.after(0, self._go_offline_done)
+            QTimer.singleShot(0, self._go_offline_done)
 
         threading.Thread(target=work, daemon=True).start()
 
     def _go_offline_done(self):
-        self.go_offline_btn.configure(state="normal", text="⚪ Go Offline")
+        self.go_offline_btn.setEnabled(True)
+        self.go_offline_btn.setText("Go Offline")
         self._refresh_status()
-
-    # =====================================================
-    # STATUS POLLING
-    # =====================================================
-
-    def _start_polling(self):
-        self._poll_job = self.after(STATUS_POLL_MS, self._poll_tick)
-
-    def _poll_tick(self):
-        self._refresh_status()
-        self._poll_job = self.after(STATUS_POLL_MS, self._poll_tick)
 
     def _refresh_status(self):
         def work():
             status, live_apps = self.controller.get_status_sync()
-            self.after(0, lambda: self._apply_status(status, live_apps))
+            QTimer.singleShot(0, lambda: self._apply_status(status, live_apps))
 
         threading.Thread(target=work, daemon=True).start()
 
     def _apply_status(self, status, live_apps):
-        if not self.winfo_exists():
-            return
-
         for key, live in live_apps.items():
             lbl = self._app_labels.get(key)
             if lbl:
-                lbl.configure(
-                    text="🟢 Live" if live else "⚪ Off",
-                    text_color=theme.SUCCESS if live else theme.MUTED,
-                )
-
+                lbl.setText("Live" if live else "Off")
+                lbl.setObjectName("Success" if live else "Muted")
+                lbl.style().unpolish(lbl)
+                lbl.style().polish(lbl)
         if not status["installed"]:
-            self.hub_status_label.configure(
-                text="Tailscale isn't installed on this device — install it first "
-                     "(any app's ⚙ settings has a shortcut).",
-                text_color=theme.MUTED,
+            self.hub_status.setText(
+                "Tailscale isn't installed on this device — install it first "
+                "(any app's ⚙ settings has a shortcut)."
             )
+            self.hub_status.setObjectName("Muted")
             self._set_qr(None)
         elif not status["running"]:
-            self.hub_status_label.configure(
-                text="⚪ Not connected to your tailnet yet. Tap Go Live to connect and "
-                     "bring everything up in one step.",
-                text_color=theme.MUTED,
+            self.hub_status.setText(
+                "Not connected to your tailnet yet. Tap Go Live to connect and "
+                "bring everything up in one step."
             )
+            self.hub_status.setObjectName("Muted")
             self._set_qr(None)
         elif any(live_apps.values()):
             hostname = status.get("hostname") or "this-device"
-            url = self._hub_url(hostname)
-            self.hub_status_label.configure(
-                text=f"🟢 Live — open {url} on your phone (same tailnet) or scan the QR below.",
-                text_color=theme.SUCCESS,
+            url = f"https://{hostname}/"
+            self.hub_status.setText(
+                f"Live — open {url} on your phone (same tailnet) or scan the QR below."
             )
+            self.hub_status.setObjectName("Success")
             self._set_qr(url)
         else:
-            self.hub_status_label.configure(
-                text="⚪ Connected to Tailscale, but nothing is live yet. Tap Go Live.",
-                text_color=theme.MUTED,
-            )
+            self.hub_status.setText("Connected to Tailscale, but nothing is live yet. Tap Go Live.")
+            self.hub_status.setObjectName("Muted")
             self._set_qr(None)
-
+        self.hub_status.style().unpolish(self.hub_status)
+        self.hub_status.style().polish(self.hub_status)
         self._refresh_inbox(live_apps)
+        try:
+            self._refresh_device_list()
+        except Exception:
+            pass

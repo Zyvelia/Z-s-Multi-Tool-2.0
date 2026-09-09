@@ -1,16 +1,46 @@
-import os
+"""Qt App Installer — winget search/install, apps.json catalog, custom commands."""
+
+from __future__ import annotations
+
 import json
-import shutil
-import subprocess
+import os
 import threading
 
-import customtkinter as ctk
-from tkinter import messagebox, simpledialog, ttk
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QComboBox,
+    QFrame,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QMessageBox,
+    QPlainTextEdit,
+    QPushButton,
+    QTabWidget,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
 
-from core import theme
+from pathlib import Path
 
-DB_FILENAME = "apps.json"
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), DB_FILENAME)
+from modules.app_installer.backend import (
+    CommandWorker,
+    CustomApp,
+    InstallWorker,
+    SearchWorker,
+    load_custom_apps,
+    save_custom_apps,
+    winget_available,
+)
+import modules.app_installer as _app_installer_pkg
+
+DB_PATH = str(Path(_app_installer_pkg.__file__).with_name("apps.json"))
 
 
 def load_database():
@@ -25,258 +55,369 @@ def save_database(data):
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
-def winget_available():
-    return shutil.which("winget") is not None
-
-
-class AppInstallerModule(ctk.CTkFrame):
-    """Browse apps.json and install via winget or custom commands."""
-
-    def __init__(self, container, manager=None):
-        super().__init__(container, fg_color=theme.BG)
+class AppInstallerModule(QWidget):
+    def __init__(self, parent, manager):
+        super().__init__(parent)
         self.manager = manager
         self.db = load_database()
-        self.check_vars = {}
-        self.entry_lookup = {}
+        self.checked: set[str] = set()
+        self._worker = None
+        self._poll = QTimer(self)
+        self._poll.setInterval(200)
+        self._poll.timeout.connect(self._drain_events)
 
-        self._build_ui()
-        self._populate_tree()
+        root = QVBoxLayout(self)
+        title = QLabel("App Installer")
+        title.setObjectName("AccentTitle")
+        hint = QLabel("Search winget, install from the bundled catalog, or run custom install commands.")
+        hint.setObjectName("Muted")
+        hint.setWordWrap(True)
+        root.addWidget(title)
+        root.addWidget(hint)
 
+        tabs = QTabWidget()
+        tabs.addTab(self._build_catalog(), "Catalog")
+        tabs.addTab(self._build_search(), "Winget search")
+        tabs.addTab(self._build_custom(), "Custom commands")
+        root.addWidget(tabs, 1)
+
+        self.log = QPlainTextEdit()
+        self.log.setReadOnly(True)
+        self.log.setMaximumHeight(140)
+        root.addWidget(QLabel("Output"))
+        root.addWidget(self.log)
         if not winget_available():
-            self._log("winget was not found on PATH. Installs will fail until it's available.\n")
+            self._append("winget was not found on PATH. Installs will fail until it's available.\n")
 
-    def _build_ui(self):
-        self.grid_rowconfigure(1, weight=1)
-        self.grid_columnconfigure(0, weight=1)
+    def _build_catalog(self):
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        bar = QHBoxLayout()
+        self.cat_search = QLineEdit()
+        self.cat_search.setPlaceholderText("Filter catalog…")
+        self.cat_search.textChanged.connect(self._populate_catalog)
+        add = QPushButton("Add to catalog")
+        add.clicked.connect(self._add_app_dialog)
+        reload_btn = QPushButton("Reload DB")
+        reload_btn.clicked.connect(self._reload_db)
+        bar.addWidget(self.cat_search, 1)
+        bar.addWidget(add)
+        bar.addWidget(reload_btn)
+        lay.addLayout(bar)
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(["✔", "App", "Winget ID", "Category", "Description"])
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.cellClicked.connect(self._toggle_cell)
+        lay.addWidget(self.table, 1)
+        actions = QHBoxLayout()
+        install = QPushButton("Install checked")
+        install.setObjectName("Primary")
+        install.clicked.connect(self._install_checked)
+        all_btn = QPushButton("Check visible")
+        all_btn.clicked.connect(lambda: self._set_visible(True))
+        none_btn = QPushButton("Uncheck all")
+        none_btn.clicked.connect(lambda: self._set_visible(False))
+        actions.addWidget(install)
+        actions.addWidget(all_btn)
+        actions.addWidget(none_btn)
+        actions.addStretch(1)
+        lay.addLayout(actions)
+        self._populate_catalog()
+        return page
 
-        top = ctk.CTkFrame(self, fg_color="transparent")
-        top.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 6))
-        top.grid_columnconfigure(1, weight=1)
+    def _build_search(self):
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        bar = QHBoxLayout()
+        self.query = QLineEdit()
+        self.query.setPlaceholderText("Search winget…")
+        self.query.returnPressed.connect(self._search)
+        go = QPushButton("Search")
+        go.setObjectName("Primary")
+        go.clicked.connect(self._search)
+        bar.addWidget(self.query, 1)
+        bar.addWidget(go)
+        lay.addLayout(bar)
+        self.results = QListWidget()
+        lay.addWidget(self.results, 1)
+        inst = QPushButton("Install selected")
+        inst.setObjectName("Primary")
+        inst.clicked.connect(self._install_selected_search)
+        lay.addWidget(inst)
+        return page
 
-        ctk.CTkLabel(top, text="Search:", text_color=theme.MUTED).grid(row=0, column=0, padx=(0, 8))
-        self.search_var = ctk.StringVar()
-        self.search_var.trace_add("write", lambda *_: self._populate_tree())
-        ctk.CTkEntry(top, textvariable=self.search_var, fg_color=theme.PANEL_2,
-                     border_color=theme.BORDER, text_color=theme.TEXT).grid(
-            row=0, column=1, sticky="ew", padx=(0, 8))
-        ctk.CTkButton(top, text="Add App to DB", command=self._add_app_dialog,
-                      **theme.secondary_button_kwargs()).grid(row=0, column=2, padx=4)
-        ctk.CTkButton(top, text="Reload DB", command=self._reload_db,
-                      **theme.secondary_button_kwargs()).grid(row=0, column=3)
+    def _build_custom(self):
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        self.custom_list = QListWidget()
+        self.custom_list.currentItemChanged.connect(self._load_custom)
+        lay.addWidget(self.custom_list, 1)
+        form = QFrame()
+        form.setObjectName("Panel")
+        fl = QVBoxLayout(form)
+        self.custom_name = QLineEdit()
+        self.custom_name.setPlaceholderText("Name")
+        self.custom_cmd = QLineEdit()
+        self.custom_cmd.setPlaceholderText("Command (e.g. winget install --id Foo.Bar -e --silent)")
+        self.custom_cat = QComboBox()
+        self.custom_cat.setEditable(True)
+        self.custom_cat.addItems(["Utilities", "Browsers", "Dev Tools", "Media", "Productivity", "Gaming"])
+        fl.addWidget(self.custom_name)
+        fl.addWidget(self.custom_cmd)
+        fl.addWidget(self.custom_cat)
+        row = QHBoxLayout()
+        save = QPushButton("Save custom app")
+        save.setObjectName("Primary")
+        save.clicked.connect(self._save_custom)
+        run = QPushButton("Run command")
+        run.clicked.connect(self._run_custom)
+        delete = QPushButton("Delete")
+        delete.setObjectName("Danger")
+        delete.clicked.connect(self._delete_custom)
+        row.addWidget(save)
+        row.addWidget(run)
+        row.addWidget(delete)
+        row.addStretch(1)
+        fl.addLayout(row)
+        oneoff = QLineEdit()
+        oneoff.setPlaceholderText("Or paste a one-off command here…")
+        self.oneoff = oneoff
+        run_one = QPushButton("Run one-off")
+        run_one.clicked.connect(lambda: self._run_command(self.oneoff.text().strip()))
+        fl.addWidget(oneoff)
+        fl.addWidget(run_one)
+        lay.addWidget(form)
+        self._refresh_custom_list()
+        return page
 
-        tree_wrap = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=theme.RADIUS,
-                                 border_width=1, border_color=theme.BORDER)
-        tree_wrap.grid(row=1, column=0, sticky="nsew", padx=12, pady=6)
-        tree_wrap.grid_rowconfigure(0, weight=1)
-        tree_wrap.grid_columnconfigure(0, weight=1)
-
-        columns = ("selected", "name", "id", "category", "desc")
-        self.tree = ttk.Treeview(tree_wrap, columns=columns, show="headings", selectmode="extended")
-        self.tree.heading("selected", text="✔")
-        self.tree.heading("name", text="App")
-        self.tree.heading("id", text="Winget ID")
-        self.tree.heading("category", text="Category")
-        self.tree.heading("desc", text="Description")
-        self.tree.column("selected", width=30, anchor="center")
-        self.tree.column("name", width=160)
-        self.tree.column("id", width=160)
-        self.tree.column("category", width=100)
-        self.tree.column("desc", width=260)
-
-        style = ttk.Style(self.tree)
-        style.theme_use("clam")
-        style.configure("Treeview",
-                        background=theme.PANEL_2, foreground=theme.TEXT,
-                        fieldbackground=theme.PANEL_2, bordercolor=theme.BORDER,
-                        rowheight=26)
-        style.map("Treeview", background=[("selected", theme.ACCENT_GLOW)],
-                  foreground=[("selected", theme.ACCENT)])
-        style.configure("Treeview.Heading", background=theme.PANEL, foreground=theme.MUTED,
-                        relief="flat")
-        style.configure("Vertical.TScrollbar", background=theme.PANEL_2, troughcolor=theme.PANEL,
-                        bordercolor=theme.BORDER)
-
-        vsb = ttk.Scrollbar(tree_wrap, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=vsb.set)
-        self.tree.grid(row=0, column=0, sticky="nsew", padx=(8, 0), pady=8)
-        vsb.grid(row=0, column=1, sticky="ns", pady=8, padx=(0, 8))
-
-        self.tree.bind("<Button-1>", self._on_tree_click)
-        self.tree.bind("<space>", self._toggle_selected_rows)
-
-        action_frame = ctk.CTkFrame(self, fg_color="transparent")
-        action_frame.grid(row=2, column=0, sticky="ew", padx=12, pady=4)
-        ctk.CTkButton(action_frame, text="Install Checked", command=self._install_checked,
-                      **theme.primary_button_kwargs()).pack(side="left")
-        ctk.CTkButton(action_frame, text="Check All Visible",
-                      command=lambda: self._set_all_visible(True),
-                      **theme.secondary_button_kwargs()).pack(side="left", padx=6)
-        ctk.CTkButton(action_frame, text="Uncheck All",
-                      command=lambda: self._set_all_visible(False),
-                      **theme.secondary_button_kwargs()).pack(side="left")
-
-        custom_frame = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=theme.RADIUS,
-                                    border_width=1, border_color=theme.BORDER)
-        custom_frame.grid(row=3, column=0, sticky="ew", padx=12, pady=4)
-        custom_frame.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(custom_frame, text="Run a custom install command",
-                     text_color=theme.TEXT, font=theme.font(13, "bold")).grid(
-            row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(10, 4))
-        self.custom_cmd_var = ctk.StringVar()
-        ctk.CTkEntry(custom_frame, textvariable=self.custom_cmd_var, fg_color=theme.PANEL_2,
-                     border_color=theme.BORDER, text_color=theme.TEXT).grid(
-            row=1, column=0, sticky="ew", padx=12, pady=(0, 10))
-        ctk.CTkButton(custom_frame, text="Run", command=self._run_custom_command,
-                      **theme.secondary_button_kwargs(), width=80).grid(
-            row=1, column=1, padx=(0, 12), pady=(0, 10))
-
-        log_frame = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=theme.RADIUS,
-                                 border_width=1, border_color=theme.BORDER)
-        log_frame.grid(row=4, column=0, sticky="ew", padx=12, pady=(4, 12))
-        log_frame.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(log_frame, text="Output", text_color=theme.MUTED,
-                     font=theme.font(12, "bold")).grid(row=0, column=0, sticky="w", padx=12, pady=(8, 4))
-        self.log_text = ctk.CTkTextbox(log_frame, height=120, fg_color=theme.PANEL_2,
-                                       text_color=theme.TEXT, font=theme.mono(11))
-        self.log_text.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 12))
-        self.log_text.configure(state="disabled")
+    def _append(self, msg: str):
+        self.log.appendPlainText(msg.rstrip("\n"))
 
     def _iter_apps(self):
         for category, apps in self.db.get("categories", {}).items():
             for app in apps:
                 yield category, app
 
-    def _populate_tree(self):
-        query = self.search_var.get().strip().lower()
-        self.tree.delete(*self.tree.get_children())
-        self.entry_lookup.clear()
-
+    def _populate_catalog(self):
+        query = self.cat_search.text().strip().lower()
+        rows = []
         for category, app in self._iter_apps():
             haystack = f"{app.get('name','')} {app.get('id','')} {category} {app.get('desc','')}".lower()
             if query and query not in haystack:
                 continue
+            rows.append((category, app))
+        self.table.setRowCount(len(rows))
+        for i, (category, app) in enumerate(rows):
             wid = app["id"]
-            if wid not in self.check_vars:
-                self.check_vars[wid] = ctk.BooleanVar(value=False)
-            checked = self.check_vars[wid]
-            mark = "☑" if checked.get() else "☐"
-            row_id = self.tree.insert(
-                "", "end", values=(mark, app.get("name", ""), wid, category, app.get("desc", ""))
-            )
-            self.entry_lookup[row_id] = (wid, category, app)
+            mark = QTableWidgetItem("☑" if wid in self.checked else "☐")
+            mark.setData(Qt.ItemDataRole.UserRole, wid)
+            self.table.setItem(i, 0, mark)
+            self.table.setItem(i, 1, QTableWidgetItem(app.get("name", "")))
+            self.table.setItem(i, 2, QTableWidgetItem(wid))
+            self.table.setItem(i, 3, QTableWidgetItem(category))
+            self.table.setItem(i, 4, QTableWidgetItem(app.get("desc", "")))
 
-    def _on_tree_click(self, event):
-        region = self.tree.identify("region", event.x, event.y)
-        if region != "cell":
+    def _toggle_cell(self, row, col):
+        if col != 0:
             return
-        col = self.tree.identify_column(event.x)
-        row_id = self.tree.identify_row(event.y)
-        if not row_id or col != "#1":
+        item = self.table.item(row, 0)
+        if item is None:
             return
-        self._toggle_row(row_id)
+        wid = item.data(Qt.ItemDataRole.UserRole)
+        if wid in self.checked:
+            self.checked.remove(wid)
+        else:
+            self.checked.add(wid)
+        item.setText("☑" if wid in self.checked else "☐")
 
-    def _toggle_selected_rows(self, event):
-        for row_id in self.tree.selection():
-            self._toggle_row(row_id)
-
-    def _toggle_row(self, row_id):
-        if row_id not in self.entry_lookup:
-            return
-        wid, _, _ = self.entry_lookup[row_id]
-        var = self.check_vars[wid]
-        var.set(not var.get())
-        vals = list(self.tree.item(row_id, "values"))
-        vals[0] = "☑" if var.get() else "☐"
-        self.tree.item(row_id, values=vals)
-
-    def _set_all_visible(self, state):
-        for row_id in self.tree.get_children():
-            wid, _, _ = self.entry_lookup[row_id]
-            self.check_vars[wid].set(state)
-            vals = list(self.tree.item(row_id, "values"))
-            vals[0] = "☑" if state else "☐"
-            self.tree.item(row_id, values=vals)
+    def _set_visible(self, state: bool):
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            if item is None:
+                continue
+            wid = item.data(Qt.ItemDataRole.UserRole)
+            if state:
+                self.checked.add(wid)
+            else:
+                self.checked.discard(wid)
+            item.setText("☑" if state else "☐")
 
     def _add_app_dialog(self):
-        name = simpledialog.askstring("App name", "Display name:", parent=self)
-        if not name:
+        from PySide6.QtWidgets import QInputDialog
+        name, ok = QInputDialog.getText(self, "App name", "Display name:")
+        if not ok or not name.strip():
             return
-        wid = simpledialog.askstring("Winget ID", "Exact winget package ID (e.g. Google.Chrome):", parent=self)
-        if not wid:
+        wid, ok = QInputDialog.getText(self, "Winget ID", "Exact winget package ID (e.g. Google.Chrome):")
+        if not ok or not wid.strip():
             return
-        category = simpledialog.askstring("Category", "Category (e.g. Browsers):", parent=self) or "Uncategorized"
-        desc = simpledialog.askstring("Description", "Short description:", parent=self) or ""
-
+        category, ok = QInputDialog.getText(self, "Category", "Category (e.g. Browsers):")
+        category = category.strip() if ok and category else "Uncategorized"
+        desc, ok = QInputDialog.getText(self, "Description", "Short description:")
+        desc = desc.strip() if ok else ""
         self.db.setdefault("categories", {}).setdefault(category, [])
         for existing in self.db["categories"][category]:
-            if existing["id"] == wid:
-                messagebox.showinfo("Already exists", f"{wid} is already in {category}.")
+            if existing["id"] == wid.strip():
+                QMessageBox.information(self, "Already exists", f"{wid} is already in {category}.")
                 return
-        self.db["categories"][category].append({"name": name, "id": wid, "desc": desc})
+        self.db["categories"][category].append({"name": name.strip(), "id": wid.strip(), "desc": desc})
         save_database(self.db)
-        self._populate_tree()
-        self._log(f"Added {name} ({wid}) to {category}.\n")
+        self._populate_catalog()
+        self._append(f"Added {name} ({wid}) to {category}.")
 
     def _reload_db(self):
         self.db = load_database()
-        self._populate_tree()
-        self._log("Database reloaded from apps.json.\n")
+        self._populate_catalog()
+        self._append("Database reloaded from apps.json.")
 
     def _install_checked(self):
-        selected_ids = [wid for wid, var in self.check_vars.items() if var.get()]
-        if not selected_ids:
-            messagebox.showinfo("Nothing selected", "Check at least one app first.")
+        ids = [wid for wid in self.checked]
+        if not ids:
+            QMessageBox.information(self, "Nothing selected", "Check at least one app first.")
             return
+        self._install_ids(ids)
+
+    def _install_ids(self, ids: list[str]):
         if not winget_available():
-            messagebox.showerror("winget not found", "winget isn't available on this machine's PATH.")
+            QMessageBox.warning(self, "winget not found", "winget isn't available on this machine's PATH.")
             return
-        threading.Thread(target=self._install_worker, args=(selected_ids,), daemon=True).start()
+        if self._worker:
+            QMessageBox.information(self, "Busy", "An install is already running.")
+            return
 
-    def _install_worker(self, ids):
-        for wid in ids:
-            self._log(
-                f"\n$ winget install --id {wid} -e --silent "
-                f"--accept-source-agreements --accept-package-agreements\n"
-            )
-            try:
-                proc = subprocess.Popen(
-                    [
-                        "winget", "install", "--id", wid, "-e", "--silent",
-                        "--accept-source-agreements", "--accept-package-agreements",
-                    ],
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                )
-                for line in proc.stdout:
-                    self._log(line)
-                proc.wait()
-                status = "OK" if proc.returncode == 0 else f"FAILED (code {proc.returncode})"
-                self._log(f"--- {wid}: {status} ---\n")
-            except Exception as e:
-                self._log(f"--- {wid}: ERROR: {e} ---\n")
+        def work():
+            for wid in ids:
+                worker = InstallWorker(wid)
+                worker.start()
+                worker.join()
+                while True:
+                    try:
+                        ev = worker.events.get_nowait()
+                    except Exception:
+                        break
+                    QTimer.singleShot(0, lambda e=ev: self._handle_event(e))
+            QTimer.singleShot(0, self._idle)
 
-    def _run_custom_command(self):
-        cmd = self.custom_cmd_var.get().strip()
+        self._worker = True
+        threading.Thread(target=work, daemon=True).start()
+
+    def _idle(self):
+        self._worker = None
+
+    def _search(self):
+        q = self.query.text().strip()
+        self.results.clear()
+        self._append(f"Searching for {q!r}…")
+        worker = SearchWorker(q)
+        self._attach(worker)
+        worker.start()
+
+    def _install_selected_search(self):
+        item = self.results.currentItem()
+        if item is None:
+            return
+        pkg_id = item.data(Qt.ItemDataRole.UserRole)
+        if pkg_id:
+            self._install_ids([pkg_id])
+
+    def _refresh_custom_list(self):
+        self.custom_list.clear()
+        for app in load_custom_apps():
+            item = QListWidgetItem(f"{app.name}  —  {app.category}")
+            item.setData(Qt.ItemDataRole.UserRole, app)
+            self.custom_list.addItem(item)
+
+    def _load_custom(self, item):
+        if item is None:
+            return
+        app = item.data(Qt.ItemDataRole.UserRole)
+        self.custom_name.setText(app.name)
+        self.custom_cmd.setText(app.command)
+        self.custom_cat.setCurrentText(app.category)
+
+    def _save_custom(self):
+        name = self.custom_name.text().strip()
+        command = self.custom_cmd.text().strip()
+        category = self.custom_cat.currentText().strip() or "Utilities"
+        if not name or not command:
+            QMessageBox.information(self, "Custom app", "Name and command are required.")
+            return
+        apps = load_custom_apps()
+        current = self.custom_list.currentItem()
+        if current is not None:
+            existing = current.data(Qt.ItemDataRole.UserRole)
+            for i, app in enumerate(apps):
+                if app.id == existing.id:
+                    apps[i] = CustomApp(name=name, command=command, category=category, id=existing.id)
+                    break
+            else:
+                apps.append(CustomApp(name=name, command=command, category=category))
+        else:
+            apps.append(CustomApp(name=name, command=command, category=category))
+        save_custom_apps(apps)
+        self._refresh_custom_list()
+        self._append(f"Saved custom app {name}.")
+
+    def _delete_custom(self):
+        current = self.custom_list.currentItem()
+        if current is None:
+            return
+        existing = current.data(Qt.ItemDataRole.UserRole)
+        apps = [a for a in load_custom_apps() if a.id != existing.id]
+        save_custom_apps(apps)
+        self._refresh_custom_list()
+        self.custom_name.clear()
+        self.custom_cmd.clear()
+
+    def _run_custom(self):
+        current = self.custom_list.currentItem()
+        cmd = self.custom_cmd.text().strip()
+        if current is not None:
+            cmd = current.data(Qt.ItemDataRole.UserRole).command
+        self._run_command(cmd)
+
+    def _run_command(self, cmd: str):
         if not cmd:
             return
-        threading.Thread(target=self._run_custom_worker, args=(cmd,), daemon=True).start()
+        if self._worker:
+            QMessageBox.information(self, "Busy", "A command is already running.")
+            return
+        worker = CommandWorker(cmd)
+        self._attach(worker)
+        worker.start()
 
-    def _run_custom_worker(self, cmd):
-        self._log(f"\n$ {cmd}\n")
-        try:
-            proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-            for line in proc.stdout:
-                self._log(line)
-            proc.wait()
-            self._log(f"--- exit code {proc.returncode} ---\n")
-        except Exception as e:
-            self._log(f"--- ERROR: {e} ---\n")
+    def _attach(self, worker):
+        self._worker = worker
+        self._poll.start()
 
-    def _log(self, msg):
-        def append():
-            self.log_text.configure(state="normal")
-            self.log_text.insert("end", msg)
-            self.log_text.see("end")
-            self.log_text.configure(state="disabled")
-        self.after(0, append)
+    def _drain_events(self):
+        worker = self._worker
+        if worker is None or worker is True:
+            return
+        from queue import Empty
+        while True:
+            try:
+                ev = worker.events.get_nowait()
+            except Empty:
+                break
+            self._handle_event(ev)
+        if not worker.is_alive() and worker.events.empty():
+            self._poll.stop()
+            self._worker = None
+
+    def _handle_event(self, ev):
+        if ev.kind == "log":
+            self._append(ev.message)
+        elif ev.kind == "fatal_error":
+            self._append(ev.message)
+            QMessageBox.warning(self, "App Installer", ev.message)
+        elif ev.kind == "overall_done":
+            self._append(ev.message)
+        elif ev.kind == "search_done":
+            self.results.clear()
+            for app in ev.results:
+                item = QListWidgetItem(f"{app.name}  ({app.id})  {app.version}  {app.source}")
+                item.setData(Qt.ItemDataRole.UserRole, app.id)
+                self.results.addItem(item)
+            self._append(f"{len(ev.results)} result(s).")

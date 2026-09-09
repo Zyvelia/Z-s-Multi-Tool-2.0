@@ -1,0 +1,46 @@
+name: Deploy Arcade
+
+# Builds pages_deploy and uploads to Cloudflare Pages (project: arcade).
+# Optional — you can still use deploy_arcade.bat locally instead.
+#
+# Required GitHub repo secrets:
+#   CLOUDFLARE_API_TOKEN  — Cloudflare API token with "Cloudflare Pages Edit"
+#   CLOUDFLARE_ACCOUNT_ID — your Cloudflare account ID
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: ["main"]
+    paths:
+      - "modules/Gaming/Arcade/**"
+      - ".github/workflows/deploy-arcade.yml"
+
+concurrency:
+  group: deploy-arcade
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      deployments: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build pages_deploy
+        run: python modules/Gaming/Arcade/prepare_pages_deploy.py
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy modules/Gaming/Arcade/pages_deploy --project-name=zyvelia-arcade

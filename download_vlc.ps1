@@ -20,11 +20,20 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Invoke-WebRequest has no timeout by default, so a stalled connection to
+# videolan.org would hang this script - and build.bat, which is waiting
+# on it via a `for /f` loop - indefinitely instead of falling through to
+# the "no VLC runtime found" warning. Index page is small so it gets a
+# short budget; the actual zip download gets a longer one since it's a
+# real file transfer (~40MB) rather than a directory listing.
+$IndexTimeoutSec = 20
+$DownloadTimeoutSec = 300
+
 try {
     $indexUrl = "https://download.videolan.org/pub/videolan/vlc/last/win64/"
     Write-Host "[download_vlc] Checking $indexUrl for the latest VLC win64 build..."
 
-    $page = Invoke-WebRequest -Uri $indexUrl -UseBasicParsing
+    $page = Invoke-WebRequest -Uri $indexUrl -UseBasicParsing -TimeoutSec $IndexTimeoutSec
 
     $zipName = ($page.Links |
         Where-Object { $_.href -match '^vlc-.*-win64\.zip$' } |
@@ -41,7 +50,7 @@ try {
 
     if (-not (Test-Path $zipPath)) {
         Write-Host "[download_vlc] Downloading $indexUrl$zipName ..."
-        Invoke-WebRequest -Uri "$indexUrl$zipName" -OutFile $zipPath -UseBasicParsing
+        Invoke-WebRequest -Uri "$indexUrl$zipName" -OutFile $zipPath -UseBasicParsing -TimeoutSec $DownloadTimeoutSec
     } else {
         Write-Host "[download_vlc] $zipName already cached, skipping download."
     }

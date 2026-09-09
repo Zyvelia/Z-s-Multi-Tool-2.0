@@ -1,465 +1,395 @@
+"""Qt MangaDex Reader — search, library, download, simple page viewer."""
+
+from __future__ import annotations
+
+import importlib
+import os
+import tempfile
 import threading
 
-import customtkinter as ctk
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QPixmap
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QComboBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QMessageBox,
+    QPlainTextEdit,
+    QPushButton,
+    QSplitter,
+    QVBoxLayout,
+    QWidget,
+)
 
-from core import theme
-from .api import MangaDexClient, DEFAULT_RATINGS, ALL_RATINGS
-from .downloader import DownloadManager, DownloadJob
-from .library import Library, THUMB_CACHE_DIR
-from .utils import ThumbCache, list_chapter_images, extract_cbz
-from .reader import ReaderFrame
+_api = importlib.import_module("modules.Media.MangaDex Reader.api")
+_dl = importlib.import_module("modules.Media.MangaDex Reader.downloader")
+_lib = importlib.import_module("modules.Media.MangaDex Reader.library")
+_utils = importlib.import_module("modules.Media.MangaDex Reader.utils")
+_assist = importlib.import_module("modules.Media.MangaDex Reader.page_assist")
+
+MangaDexClient = _api.MangaDexClient
+MangaDexError = _api.MangaDexError
+DownloadManager = _dl.DownloadManager
+DownloadJob = _dl.DownloadJob
+Library = _lib.Library
 
 
-class MangaDexPage(ctk.CTkFrame):
-    def __init__(self, parent, manager, **kwargs):
-        super().__init__(parent, fg_color=theme.BG, **kwargs)
+class MangaDexPage(QWidget):
+    def __init__(self, parent, manager):
+        super().__init__(parent)
         self.manager = manager
         self.api = MangaDexClient()
-        self.downloads = DownloadManager(self.api)
         self.library = Library()
-        self.thumbs = ThumbCache(THUMB_CACHE_DIR)
+        self.dl = DownloadManager(self.api)
+        self.manga = None
+        self.chapters = []
+        self.pages = []
+        self.page_index = 0
+        self._pix = QPixmap()
 
-        self._search_results = {}     # manga_id -> manga dict
-        self._browse_results = {}     # manga_id -> manga dict
-        self._browse_offset = 0
-        self._browse_total = 0
-        self._current_manga = None
-        self._chapters = []
-        self._chapter_checks = {}     # chapter_id -> CTkCheckBox var
-        self._show_explicit = ctk.BooleanVar(value=False)
-        self._closed = False
+        root = QVBoxLayout(self)
+        title = QLabel("MangaDex Reader")
+        title.setObjectName("AccentTitle")
+        root.addWidget(title)
+        self.progress_banner = QLabel("")
+        self.progress_banner.setObjectName("Muted")
+        self.progress_banner.setWordWrap(True)
+        root.addWidget(self.progress_banner)
+        self._refresh_progress()
 
-        self._build_ui()
-        self.bind("<Destroy>", self._on_page_destroy)
-        self.after(150, self._poll_download_events)
-        self.after(200, lambda: self._do_browse(reset=True))
+        search_row = QHBoxLayout()
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Search title…")
+        self.search.returnPressed.connect(self._search)
+        go = QPushButton("Search")
+        go.setObjectName("Primary")
+        go.clicked.connect(self._search)
+        lib = QPushButton("Library")
+        lib.clicked.connect(self._show_library)
+        search_row.addWidget(self.search, 1)
+        search_row.addWidget(go)
+        search_row.addWidget(lib)
+        root.addLayout(search_row)
 
-    # ---------------------------------------------------------------- UI
+        split = QSplitter(Qt.Orientation.Horizontal)
+        left = QWidget()
+        ll = QVBoxLayout(left)
+        self.results = QListWidget()
+        self.results.itemClicked.connect(self._pick_manga)
+        self.chapters_list = QListWidget()
+        self.chapters_list.itemClicked.connect(self._pick_chapter)
+        ll.addWidget(QLabel("Titles"))
+        ll.addWidget(self.results, 1)
+        ll.addWidget(QLabel("Chapters"))
+        ll.addWidget(self.chapters_list, 1)
+        dl_row = QHBoxLayout()
+        self.fmt = QComboBox()
+        self.fmt.addItem("Folder", "images")
+        self.fmt.addItem("CBZ", "cbz")
+        dl_btn = QPushButton("Download")
+        dl_btn.setObjectName("Primary")
+        dl_btn.clicked.connect(self._download)
+        read_btn = QPushButton("Read")
+        read_btn.clicked.connect(self._read_selected)
+        dl_row.addWidget(self.fmt)
+        dl_row.addWidget(dl_btn)
+        dl_row.addWidget(read_btn)
+        ll.addLayout(dl_row)
 
-    def _build_ui(self):
-        self.tabs = ctk.CTkTabview(self, fg_color=theme.PANEL)
-        self.tabs.pack(fill="both", expand=True, padx=10, pady=(10, 0))
-        self.tabs.add("Browse")
-        self.tabs.add("Search")
-        self.tabs.add("Chapters")
-        self.tabs.add("Reader")
-        self.tabs.add("Downloads")
+        right = QWidget()
+        rl = QVBoxLayout(right)
+        self.manga_title = QLabel("Pick a title")
+        self.manga_title.setObjectName("CardTitle")
+        self.manga_title.setWordWrap(True)
+        rl.addWidget(self.manga_title)
+        self.page_label = QLabel("No page loaded")
+        self.page_label.setObjectName("Muted")
+        self.page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.page_label.setMinimumHeight(320)
+        rl.addWidget(self.page_label, 1)
+        nav = QHBoxLayout()
+        prev = QPushButton("Prev")
+        prev.clicked.connect(lambda: self._step(-1))
+        next_btn = QPushButton("Next")
+        next_btn.setObjectName("Primary")
+        next_btn.clicked.connect(lambda: self._step(1))
+        self.page_info = QLabel("")
+        self.page_info.setObjectName("Muted")
+        nav.addWidget(prev)
+        nav.addWidget(self.page_info, 1)
+        nav.addWidget(next_btn)
+        rl.addLayout(nav)
+        ocr_row = QHBoxLayout()
+        self.ocr_lang = QComboBox()
+        for label in _assist.OCR_LANGS:
+            self.ocr_lang.addItem(label)
+        self.dest_lang = QComboBox()
+        for label in _assist.TRANSLATE_LANGS:
+            self.dest_lang.addItem(label)
+        ocr = QPushButton("OCR + translate")
+        ocr.clicked.connect(lambda: self._run_assist(translate=True, read=False))
+        speak_btn = QPushButton("Read aloud")
+        speak_btn.setObjectName("Primary")
+        speak_btn.clicked.connect(lambda: self._run_assist(translate=True, read=True))
+        stop = QPushButton("Stop")
+        stop.clicked.connect(self._stop_speech)
+        self.auto_read = QCheckBox("Auto-read on page change")
+        ocr_row.addWidget(self.ocr_lang)
+        ocr_row.addWidget(self.dest_lang)
+        ocr_row.addWidget(ocr)
+        ocr_row.addWidget(speak_btn)
+        ocr_row.addWidget(stop)
+        rl.addLayout(ocr_row)
+        rl.addWidget(self.auto_read)
+        self.assist_out = QPlainTextEdit()
+        self.assist_out.setReadOnly(True)
+        self.assist_out.setMaximumHeight(120)
+        rl.addWidget(self.assist_out)
 
-        self._build_browse_tab(self.tabs.tab("Browse"))
-        self._build_search_tab(self.tabs.tab("Search"))
-        self._build_chapters_tab(self.tabs.tab("Chapters"))
-        self._build_reader_tab(self.tabs.tab("Reader"))
-        self._build_downloads_tab(self.tabs.tab("Downloads"))
+        split.addWidget(left)
+        split.addWidget(right)
+        split.setStretchFactor(1, 3)
+        root.addWidget(split, 1)
+        self.status = QLabel(_assist.ocr_status())
+        self.status.setObjectName("Muted")
+        root.addWidget(self.status)
 
-        ctk.CTkLabel(
-            self, text="Manga data and images courtesy of MangaDex (api.mangadex.org)",
-            text_color=theme.FAINT, font=ctk.CTkFont(size=11),
-        ).pack(anchor="w", padx=14, pady=(4, 8))
+        self._tick = QTimer(self)
+        self._tick.setInterval(400)
+        self._tick.timeout.connect(self._drain_dl)
+        self._tick.start()
+        self._show_library()
 
-    def _build_browse_tab(self, tab):
-        bar = ctk.CTkFrame(tab, fg_color="transparent")
-        bar.pack(fill="x", padx=10, pady=10)
+    def on_hide(self):
+        self._tick.stop()
+        self._stop_speech()
 
-        ctk.CTkLabel(bar, text="Sort by:", text_color=theme.TEXT).pack(side="left", padx=(0, 6))
+    def on_show(self):
+        if not self._tick.isActive():
+            self._tick.start()
 
-        self.browse_sort_menu = ctk.CTkOptionMenu(
-            bar, values=list(MangaDexClient.BROWSE_SORTS.keys()),
-            command=lambda choice: self._do_browse(reset=True),
+    def _search(self):
+        q = self.search.text().strip()
+        if not q:
+            return
+        self.status.setText("Searching…")
+
+        def work():
+            try:
+                results = self.api.search_manga(q)
+            except MangaDexError as e:
+                msg = str(e)
+                QTimer.singleShot(0, lambda m=msg: self.status.setText(m))
+                return
+            QTimer.singleShot(0, lambda r=results: self._fill_results(r))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _fill_results(self, results):
+        self.results.clear()
+        for m in results:
+            item = QListWidgetItem(m.get("title") or "Untitled")
+            item.setData(Qt.ItemDataRole.UserRole, m)
+            self.results.addItem(item)
+        self.status.setText(f"{len(results)} title(s)")
+
+    def _show_library(self):
+        self.results.clear()
+        seen = {}
+        for row in self.library.list_downloads():
+            manga_id, chapter_id, manga_title, chapter_label, language, fmt, path, downloaded_at = row
+            if manga_id in seen:
+                continue
+            seen[manga_id] = True
+            item = QListWidgetItem(f"{manga_title}  (library)")
+            item.setData(Qt.ItemDataRole.UserRole, {"id": manga_id, "title": manga_title, "library": True})
+            self.results.addItem(item)
+        self.status.setText(f"{len(seen)} title(s) in library")
+
+    def _pick_manga(self, item):
+        manga = item.data(Qt.ItemDataRole.UserRole) or {}
+        self.manga = manga
+        self.manga_title.setText(manga.get("title") or "Untitled")
+        self.status.setText("Loading chapters…")
+        mid = manga.get("id")
+
+        def work():
+            try:
+                chapters = self.api.get_chapters(mid, languages=["en"]) or self.api.get_chapters(mid)
+            except MangaDexError as e:
+                msg = str(e)
+                QTimer.singleShot(0, lambda m=msg: self.status.setText(m))
+                return
+            QTimer.singleShot(0, lambda c=chapters: self._fill_chapters(c))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _fill_chapters(self, chapters):
+        self.chapters = chapters
+        self.chapters_list.clear()
+        for ch in chapters:
+            label = f"Ch.{ch.get('chapter') or '?'}  {ch.get('title') or ''}  [{ch.get('language') or '?'}]"
+            item = QListWidgetItem(label.strip())
+            item.setData(Qt.ItemDataRole.UserRole, ch)
+            self.chapters_list.addItem(item)
+        self.status.setText(f"{len(chapters)} chapter(s)")
+
+    def _selected_chapter(self):
+        item = self.chapters_list.currentItem()
+        if not item:
+            return None
+        return item.data(Qt.ItemDataRole.UserRole)
+
+    def _download(self):
+        chapter = self._selected_chapter()
+        if not chapter or not self.manga:
+            QMessageBox.information(self, "MangaDex", "Pick a title and chapter first.")
+            return
+        job = DownloadJob(
+            chapter, self.manga["id"], self.manga.get("title") or "Untitled",
+            self.fmt.currentData(), False,
         )
-        self.browse_sort_menu.set("Popular")
-        self.browse_sort_menu.pack(side="left")
+        self.dl.enqueue(job)
+        self.status.setText("Queued download")
 
-        ctk.CTkButton(bar, text="Refresh", width=90, command=lambda: self._do_browse(reset=True)).pack(
-            side="left", padx=8
-        )
+    def _drain_dl(self):
+        while True:
+            try:
+                event = self.dl.events.get_nowait()
+            except Exception:
+                break
+            kind = event[0]
+            if kind == "page":
+                self.status.setText(f"Downloading page {event[2]}/{event[3]}")
+            elif kind == "done":
+                self.status.setText(f"Saved {event[2]}")
+            elif kind == "error":
+                self.status.setText(f"Download error: {event[2]}")
+            elif kind == "start":
+                self.status.setText(f"Downloading {event[2]} pages…")
 
-        ctk.CTkCheckBox(
-            bar, text="Show explicit (18+)", variable=self._show_explicit,
-            command=lambda: self._do_browse(reset=True),
-        ).pack(side="left", padx=(12, 0))
-
-        self.browse_status = ctk.CTkLabel(tab, text="", text_color=theme.FAINT)
-        self.browse_status.pack(anchor="w", padx=10)
-
-        self.browse_scroll = ctk.CTkScrollableFrame(tab, fg_color="transparent")
-        self.browse_scroll.pack(fill="both", expand=True, padx=10, pady=(0, 4))
-
-        self.browse_load_more_btn = ctk.CTkButton(
-            tab, text="Load more", command=lambda: self._do_browse(reset=False),
-        )
-        self.browse_load_more_btn.pack(pady=(0, 10))
-
-    def _build_search_tab(self, tab):
-        bar = ctk.CTkFrame(tab, fg_color="transparent")
-        bar.pack(fill="x", padx=10, pady=10)
-
-        self.search_entry = ctk.CTkEntry(bar, placeholder_text="Search MangaDex...", fg_color=theme.PANEL_2)
-        self.search_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
-        self.search_entry.bind("<Return>", lambda e: self._do_search())
-
-        ctk.CTkButton(bar, text="Search", width=90, command=self._do_search).pack(side="left")
-
-        ctk.CTkCheckBox(
-            bar, text="Show explicit (18+)", variable=self._show_explicit,
-        ).pack(side="left", padx=(12, 0))
-
-        self.search_status = ctk.CTkLabel(tab, text="", text_color=theme.FAINT)
-        self.search_status.pack(anchor="w", padx=10)
-
-        self.results_scroll = ctk.CTkScrollableFrame(tab, fg_color="transparent")
-        self.results_scroll.pack(fill="both", expand=True, padx=10, pady=(0, 10))
-
-    def _build_chapters_tab(self, tab):
-        header = ctk.CTkFrame(tab, fg_color="transparent")
-        header.pack(fill="x", padx=10, pady=10)
-
-        self.manga_title_label = ctk.CTkLabel(
-            header, text="Select a manga from Search", font=ctk.CTkFont(size=18, weight="bold"),
-            text_color=theme.TEXT,
-        )
-        self.manga_title_label.pack(side="left")
-
-        self.lang_menu = ctk.CTkOptionMenu(header, values=["All languages"], command=self._on_lang_change)
-        self.lang_menu.pack(side="right")
-
-        self.chapters_status = ctk.CTkLabel(tab, text="", text_color=theme.FAINT)
-        self.chapters_status.pack(anchor="w", padx=10)
-
-        fmt_bar = ctk.CTkFrame(tab, fg_color="transparent")
-        fmt_bar.pack(fill="x", padx=10)
-        self.download_fmt = ctk.CTkOptionMenu(fmt_bar, values=["Folder of images", "CBZ archive"])
-        self.download_fmt.pack(side="left")
-        ctk.CTkButton(fmt_bar, text="Download Selected", command=self._download_selected).pack(side="left", padx=8)
-        ctk.CTkButton(fmt_bar, text="Select All", width=90, command=self._select_all_chapters).pack(side="left")
-        ctk.CTkButton(fmt_bar, text="Select None", width=90, command=self._select_no_chapters).pack(side="left", padx=8)
-
-        self.chapters_scroll = ctk.CTkScrollableFrame(tab, fg_color="transparent")
-        self.chapters_scroll.pack(fill="both", expand=True, padx=10, pady=10)
-
-    def _build_reader_tab(self, tab):
-        self.reader = ReaderFrame(tab, on_page_change=self._on_reader_page_change)
-        self.reader.pack(fill="both", expand=True)
-
-    def _build_downloads_tab(self, tab):
-        self.downloads_status = ctk.CTkLabel(tab, text="No active downloads.", text_color=theme.FAINT)
-        self.downloads_status.pack(anchor="w", padx=10, pady=(10, 0))
-
-        self.downloads_scroll = ctk.CTkScrollableFrame(tab, fg_color="transparent")
-        self.downloads_scroll.pack(fill="both", expand=True, padx=10, pady=10)
-        self._download_rows = {}   # chapter_id -> (frame, progress_bar, label)
-
-        self._refresh_history()
-
-    def _refresh_history(self):
-        for row in self.downloads_scroll.winfo_children():
-            row.destroy()
-        for manga_id, chapter_id, manga_title, ch_label, lang, fmt, path, when in self.library.list_downloads():
-            row = ctk.CTkFrame(self.downloads_scroll, fg_color=theme.PANEL_2)
-            row.pack(fill="x", pady=3)
-
-            header = ctk.CTkFrame(row, fg_color="transparent")
-            header.pack(fill="x", padx=8, pady=(6, 2))
-            ctk.CTkLabel(
-                header, text=f"{manga_title} — Ch. {ch_label} [{lang or '?'}] ({fmt}) · {when}",
-                text_color=theme.TEXT, anchor="w",
-            ).pack(side="left", fill="x", expand=True)
-            ctk.CTkButton(
-                header, text="Read", width=70,
-                command=lambda p=path, f=fmt, mt=manga_title, cl=ch_label, mid=manga_id, cid=chapter_id:
-                    self._read_local(p, f, mt, cl, mid, cid),
-            ).pack(side="right")
-
-            bar = ctk.CTkProgressBar(row)
-            bar.set(1.0)
-            bar.pack(fill="x", padx=8, pady=(0, 8))
-
-    # ------------------------------------------------------------ search
-
-    def _do_search(self):
-        query = self.search_entry.get().strip()
-        if not query:
+    def _read_selected(self):
+        chapter = self._selected_chapter()
+        if not chapter:
+            QMessageBox.information(self, "MangaDex", "Pick a chapter.")
             return
-        self.search_status.configure(text="Searching...")
-        for w in self.results_scroll.winfo_children():
-            w.destroy()
-        threading.Thread(target=self._search_worker, args=(query,), daemon=True).start()
-
-    def _search_worker(self, query):
-        ratings = ALL_RATINGS if self._show_explicit.get() else DEFAULT_RATINGS
-        try:
-            results = self.api.search_manga(query, content_ratings=ratings)
-        except Exception as exc:
-            self.after(0, lambda: self.search_status.configure(text=f"Search failed: {exc}"))
+        cid = chapter["id"]
+        local = None
+        for row in self.library.list_downloads():
+            if row[1] == cid:
+                local = row[6]
+                break
+        if local:
+            if local.lower().endswith(".cbz"):
+                self.pages = _utils.extract_cbz(local)
+            else:
+                self.pages = _utils.list_chapter_images(local)
+            self.page_index = 0
+            self._show_page()
             return
-        self.after(0, lambda: self._render_results(results))
+        self.status.setText("Fetching pages…")
 
-    def _render_results(self, results):
-        self.search_status.configure(text=f"{len(results)} result(s)")
-        for manga in results:
-            self._search_results[manga["id"]] = manga
-            self._add_result_row(manga, self.results_scroll)
+        def work():
+            try:
+                urls = self.api.get_page_urls(cid)
+            except MangaDexError as e:
+                msg = str(e)
+                QTimer.singleShot(0, lambda m=msg: self.status.setText(m))
+                return
+            tmp = tempfile.mkdtemp(prefix="mangadex_qt_")
+            paths = []
+            for i, url in enumerate(urls):
+                ext = os.path.splitext(url)[1] or ".jpg"
+                dest = os.path.join(tmp, f"{i + 1:03}{ext}")
+                try:
+                    _utils.download_bytes(self.api.session, url, dest)
+                    paths.append(dest)
+                except Exception:
+                    pass
+            QTimer.singleShot(0, lambda p=paths: self._set_pages(p))
 
-    # ------------------------------------------------------------ browse
+        threading.Thread(target=work, daemon=True).start()
 
-    def _do_browse(self, reset=True):
-        sort = self.browse_sort_menu.get()
-        if reset:
-            self._browse_offset = 0
-            self._browse_total = 0
-            for w in self.browse_scroll.winfo_children():
-                w.destroy()
-            self.browse_status.configure(text="Loading...")
-        else:
-            self.browse_status.configure(text=self.browse_status.cget("text") + " · loading more...")
-        self.browse_load_more_btn.configure(state="disabled")
-        threading.Thread(
-            target=self._browse_worker, args=(sort, self._browse_offset), daemon=True,
-        ).start()
+    def _set_pages(self, paths):
+        self.pages = paths
+        self.page_index = 0
+        self.status.setText(f"{len(paths)} page(s)")
+        self._show_page()
 
-    def _browse_worker(self, sort, offset):
-        ratings = ALL_RATINGS if self._show_explicit.get() else DEFAULT_RATINGS
-        try:
-            results, total = self.api.browse_manga(sort=sort, offset=offset, content_ratings=ratings)
-        except Exception as exc:
-            self.after(0, lambda: self.browse_status.configure(text=f"Browse failed: {exc}"))
-            self.after(0, lambda: self.browse_load_more_btn.configure(state="normal"))
+    def _show_page(self):
+        if not self.pages:
+            self.page_label.setText("No pages")
             return
-        self.after(0, lambda: self._render_browse(results, total))
-
-    def _render_browse(self, results, total):
-        self._browse_total = total
-        for manga in results:
-            self._browse_results[manga["id"]] = manga
-            self._add_result_row(manga, self.browse_scroll)
-        self._browse_offset += len(results)
-        self.browse_status.configure(text=f"Showing {self._browse_offset} of {total}")
-        more_available = self._browse_offset < total and len(results) > 0
-        self.browse_load_more_btn.configure(state="normal" if more_available else "disabled")
-
-    def _add_result_row(self, manga, parent_scroll):
-        row = ctk.CTkFrame(parent_scroll, fg_color=theme.PANEL_2)
-        row.pack(fill="x", pady=4)
-
-        thumb_label = ctk.CTkLabel(row, text="", width=60)
-        thumb_label.pack(side="left", padx=8, pady=8)
-        threading.Thread(target=self._load_thumb, args=(manga, thumb_label), daemon=True).start()
-
-        info = ctk.CTkFrame(row, fg_color="transparent")
-        info.pack(side="left", fill="x", expand=True, padx=4)
-        ctk.CTkLabel(
-            info, text=manga["title"], font=ctk.CTkFont(size=14, weight="bold"),
-            text_color=theme.TEXT, anchor="w",
-        ).pack(fill="x")
-        subtitle = f"{manga['status'].title()} · {manga.get('year') or '?'} · {', '.join(manga['tags'][:4])}"
-        ctk.CTkLabel(info, text=subtitle, text_color=theme.FAINT, anchor="w").pack(fill="x")
-
-        ctk.CTkButton(
-            row, text="Open", width=80, command=lambda m=manga: self._open_manga(m),
-        ).pack(side="right", padx=8)
-
-    def _load_thumb(self, manga, label_widget):
-        path = self.thumbs.get_or_fetch(self.api.session, manga["id"], manga.get("cover_thumb_url"))
-        if not path:
-            return
-        try:
-            from PIL import Image
-            img = Image.open(path)
-            ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=(60, 84))
-            self.after(0, lambda: label_widget.configure(image=ctk_img))
-            label_widget.image = ctk_img
-        except Exception:
-            pass
-
-    # ---------------------------------------------------------- chapters
-
-    def _open_manga(self, manga):
-        self._current_manga = manga
-        self.manga_title_label.configure(text=manga["title"])
-        self.tabs.set("Chapters")
-
-        langs = ["All languages"] + sorted(manga.get("available_languages") or [])
-        self.lang_menu.configure(values=langs)
-        self.lang_menu.set("All languages")
-        self._load_chapters(None)
-
-    def _on_lang_change(self, choice):
-        langs = None if choice == "All languages" else [choice]
-        self._load_chapters(langs)
-
-    def _load_chapters(self, languages):
-        for w in self.chapters_scroll.winfo_children():
-            w.destroy()
-        self._chapter_checks = {}
-        manga = self._current_manga
-        if not manga:
-            return
-        self.chapters_status.configure(text="Loading chapters...")
-        threading.Thread(target=self._chapters_worker, args=(manga["id"], languages), daemon=True).start()
-
-    def _chapters_worker(self, manga_id, languages):
-        try:
-            chapters = self.api.get_chapters(manga_id, languages=languages)
-        except Exception as exc:
-            self.after(0, lambda: self.chapters_status.configure(text=f"Failed to load chapters: {exc}"))
-            return
-        self.after(0, lambda: self._render_chapters(chapters))
-
-    def _render_chapters(self, chapters):
-        self._chapters = chapters
-        if not chapters:
-            self.chapters_status.configure(text="No chapters found for this language.")
-            return
-        self.chapters_status.configure(text=f"{len(chapters)} chapter(s)")
-        for chapter in chapters:
-            self._add_chapter_row(chapter)
-
-    def _add_chapter_row(self, chapter):
-        row = ctk.CTkFrame(self.chapters_scroll, fg_color=theme.PANEL_2)
-        row.pack(fill="x", pady=2)
-
-        var = ctk.BooleanVar(value=False)
-        self._chapter_checks[chapter["id"]] = var
-        ctk.CTkCheckBox(row, text="", variable=var, width=20).pack(side="left", padx=8)
-
-        label = f"Ch. {chapter['chapter'] or '?'}"
-        if chapter.get("volume"):
-            label = f"Vol. {chapter['volume']} · {label}"
-        if chapter.get("title"):
-            label += f" — {chapter['title']}"
-        label += f"  [{chapter['language']}]  ({chapter['group']})"
-
-        already = self.library.is_downloaded(chapter["id"])
-        color = theme.ACCENT if already else theme.TEXT
-        ctk.CTkLabel(row, text=label, text_color=color, anchor="w").pack(side="left", fill="x", expand=True)
-
-        ctk.CTkButton(
-            row, text="Read", width=70, command=lambda c=chapter: self._read_chapter(c),
-        ).pack(side="right", padx=8)
-
-    def _select_all_chapters(self):
-        for var in self._chapter_checks.values():
-            var.set(True)
-
-    def _select_no_chapters(self):
-        for var in self._chapter_checks.values():
-            var.set(False)
-
-    # --------------------------------------------------------- downloads
-
-    def _download_selected(self):
-        if not self._current_manga:
-            return
-        fmt = "cbz" if self.download_fmt.get().startswith("CBZ") else "images"
-        selected = [c for c in self._chapters if self._chapter_checks.get(c["id"], ctk.BooleanVar()).get()]
-        for chapter in selected:
-            job = DownloadJob(chapter, self._current_manga["id"], self._current_manga["title"], fmt)
-            self.downloads.enqueue(job)
-        self.tabs.set("Downloads")
-
-    def _on_page_destroy(self, event=None):
-        if event is not None and event.widget is not self:
-            return
-        self._closed = True
-
-    def _poll_download_events(self):
-        if self._closed:
-            return
-        import queue as _q
-        try:
-            while True:
-                event = self.downloads.events.get_nowait()
-                kind, chapter_id, *rest = event
-                payload = rest[0] if len(rest) == 1 else tuple(rest)
-                self._handle_download_event(kind, chapter_id, payload)
-        except _q.Empty:
-            pass
-        if not self._closed:
-            self.after(150, self._poll_download_events)
-
-    def _handle_download_event(self, kind, chapter_id, payload):
-        try:
-            self._handle_download_event_inner(kind, chapter_id, payload)
-        except Exception:
-            # A row's widgets can already be gone (e.g. page reopened after
-            # being closed); an event for it is stale, not a reason to crash
-            # the whole polling loop.
-            pass
-
-    def _handle_download_event_inner(self, kind, chapter_id, payload):
-        if kind == "queued":
-            self.downloads_status.configure(text=f"{payload} chapter(s) queued")
-            row = ctk.CTkFrame(self.downloads_scroll, fg_color=theme.PANEL_2)
-            row.pack(fill="x", pady=3)
-            label = ctk.CTkLabel(row, text=f"Chapter {chapter_id[:8]} — queued", text_color=theme.TEXT, anchor="w")
-            label.pack(fill="x", padx=8, pady=(6, 2))
-            bar = ctk.CTkProgressBar(row)
-            bar.set(0)
-            bar.pack(fill="x", padx=8, pady=(0, 8))
-            self._download_rows[chapter_id] = (row, bar, label)
-        elif kind == "start":
-            row = self._download_rows.get(chapter_id)
-            if row:
-                row[2].configure(text=f"Chapter {chapter_id[:8]} — downloading 0/{payload}")
-        elif kind == "page":
-            row = self._download_rows.get(chapter_id)
-            done, total = payload if isinstance(payload, tuple) else (payload, None)
-            if row and total:
-                row[2].configure(text=f"Chapter {chapter_id[:8]} — downloading {done}/{total}")
-                row[1].set(done / total)
-        elif kind == "done":
-            row = self._download_rows.get(chapter_id)
-            if row:
-                row[2].configure(text=f"Done — saved to {payload}")
-                row[1].set(1.0)
-            self._refresh_history()
-        elif kind == "error":
-            row = self._download_rows.get(chapter_id)
-            if row:
-                row[2].configure(text=f"Error: {payload}", text_color="#ff6b6b")
-
-    # ------------------------------------------------------------ reader
-
-    def _read_chapter(self, chapter):
-        self._reading_chapter = chapter
-        self.reader.set_title(f"{(self._current_manga or {}).get('title', 'Manga')} — Ch. {chapter.get('chapter') or '?'}")
-        self.reader.set_status(f"Loading Ch. {chapter.get('chapter') or '?'}...")
-        self.tabs.set("Reader")
-        threading.Thread(target=self._read_chapter_worker, args=(chapter,), daemon=True).start()
-
-    def _read_chapter_worker(self, chapter):
-        try:
-            urls = self.api.get_page_urls(chapter["id"])
-        except Exception as exc:
-            self.after(0, lambda: self.reader.set_status(f"Could not open chapter: {exc}"))
-            return
-        self.after(0, lambda: self.reader.load_remote(urls, self.api.session))
-
-    def _read_local(self, path, fmt, manga_title, chapter_label, manga_id, chapter_id):
-        # Opening a previously downloaded chapter straight from disk, no
-        # network needed. cbz archives get unzipped to a temp dir first.
-        self._current_manga = {"id": manga_id, "title": manga_title}
-        self._reading_chapter = {"id": chapter_id, "chapter": chapter_label}
-        self.reader.set_title(f"{manga_title} — Ch. {chapter_label}")
-        self.reader.set_status("Opening downloaded chapter...")
-        self.tabs.set("Reader")
-        threading.Thread(target=self._read_local_worker, args=(path, fmt), daemon=True).start()
-
-    def _read_local_worker(self, path, fmt):
-        try:
-            images = extract_cbz(path) if fmt == "cbz" else list_chapter_images(path)
-        except Exception as exc:
-            self.after(0, lambda: self.reader.set_status(f"Could not open chapter: {exc}"))
-            return
-        if not images:
-            self.after(0, lambda: self.reader.set_status("No pages found for this download."))
-            return
-        self.after(0, lambda: self.reader.load_local(images))
-
-    def _on_reader_page_change(self, index):
-        if self._current_manga and getattr(self, "_reading_chapter", None):
-            self.library.save_progress(
-                self._current_manga["id"], self._current_manga["title"],
-                self._reading_chapter["id"],
-                f"Ch. {self._reading_chapter.get('chapter') or '?'}",
-                index,
+        path = self.pages[self.page_index]
+        self._pix = QPixmap(path)
+        self.page_label.setPixmap(
+            self._pix.scaled(
+                max(self.page_label.width(), 200),
+                max(self.page_label.height(), 200),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
             )
+        )
+        self.page_info.setText(f"Page {self.page_index + 1} / {len(self.pages)}")
+        if self.manga:
+            ch = self._selected_chapter() or {}
+            self.library.save_progress(
+                self.manga["id"], self.manga.get("title") or "",
+                ch.get("id"), ch.get("chapter"), self.page_index,
+            )
+            self._refresh_progress()
+        if self.auto_read.isChecked():
+            self._run_assist(translate=True, read=True)
+
+    def _step(self, delta):
+        if not self.pages:
+            return
+        self.page_index = max(0, min(len(self.pages) - 1, self.page_index + delta))
+        self._show_page()
+
+    def _refresh_progress(self):
+        recent = self.library.recent_progress(limit=1)
+        if not recent:
+            self.progress_banner.setText("No manga in progress yet.")
+            return
+        _mid, title, chapter, page, _when = recent[0]
+        self.progress_banner.setText(f"In progress: {title}  ·  ch {chapter or '?'}  ·  page {page + 1}")
+
+    def _stop_speech(self):
+        try:
+            _assist.stop_speech()
+        except Exception:
+            pass
+        self.status.setText("Stopped.")
+
+    def _run_assist(self, *, translate: bool, read: bool):
+        if not self.pages:
+            return
+        path = self.pages[self.page_index]
+        ocr_label = self.ocr_lang.currentText()
+        dest_label = self.dest_lang.currentText()
+        self.status.setText("Reading the page…")
+
+        def work():
+            try:
+                text = _assist.ocr_page(path, ocr_label)
+                translated = _assist.translate_text(text, dest_label) if translate else ""
+                spoken = translated or text
+                if read:
+                    _assist.speak(spoken)
+            except Exception as e:
+                msg = str(e)
+                QTimer.singleShot(0, lambda m=msg: self.status.setText(m))
+                return
+            QTimer.singleShot(0, lambda a=text, b=translated, r=read: self._show_assist(a, b, r))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _show_assist(self, text, translated, read=False):
+        body = translated or "(no translation)"
+        self.assist_out.setPlainText(f"{body}\n\n--- OCR ---\n{text}")
+        self.status.setText("Reading…" if read else "OCR done")

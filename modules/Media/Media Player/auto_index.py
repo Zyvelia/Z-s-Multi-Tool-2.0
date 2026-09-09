@@ -112,29 +112,25 @@ class AutoIndexer:
         self._last_event_time = None
         self._cue_dir_cache.clear()
 
+        # Recursive watchdog.schedule walks the whole tree. Do that on
+        # the worker thread so opening the page does not freeze.
         self.using_watchdog = False
-        if HAS_WATCHDOG and os.path.isdir(self.folder):
-            try:
-                handler = _Handler(self._queue_changed, self._queue_removed)
-                self._observer = Observer()
-                self._observer.schedule(handler, self.folder, recursive=True)
-                self._observer.start()
-                self.using_watchdog = True
-            except Exception:
-                self._observer = None
-                self.using_watchdog = False
-
-        self.safety_scan_seconds = (
-            WATCHDOG_SAFETY_SCAN_SECONDS if self.using_watchdog
-            else DEFAULT_SAFETY_SCAN_SECONDS
-        )
-
-        self._set_status(
-            "Watching for changes…" if self.using_watchdog
-            else "Auto-indexing (periodic scan)…")
-
+        self._set_status("Starting library watch…")
         self._worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
         self._worker_thread.start()
+
+    def _start_watchdog(self):
+        if not HAS_WATCHDOG or not self.folder or not os.path.isdir(self.folder):
+            return False
+        try:
+            handler = _Handler(self._queue_changed, self._queue_removed)
+            self._observer = Observer()
+            self._observer.schedule(handler, self.folder, recursive=True)
+            self._observer.start()
+            return True
+        except Exception:
+            self._observer = None
+            return False
 
     def stop(self):
         self._stop_event.set()
@@ -166,6 +162,15 @@ class AutoIndexer:
             self._last_event_time = time.monotonic()
 
     def _worker_loop(self):
+        self.using_watchdog = self._start_watchdog()
+        self.safety_scan_seconds = (
+            WATCHDOG_SAFETY_SCAN_SECONDS if self.using_watchdog
+            else DEFAULT_SAFETY_SCAN_SECONDS
+        )
+        self._set_status(
+            "Watching for changes…" if self.using_watchdog
+            else "Auto-indexing (periodic scan)…")
+
         if self.using_watchdog:
             # Watch-only — file events drive indexing; no folder walks on start.
             while not self._stop_event.is_set():

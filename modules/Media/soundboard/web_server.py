@@ -32,13 +32,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
 from core import paths
+from core.services import device_trust
+from .audio import AUDIO_EXT, get_output_devices, load_audio_numpy, play_on_device, stop_all as stop_playback
 
-AUDIO_EXT = (".mp3", ".wav", ".flac", ".ogg", ".m4a")
 SETTINGS_FILE = paths.data_path("soundboard", "remote_settings.json")
 
 DEFAULT_SETTINGS = {
     "folder": "",
     "device_indices": [],   # empty = system default output
+    "access_code": "",
 }
 
 
@@ -63,69 +65,10 @@ def _save_settings(settings):
         json.dump(settings, f, indent=4)
 
 
-def _get_output_devices() -> list:
-    try:
-        import sounddevice as sd
-        devs = []
-        for i, d in enumerate(sd.query_devices()):
-            if d["max_output_channels"] > 0:
-                devs.append({"index": i, "name": d["name"]})
-        return devs
-    except Exception as e:
-        print(f"[Soundboard/web] sounddevice not available: {e}")
-        return []
-
-
-def _load_audio_numpy(path: str):
-    """Load any audio file -> (samples_float32 shape [N,2], samplerate).
-    Same approach as modules/soundboard/ui.py::_load_audio_numpy."""
-    import numpy as np
-
-    ext = os.path.splitext(path)[1].lower()
-    try:
-        import soundfile as sf
-        import subprocess
-        import tempfile
-
-        if ext in (".mp3", ".m4a", ".ogg", ".flac"):
-            import shutil
-            tmp_in = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
-            tmp_out = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-            tmp_in.close()
-            tmp_out.close()
-            try:
-                shutil.copy2(path, tmp_in.name)
-                subprocess.run(
-                    ["ffmpeg", "-y", "-i", tmp_in.name, "-ar", "44100",
-                     "-ac", "2", "-f", "wav", tmp_out.name],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
-                )
-                data, sr = sf.read(tmp_out.name, dtype="float32", always_2d=True)
-            finally:
-                for f in (tmp_in.name, tmp_out.name):
-                    try:
-                        os.unlink(f)
-                    except Exception:
-                        pass
-        else:
-            data, sr = sf.read(path, dtype="float32", always_2d=True)
-
-        if data.shape[1] == 1:
-            data = np.repeat(data, 2, axis=1)
-        return data, sr
-    except Exception as e:
-        print(f"[Soundboard/web] Failed to load {path}: {e}")
-        return None, 0
-
-
-def _play_on_device(samples, samplerate, device_index, volume=1.0):
-    try:
-        import numpy as np
-        import sounddevice as sd
-        out = (samples * volume).astype(np.float32)
-        sd.play(out, samplerate=samplerate, device=device_index, blocking=False)
-    except Exception as e:
-        print(f"[Soundboard/web] Playback error on device {device_index}: {e}")
+# Keep the old names so callers that imported underscored helpers still work.
+_get_output_devices = get_output_devices
+_load_audio_numpy = load_audio_numpy
+_play_on_device = play_on_device
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -141,7 +84,7 @@ class _Handler(BaseHTTPRequestHandler):
     def _cors_headers(self):
         origin = self.headers.get("Origin")
         self.send_header("Access-Control-Allow-Origin", origin if origin else "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Access-Code")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Access-Code, X-Device-Id, X-Device-Ts, X-Device-Sig")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Vary", "Origin")
 
@@ -177,6 +120,8 @@ class _Handler(BaseHTTPRequestHandler):
         return sent == required
 
     def do_GET(self):
+        if not device_trust.allow_handler(self):
+            return
         path = urlsplit(self.path).path
         srv = self._srv()
 
@@ -202,6 +147,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(404, {"ok": False, "error": "not found"})
 
     def do_POST(self):
+        if not device_trust.allow_handler(self):
+            return
         path = urlsplit(self.path).path
         srv = self._srv()
 
@@ -255,7 +202,7 @@ class SoundboardWebServer:
 
     def __init__(self):
         self.settings = _load_settings()
-        self.access_code = ""  # optional — see _code_ok() above; blank = no gate
+        self.access_code = (self.settings.get("access_code") or "").strip()
 
         self.port = None
         self._httpd = None
@@ -315,6 +262,9 @@ class SoundboardWebServer:
                 self.settings["device_indices"] = [int(i) for i in patch["device_indices"]]
             except Exception:
                 pass
+        if "access_code" in patch:
+            self.access_code = (patch.get("access_code") or "").strip()
+            self.settings["access_code"] = self.access_code
         _save_settings(self.settings)
 
     def play(self, path: str):
@@ -331,8 +281,4 @@ class SoundboardWebServer:
         return True, None
 
     def stop_all(self):
-        try:
-            import sounddevice as sd
-            sd.stop()
-        except Exception:
-            pass
+        stop_playback()

@@ -9,6 +9,14 @@
 # see remote_access_tab.py. Modeled directly on
 # modules/music_player/web_server.py and core/services/vault_web_server.py.
 #
+# Also hosts the channel watcher (channel_watcher.py): add a channel or
+# playlist link once ("Watch" tab, /api/channels), and new uploads get
+# queued through the same job pipeline automatically, on a background
+# thread, whether or not the phone/extension server is even turned on.
+# Everything already downloaded — this session or a past one — is
+# browsable straight off disk via library.py ("Library" tab, /api/library),
+# since the in-memory job list resets on every app restart.
+#
 # Security model:
 #   - Binds to 127.0.0.1 ONLY. Reachable from the LAN/internet only via
 #     `tailscale serve`'s HTTPS proxy (tailnet devices only) — see
@@ -19,9 +27,11 @@
 #     membership is already the trust boundary. If you want an extra
 #     step before your phone (or anyone else on your tailnet) can queue
 #     a download, set an access code in the Settings tab — this gates
-#     POST /api/download only; GET endpoints (status/job list) stay open
-#     since they're read-only. Setting a code also applies to the browser
-#     extension's requests, since they hit the same endpoint.
+#     POST /api/download, POST /api/channels, POST /api/channels/<id>/check
+#     and DELETE /api/channels/<id>; GET endpoints (status/job list,
+#     channel list, library) stay open since they're read-only. Setting a
+#     code also applies to the browser extension's requests, since they
+#     hit the same endpoint.
 #   - Downloads only ever land in the folder configured on this page —
 #     nothing can choose an arbitrary path.
 #
@@ -39,11 +49,24 @@ import json
 import mimetypes
 import os
 import re
+import shutil
+import subprocess
 import threading
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
+
+from core import paths
+from core.services import device_trust
+
+from . import library, metadata_tag
+from .channel_watcher import ChannelWatcher
+
+SETTINGS_FILE = paths.migrate_legacy_file(
+    paths.data_path("yt_downloader", "downloader_settings.json"),
+    "modules", "yt_downloader", "downloader_settings.json",
+)
 
 try:
     import yt_dlp as youtube_dl
@@ -60,6 +83,8 @@ _YOUTUBE_HOST_RE = re.compile(
 )
 
 _JOB_FILE_RE = re.compile(r"^/api/jobs/([^/]+)/download/(\d+)$")
+_CHANNEL_ID_RE = re.compile(r"^/api/channels/([^/]+)$")
+_CHANNEL_CHECK_RE = re.compile(r"^/api/channels/([^/]+)/check$")
 
 
 def is_youtube_url(url: str) -> bool:
@@ -87,7 +112,7 @@ class _Handler(BaseHTTPRequestHandler):
         # to fetch() this API from an extension:// origin.
         origin = self.headers.get("Origin")
         self.send_header("Access-Control-Allow-Origin", origin if origin else "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Access-Code, X-Device-Id, X-Device-Ts, X-Device-Sig")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Vary", "Origin")
 
@@ -141,7 +166,16 @@ class _Handler(BaseHTTPRequestHandler):
         if path is None:
             self._send_json(404, {"ok": False, "error": "file not found — job incomplete, index out of range, or the file has since moved"})
             return
+        self._serve_file(path)
 
+    def _serve_library_file(self, srv, rel_path):
+        path = library.resolve_library_file(srv.get_output_dir(), rel_path)
+        if path is None:
+            self._send_json(404, {"ok": False, "error": "file not found"})
+            return
+        self._serve_file(path)
+
+    def _serve_file(self, path):
         file_size = os.path.getsize(path)
         content_type = mimetypes.guess_type(path)[0] or "application/octet-stream"
         range_header = self.headers.get("Range")
@@ -193,6 +227,8 @@ class _Handler(BaseHTTPRequestHandler):
             pass  # client cancelled/disconnected mid-transfer — not an error
 
     def do_GET(self):
+        if not device_trust.allow_handler(self):
+            return
         path = urlsplit(self.path).path
         srv = self._srv()
 
@@ -211,6 +247,14 @@ class _Handler(BaseHTTPRequestHandler):
         elif _JOB_FILE_RE.match(path):
             m = _JOB_FILE_RE.match(path)
             self._serve_job_file(srv, m.group(1), int(m.group(2)))
+        elif path == "/api/channels":
+            self._send_json(200, {"ok": True, "channels": srv.channel_watcher.list_channels()})
+        elif path == "/api/library":
+            self._send_json(200, {"ok": True, "files": library.scan_library(srv.get_output_dir())})
+        elif path == "/api/library/file":
+            qs = parse_qs(urlsplit(self.path).query)
+            rel_path = (qs.get("path") or [""])[0]
+            self._serve_library_file(srv, rel_path)
         elif path.startswith("/api/jobs/"):
             job_id = path[len("/api/jobs/"):]
             job = srv.get_job(job_id)
@@ -222,6 +266,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(404, {"ok": False, "error": "not found"})
 
     def do_POST(self):
+        if not device_trust.allow_handler(self):
+            return
         path = urlsplit(self.path).path
         srv = self._srv()
 
@@ -256,6 +302,50 @@ class _Handler(BaseHTTPRequestHandler):
 
             job = srv.queue_download(url=url, fmt=fmt, dl_type=dl_type, quality=quality)
             self._send_json(200, {"ok": True, "job": job})
+        elif path == "/api/channels":
+            if not self._code_ok(srv):
+                self._send_json(401, {"ok": False, "error": "wrong or missing access code"})
+                return
+            body = self._read_json_body()
+            if body is None:
+                self._send_json(400, {"ok": False, "error": "invalid JSON body"})
+                return
+            url = (body.get("url") or "").strip()
+            if not url:
+                self._send_json(400, {"ok": False, "error": "missing 'url'"})
+                return
+            result = srv.channel_watcher.add_channel(
+                url,
+                name=body.get("name") or "",
+                interval_minutes=body.get("interval_minutes"),
+                fmt=(body.get("format") or srv.default_format),
+                dl_type=(body.get("type") or srv.default_type),
+                quality=str(body.get("quality") or srv.default_quality),
+            )
+            self._send_json(200 if result.get("ok") else 400, result)
+        elif _CHANNEL_CHECK_RE.match(path):
+            if not self._code_ok(srv):
+                self._send_json(401, {"ok": False, "error": "wrong or missing access code"})
+                return
+            m = _CHANNEL_CHECK_RE.match(path)
+            result = srv.channel_watcher.check_now(m.group(1))
+            self._send_json(200 if result.get("ok") else 404, result)
+        else:
+            self._send_json(404, {"ok": False, "error": "not found"})
+
+    def do_DELETE(self):
+        if not device_trust.allow_handler(self):
+            return
+        path = urlsplit(self.path).path
+        srv = self._srv()
+
+        if _CHANNEL_ID_RE.match(path):
+            if not self._code_ok(srv):
+                self._send_json(401, {"ok": False, "error": "wrong or missing access code"})
+                return
+            m = _CHANNEL_ID_RE.match(path)
+            result = srv.channel_watcher.remove_channel(m.group(1))
+            self._send_json(200 if result.get("ok") else 404, result)
         else:
             self._send_json(404, {"ok": False, "error": "not found"})
 
@@ -289,6 +379,15 @@ class YTWebServer:
         # Populated by the UI page (if open) so jobs also show up there.
         self.on_job_update = None  # callback(job_dict)
 
+        # Watches channel/playlist URLs and auto-queues new uploads through
+        # queue_download below. Runs on its own thread regardless of
+        # whether the remote (phone/extension) HTTP server is started.
+        self.channel_watcher = ChannelWatcher(queue_fn=self._watched_queue, get_output_dir=self.get_output_dir)
+        self.channel_watcher.start()
+
+    def _watched_queue(self, url, fmt, dl_type, quality, subdir):
+        self.queue_download(url, fmt, dl_type, quality, subdir=subdir)
+
     # ---- lifecycle -------------------------------------------------
 
     def is_running(self) -> bool:
@@ -320,6 +419,12 @@ class YTWebServer:
         self._httpd = None
         self.port = None
 
+    def shutdown_watcher(self):
+        """Stops the channel-watching thread. Not called by stop() above —
+        that only tears down the remote HTTP server, and watching should
+        keep working even when remote access is off."""
+        self.channel_watcher.stop()
+
     def get_output_dir(self):
         try:
             return self._get_output_dir() or ""
@@ -344,7 +449,10 @@ class YTWebServer:
         # via GET /api/jobs/<id>/download/<index>.
         j = dict(job)
         if j.get("files"):
-            j["files"] = [{"name": f["name"], "size": f["size"]} for f in j["files"]]
+            j["files"] = [
+                {"name": f["name"], "size": f["size"], "video_id": f.get("video_id")}
+                for f in j["files"]
+            ]
         return j
 
     def get_job_file_path(self, job_id, index):
@@ -361,7 +469,7 @@ class YTWebServer:
             path = files[index]["path"]
         return path if os.path.isfile(path) else None
 
-    def queue_download(self, url, fmt, dl_type, quality):
+    def queue_download(self, url, fmt, dl_type, quality, subdir=""):
         job_id = uuid.uuid4().hex[:12]
         job = {
             "id": job_id,
@@ -369,10 +477,13 @@ class YTWebServer:
             "format": fmt,
             "type": dl_type,
             "quality": quality,
+            "subdir": subdir or "",   # e.g. "Watched - SomeChannel" for auto-queued jobs
             "status": "queued",   # queued -> downloading -> done | error
             "percent": 0.0,
             "message": "Queued…",
             "created_at": time.time(),
+            "started_at": None,
+            "finished_at": None,
         }
         with self._jobs_lock:
             self._jobs[job_id] = job
@@ -381,9 +492,15 @@ class YTWebServer:
                 old_id = self._job_order.pop(0)
                 self._jobs.pop(old_id, None)
         self._notify(job)
-
-        threading.Thread(target=self._run_job, args=(job_id,), daemon=True).start()
-        return job
+        self._update_job(job_id, status="starting", message="Starting download…")
+        worker = threading.Thread(
+            target=self._run_job,
+            args=(job_id,),
+            daemon=True,
+            name=f"yt-dlp-{job_id}",
+        )
+        worker.start()
+        return self.get_job(job_id) or job
 
     def _notify(self, job):
         if self.on_job_update:
@@ -407,6 +524,7 @@ class YTWebServer:
             if job is None:
                 return
             url, fmt, dl_type, quality = job["url"], job["format"], job["type"], job["quality"]
+            subdir = job.get("subdir") or ""
 
         output_dir = self.get_output_dir()
         cookie = ""
@@ -420,14 +538,27 @@ class YTWebServer:
         except Exception:
             pass
 
-        if not output_dir or not os.path.isdir(output_dir):
-            self._update_job(job_id, status="error", message="No valid output folder configured — "
-                                                               "open YouTube Downloader in the app and set one.")
+        if youtube_dl is None:
+            self._update_job(job_id, status="error",
+                             message="yt-dlp is not installed. Run: python -m pip install -U yt-dlp")
+            return
+        if not output_dir:
+            self._update_job(job_id, status="error", message="No output folder configured.")
+            return
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except Exception as e:
+            self._update_job(job_id, status="error", message=f"Cannot create output folder: {e}")
             return
 
-        self._update_job(job_id, status="downloading", message="Starting…")
+        self._update_job(
+            job_id,
+            status="downloading",
+            started_at=time.time(),
+            message="Connecting to YouTube…",
+        )
 
-        result_paths = []
+        result_files = []  # [{"path": ..., "id": ...}, ...]
 
         def postprocessor_hook(d):
             # Fires after each postprocessor (audio extraction, video
@@ -439,8 +570,8 @@ class YTWebServer:
             if d.get("status") == "finished":
                 info = d.get("info_dict") or {}
                 fp = info.get("filepath") or info.get("_filename")
-                if fp and fp not in result_paths:
-                    result_paths.append(fp)
+                if fp and fp not in {r["path"] for r in result_files}:
+                    result_files.append({"path": fp, "id": info.get("id")})
 
         def progress_hook(d):
             if d.get("status") == "downloading":
@@ -455,27 +586,34 @@ class YTWebServer:
             elif d.get("status") == "finished":
                 self._update_job(job_id, percent=1.0, message="Post-processing…")
 
+        dest_dir = os.path.join(output_dir, subdir) if subdir else output_dir
         if dl_type == "playlist":
-            outtmpl = os.path.join(output_dir, "%(playlist)s", "%(title)s.%(ext)s")
+            outtmpl = os.path.join(dest_dir, "%(playlist)s", "%(title)s.%(ext)s")
         else:
-            outtmpl = os.path.join(output_dir, "%(title)s.%(ext)s")
+            outtmpl = os.path.join(dest_dir, "%(title)s.%(ext)s")
 
-        if cookie:
-            # "tv" used to be included here to dodge an older 403 issue,
-            # but YouTube is now running an experiment that serves
-            # DRM-only formats on the tv (TVHTML5) client for some
-            # accounts — yt-dlp raises "This video is DRM protected"
-            # even though the video itself is fine. See
-            # https://github.com/yt-dlp/yt-dlp/issues/12563. Dropping
-            # "tv" avoids it; "web" + "mweb" both support cookies.
-            player_clients = ["web", "mweb"]
-        else:
-            player_clients = ["default", "android", "ios"]
+        # Let the installed yt-dlp choose YouTube player clients. Hard-coding
+        # old clients (android/ios/tv/mweb) can break when YouTube changes its
+        # challenge or PO-token requirements.
+        class _JobLogger:
+            last = ""
+            def debug(self, msg):
+                pass
+            def info(self, msg):
+                if msg and not str(msg).startswith("[download]"):
+                    self.last = str(msg)
+            def warning(self, msg):
+                self.last = str(msg)
+            def error(self, msg):
+                self.last = str(msg)
 
+        job_logger = _JobLogger()
         opts = {
             "outtmpl": outtmpl,
             "quiet": True,
-            "no_warnings": True,
+            "no_warnings": False,
+            "logger": job_logger,
+            "verbose": True,
             "noplaylist": dl_type != "playlist",
             "windowsfilenames": True,
             "retries": 10,
@@ -483,10 +621,59 @@ class YTWebServer:
             "ignoreerrors": dl_type == "playlist",
             "progress_hooks": [progress_hook],
             "postprocessor_hooks": [postprocessor_hook],
-            "extractor_args": {"youtube": {"player_client": player_clients}},
         }
+        # YouTube currently requires a JavaScript runtime for its challenge
+        # solving. Prefer Deno, then Node, and pass the *actual executable
+        # path* to yt-dlp's Python API. PATH lookup can differ between a
+        # desktop app and a terminal on Windows.
+        def _runtime_path(name, candidates=()):
+            found = shutil.which(name)
+            if found and os.path.isfile(found):
+                return os.path.abspath(found)
+            for candidate in candidates:
+                if candidate and os.path.isfile(candidate):
+                    return os.path.abspath(candidate)
+            return None
+
+        deno = _runtime_path(
+            "deno",
+            (
+                os.path.expandvars(r"%USERPROFILE%\.deno\bin\deno.exe"),
+                os.path.expandvars(r"%LOCALAPPDATA%\deno\deno.exe"),
+            ),
+        )
+        node = _runtime_path(
+            "node",
+            (
+                os.path.expandvars(r"%ProgramFiles%\nodejs\node.exe"),
+                os.path.expandvars(r"%ProgramFiles(x86)%\nodejs\node.exe"),
+            ),
+        )
+        if deno:
+            opts["js_runtimes"] = {"deno": {"path": deno}}
+        elif node:
+            opts["js_runtimes"] = {"node": {"path": node}}
+        else:
+            self._update_job(
+                job_id,
+                status="error",
+                message=(
+                    "YouTube needs a JavaScript runtime. Install Deno 2.3+ "
+                    "(recommended) or Node.js 22+, then restart Z's Multi Tool."
+                ),
+            )
+            return
+
+        # yt-dlp can fetch the matching EJS challenge-solver scripts when the
+        # Python package was installed without yt-dlp-ejs.
+        opts["remote_components"] = {"ejs:github"}
         if ffmpeg_dir:
             opts["ffmpeg_location"] = ffmpeg_dir
+        ffmpeg_available = bool(ffmpeg_dir) or bool(shutil.which("ffmpeg"))
+        if not ffmpeg_available:
+            self._update_job(job_id, status="error",
+                             message="FFmpeg is required for MP3 extraction and MP4 merging. Install FFmpeg and put it on PATH.")
+            return
         if cookie and os.path.exists(cookie):
             opts["cookiefile"] = os.path.abspath(cookie)
 
@@ -501,30 +688,104 @@ class YTWebServer:
             opts["format"] = "bestvideo+bestaudio/best"
             opts["merge_output_format"] = "mp4"
 
+        # YouTube is currently returning HTTP 403 for some of the normal
+        # web/SABR GoogleVideo URLs when a PO token is not available.  A JS
+        # runtime fixes the player challenge, but it does NOT automatically
+        # provide the GVS PO token.  Keep the normal/default attempt first,
+        # then retry with clients/formats that currently do not require a GVS
+        # PO token.  This makes the downloader usable without forcing every
+        # user to manually copy a token.
         try:
-            try:
-                with youtube_dl.YoutubeDL(opts) as ydl:
-                    ret = ydl.download([url])
-            except youtube_dl.utils.DownloadError as e:
-                if "403" in str(e) and opts.get("format") != "18/best":
-                    fallback_opts = dict(opts)
-                    fallback_opts["format"] = "18/best"
-                    with youtube_dl.YoutubeDL(fallback_opts) as ydl:
-                        ret = ydl.download([url])
-                else:
-                    raise
-
-            if ret:
-                self._update_job(job_id, status="error", message="Finished with errors — see the app's download log.")
+            attempts = []
+    
+            normal = dict(opts)
+            attempts.append(normal)
+    
+            # web_embedded does not require a GVS PO token, but only works for
+            # videos that allow embedding.
+            embedded = dict(opts)
+            embedded["extractor_args"] = {"youtube": {"player_client": ["web_embedded"]}}
+            attempts.append(embedded)
+    
+            # android_vr is another no-PO-token client for ordinary videos.
+            android_vr = dict(opts)
+            android_vr["extractor_args"] = {"youtube": {"player_client": ["android_vr"]}}
+            attempts.append(android_vr)
+    
+            # web_safari can expose HLS formats that do not require a GVS PO
+            # token. Prefer an HLS format on this final fallback.
+            hls = dict(opts)
+            hls["extractor_args"] = {"youtube": {"player_client": ["web_safari"]}}
+            if fmt == "mp3":
+                hls["format"] = "bestaudio[protocol^=m3u8]/bestaudio/best"
             else:
-                files = [
-                    {"name": os.path.basename(p), "path": p, "size": os.path.getsize(p)}
-                    for p in result_paths
-                    if os.path.isfile(p)
-                ]
-                self._update_job(job_id, status="done", percent=1.0, message="Done", files=files)
+                hls["format"] = "best[protocol^=m3u8]/best"
+            attempts.append(hls)
+    
+            ret = 1
+            last_error = None
+            for attempt_no, attempt_opts in enumerate(attempts, 1):
+                try:
+                    self._update_job(
+                        job_id,
+                        message=(
+                            "Downloading…" if attempt_no == 1
+                            else f"Retrying YouTube with fallback {attempt_no - 1}…"
+                        ),
+                    )
+                    with youtube_dl.YoutubeDL(attempt_opts) as ydl:
+                        ret = ydl.download([url])
+                    if not ret:
+                        break
+                except youtube_dl.utils.DownloadError as e:
+                    last_error = e
+                    if "403" not in str(e):
+                        raise
+                    # Try the next client/format only for the specific HTTP 403
+                    # failure that this fallback chain is intended to handle.
+                    continue
+    
+            if ret and last_error is not None:
+                raise last_error
+    
+            if ret:
+                self._update_job(
+                    job_id,
+                    status="error",
+                    message="Finished with errors — see the app's download log.",
+                )
+            else:
+                files = []
+                for r in result_files:
+                    p = r["path"]
+                    if not os.path.isfile(p):
+                        continue
+                    if r.get("id"):
+                        metadata_tag.embed_video_id(p, r["id"])
+                    files.append({
+                        "name": os.path.basename(p),
+                        "path": p,
+                        "size": os.path.getsize(p),
+                        "video_id": r.get("id"),
+                    })
+                self._update_job(
+                    job_id,
+                    status="done",
+                    percent=1.0,
+                    finished_at=time.time(),
+                    message="Download complete",
+                    files=files,
+                )
         except Exception as e:
-            self._update_job(job_id, status="error", message=str(e))
+            detail = str(e).strip() or "Unknown yt-dlp error."
+            logger_detail = getattr(job_logger, "last", "")
+            if logger_detail and logger_detail not in detail:
+                detail = f"{detail} — {logger_detail}"
+            # Keep the UI readable while still exposing the useful cause.
+            detail = " ".join(detail.split())
+            if len(detail) > 900:
+                detail = detail[:897] + "..."
+            self._update_job(job_id, status="error", finished_at=time.time(), message=detail)
 
 
 # =====================================================
@@ -571,6 +832,20 @@ def _mobile_page(needs_code: bool) -> str:
   .status-error { color:var(--danger); }
   .error { color:var(--danger); font-size:14px; margin:-4px 0 10px; }
   .muted { color:var(--muted); font-size:13px; }
+  .tabs { display:flex; gap:8px; margin-bottom:16px; }
+  .tabs button {
+    flex:1; width:auto; padding:10px; font-size:14px; font-weight:600;
+    background:var(--card); color:var(--muted);
+  }
+  .tabs button.active { background:var(--accent); color:#0b0d10; }
+  .iconbtn {
+    width:auto; padding:8px 12px; font-size:13px; background:var(--card);
+    color:var(--text); border:1px solid #252d3d; font-weight:600;
+  }
+  .iconbtn.danger { color:var(--danger); }
+  .card-row { display:flex; align-items:center; justify-content:space-between; gap:10px; }
+  .card .name { font-weight:600; font-size:14px; word-break:break-all; }
+  .card .sub { color:var(--muted); font-size:12px; margin-top:2px; }
 </style>
 </head>
 <body>
@@ -597,9 +872,37 @@ function escapeHtml(s) {
   return (s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+let currentView = 'download';
+
 function render() {
   app.innerHTML = `
     <h1>&#9195;&#65039; YouTube Downloader</h1>
+    <div class="tabs">
+      <button id="tabDownload">Download</button>
+      <button id="tabChannels">Watch</button>
+      <button id="tabLibrary">Library</button>
+    </div>
+    <div id="view"></div>
+    <div class="muted">Reachable only from devices on your Tailscale network.</div>
+  `;
+  document.getElementById('tabDownload').onclick = () => switchView('download');
+  document.getElementById('tabChannels').onclick = () => switchView('channels');
+  document.getElementById('tabLibrary').onclick = () => switchView('library');
+  switchView('download');
+}
+
+function switchView(view) {
+  currentView = view;
+  document.getElementById('tabDownload').className = view === 'download' ? 'active' : '';
+  document.getElementById('tabChannels').className = view === 'channels' ? 'active' : '';
+  document.getElementById('tabLibrary').className = view === 'library' ? 'active' : '';
+  if (view === 'download') renderDownloadView();
+  else if (view === 'channels') renderChannelsView();
+  else renderLibraryView();
+}
+
+function renderDownloadView() {
+  document.getElementById('view').innerHTML = `
     <div class="panel">
       <input id="url" type="url" placeholder="Paste a YouTube link" autofocus>
       <div class="row2">
@@ -610,7 +913,6 @@ function render() {
       <button id="goBtn">Queue Download</button>
     </div>
     <div id="jobs"></div>
-    <div class="muted">Reachable only from devices on your Tailscale network.</div>
   `;
   document.getElementById('goBtn').onclick = submit;
   document.getElementById('url').addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
@@ -644,6 +946,7 @@ async function submit() {
 }
 
 async function refreshJobs() {
+  if (currentView !== 'download') return;
   const r = await api('/api/jobs');
   const el = document.getElementById('jobs');
   if (!el) return;
@@ -661,8 +964,146 @@ async function refreshJobs() {
   `).join('');
 }
 
+// ---- Watch a channel ----------------------------------------------
+
+function renderChannelsView() {
+  document.getElementById('view').innerHTML = `
+    <div class="panel">
+      <input id="chUrl" type="url" placeholder="Channel or playlist link">
+      <input id="chName" type="text" placeholder="Name (optional)">
+      <div class="row2">
+        <select id="chType"><option value="video">Video</option><option value="playlist">Playlist</option></select>
+        <select id="chFormat"><option value="mp4">mp4</option><option value="mp3">mp3</option></select>
+      </div>
+      <select id="chInterval">
+        <option value="30">Check every 30 min</option>
+        <option value="60" selected>Check every hour</option>
+        <option value="180">Check every 3 hours</option>
+        <option value="720">Check every 12 hours</option>
+        <option value="1440">Check once a day</option>
+      </select>
+      <div id="chErr" class="error" style="display:none;"></div>
+      <button id="chAddBtn">Watch Channel</button>
+    </div>
+    <div id="channels"></div>
+  `;
+  document.getElementById('chAddBtn').onclick = addChannel;
+  refreshChannels();
+}
+
+async function addChannel() {
+  const url = document.getElementById('chUrl').value.trim();
+  const errEl = document.getElementById('chErr');
+  errEl.style.display = 'none';
+  if (!url) return;
+  if (NEEDS_CODE && !accessCode) {
+    const entered = prompt('Access code required:');
+    if (!entered) return;
+    accessCode = entered.trim();
+    sessionStorage.setItem('yt_access_code', accessCode);
+  }
+  const body = {
+    url,
+    name: document.getElementById('chName').value.trim(),
+    type: document.getElementById('chType').value,
+    format: document.getElementById('chFormat').value,
+    interval_minutes: parseInt(document.getElementById('chInterval').value, 10),
+  };
+  const r = await api('/api/channels', { method: 'POST', body: JSON.stringify(body) });
+  if (!r.ok) {
+    errEl.textContent = r.data.error || 'Failed to watch channel.';
+    errEl.style.display = 'block';
+    return;
+  }
+  document.getElementById('chUrl').value = '';
+  document.getElementById('chName').value = '';
+  refreshChannels();
+}
+
+async function checkChannelNow(id) {
+  await api(`/api/channels/${id}/check`, { method: 'POST' });
+  setTimeout(refreshChannels, 1500);
+}
+
+async function removeChannel(id) {
+  await api(`/api/channels/${id}`, { method: 'DELETE' });
+  refreshChannels();
+}
+
+function timeAgo(ts) {
+  if (!ts) return 'never checked';
+  const mins = Math.max(0, Math.round((Date.now() / 1000 - ts) / 60));
+  if (mins < 1) return 'checked just now';
+  if (mins < 60) return `checked ${mins}m ago`;
+  return `checked ${Math.round(mins / 60)}h ago`;
+}
+
+async function refreshChannels() {
+  if (currentView !== 'channels') return;
+  const r = await api('/api/channels');
+  const el = document.getElementById('channels');
+  if (!el) return;
+  const channels = r.data.channels || [];
+  if (channels.length === 0) {
+    el.innerHTML = '<div class="muted">Not watching any channels yet.</div>';
+    return;
+  }
+  el.innerHTML = channels.map(c => `
+    <div class="card">
+      <div class="card-row">
+        <div>
+          <div class="name">${escapeHtml(c.name)}</div>
+          <div class="sub">${timeAgo(c.last_checked)} &middot; ${c.downloaded_count} seen &middot; every ${c.interval_minutes}m</div>
+          ${c.last_error ? `<div class="sub status-error">${escapeHtml(c.last_error)}</div>` : ''}
+        </div>
+      </div>
+      <div class="row2" style="margin-top:10px;">
+        <button class="iconbtn" onclick="checkChannelNow('${c.id}')">Check now</button>
+        <button class="iconbtn danger" onclick="removeChannel('${c.id}')">Remove</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+// ---- Library ---------------------------------------------------------
+
+function fmtSize(bytes) {
+  if (!bytes) return '';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let i = 0, n = bytes;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return `${n.toFixed(n >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+function renderLibraryView() {
+  document.getElementById('view').innerHTML = `<div id="library"><div class="muted">Loading…</div></div>`;
+  refreshLibrary();
+}
+
+async function refreshLibrary() {
+  if (currentView !== 'library') return;
+  const r = await api('/api/library');
+  const el = document.getElementById('library');
+  if (!el) return;
+  const files = r.data.files || [];
+  if (files.length === 0) {
+    el.innerHTML = '<div class="muted">Nothing downloaded yet.</div>';
+    return;
+  }
+  el.innerHTML = files.map(f => `
+    <div class="card">
+      <div class="name">${escapeHtml(f.name)}</div>
+      <div class="sub">${escapeHtml(f.folder || 'Downloads')} &middot; ${fmtSize(f.size)}</div>
+      <div class="row2" style="margin-top:10px;">
+        <a class="iconbtn" style="text-decoration:none; text-align:center;" href="/api/library/file?path=${encodeURIComponent(f.rel_path)}">Open / Download</a>
+        ${f.video_url ? `<a class="iconbtn" style="text-decoration:none; text-align:center;" href="${f.video_url}" target="_blank" rel="noopener">View on YouTube</a>` : ''}
+      </div>
+    </div>
+  `).join('');
+}
+
 render();
-setInterval(refreshJobs, 3000);
+setInterval(() => { refreshJobs(); refreshChannels(); }, 3000);
 </script>
 </body>
 </html>
