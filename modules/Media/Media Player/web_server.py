@@ -37,6 +37,8 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit, parse_qs
 
+from core.services import device_trust
+
 from . import db as musicdb
 
 # Browser-friendly overrides — Python's mimetypes module either doesn't
@@ -133,7 +135,7 @@ class _Handler(BaseHTTPRequestHandler):
         # to fetch() this API.
         origin = self.headers.get("Origin")
         self.send_header("Access-Control-Allow-Origin", origin if origin else "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Api-Key")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Api-Key, X-Device-Id, X-Device-Ts, X-Device-Sig")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Vary", "Origin")
 
@@ -190,6 +192,8 @@ class _Handler(BaseHTTPRequestHandler):
     # -------------------------------------------------
 
     def do_GET(self):
+        if not device_trust.allow_handler(self):
+            return
         parts = urlsplit(self.path)
         path = parts.path
         qs = parse_qs(parts.query)
@@ -224,6 +228,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(404, {"error": "not found"})
 
     def do_POST(self):
+        if not device_trust.allow_handler(self):
+            return
         parts = urlsplit(self.path)
         if parts.path == "/api/control":
             if not self._key_ok():

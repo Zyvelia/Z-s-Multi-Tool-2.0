@@ -1,326 +1,291 @@
-# modules/qr_generator/ui.py
-#
-# QR Code Generator — pick a type (plain text/URL, Wi-Fi, email, phone,
-# SMS), fill in the relevant fields, and get a live-updating QR preview
-# you can save as a PNG or copy the raw encoded text from.
-#
-# `manager` follows the shared convention (manager.container is the root
-# App instance) even though this module doesn't currently need it beyond
-# the constructor signature every module page is expected to accept.
+"""Qt QR Generator — type fields, live preview, save PNG, copy payload."""
 
 from __future__ import annotations
 
-from tkinter import filedialog
+import importlib
 
-import customtkinter as ctk
-from PIL import Image
+from io import BytesIO
 
-from core import theme
-from .qr_builder import (
-    DEFAULT_ERROR_CORRECTION,
-    ERROR_CORRECTION_LEVELS,
-    QR_TYPES,
-    QRBuildError,
-    WIFI_SECURITY_TYPES,
-    EmailFields,
-    SmsFields,
-    WifiFields,
-    build_payload,
-    generate_image,
+from PySide6.QtCore import QBuffer, Qt, QTimer
+from PySide6.QtGui import QPixmap
+from PySide6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QComboBox,
+    QFileDialog,
+    QFormLayout,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPlainTextEdit,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
 )
 
+qr_builder = importlib.import_module("modules.Design.QR Generator.qr_builder")
 
 PREVIEW_SIZE = 320
-REGENERATE_DELAY_MS = 300
 
 
-class QRGeneratorModule(ctk.CTkFrame):
+def _pil_to_pixmap(image) -> QPixmap:
+    raw = BytesIO()
+    image.save(raw, format="PNG")
+    buf = QBuffer()
+    buf.setData(raw.getvalue())
+    pix = QPixmap()
+    pix.loadFromData(buf.data())
+    return pix
 
-    def __init__(self, master, manager=None, **kwargs):
-        super().__init__(master, fg_color=theme.BG, **kwargs)
+
+class QRGeneratorModule(QWidget):
+    def __init__(self, parent, manager):
+        super().__init__(parent)
         self.manager = manager
-        self.root_widget = manager.container if manager is not None else master
+        self._current_image = None
+        self._current_payload = ""
+        self._fields = {}
+        self._regen = QTimer(self)
+        self._regen.setSingleShot(True)
+        self._regen.setInterval(300)
+        self._regen.timeout.connect(self._regenerate)
 
-        self._regen_after_id = None
-        self._current_image: Image.Image | None = None
-        self._current_payload: str = ""
-        self._field_vars: dict[str, ctk.StringVar] = {}
-        self._field_widgets_frame: ctk.CTkFrame | None = None
+        root = QHBoxLayout(self)
+        left = QFrame()
+        left.setObjectName("Panel")
+        ll = QVBoxLayout(left)
+        title = QLabel("QR Code Generator")
+        title.setObjectName("AccentTitle")
+        ll.addWidget(title)
 
-        self._build_layout()
+        type_lab = QLabel("Type")
+        type_lab.setObjectName("Muted")
+        ll.addWidget(type_lab)
+        self.type_combo = QComboBox()
+        self.type_combo.addItems(qr_builder.QR_TYPES)
+        self.type_combo.currentTextChanged.connect(self._rebuild_type_fields)
+        ll.addWidget(self.type_combo)
+
+        self.fields_host = QWidget()
+        self.fields_lay = QVBoxLayout(self.fields_host)
+        self.fields_lay.setContentsMargins(0, 0, 0, 0)
+        ll.addWidget(self.fields_host)
+
+        ec_lab = QLabel("Error Correction")
+        ec_lab.setObjectName("Muted")
+        ll.addWidget(ec_lab)
+        self.ec_combo = QComboBox()
+        self.ec_combo.addItems(list(qr_builder.ERROR_CORRECTION_LEVELS.keys()))
+        self.ec_combo.setCurrentText(qr_builder.DEFAULT_ERROR_CORRECTION)
+        self.ec_combo.currentTextChanged.connect(self._schedule)
+        ll.addWidget(self.ec_combo)
+
+        colors = QFormLayout()
+        self.fg_edit = QLineEdit("#000000")
+        self.bg_edit = QLineEdit("#ffffff")
+        self.fg_edit.textChanged.connect(self._schedule)
+        self.bg_edit.textChanged.connect(self._schedule)
+        colors.addRow("Foreground", self.fg_edit)
+        colors.addRow("Background", self.bg_edit)
+        ll.addLayout(colors)
+
+        self.error = QLabel("")
+        self.error.setObjectName("Danger")
+        self.error.setWordWrap(True)
+        ll.addWidget(self.error)
+        ll.addStretch(1)
+
+        right = QFrame()
+        right.setObjectName("Panel")
+        rl = QVBoxLayout(right)
+        self.preview = QLabel("Enter a value to preview")
+        self.preview.setObjectName("Muted")
+        self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview.setMinimumSize(PREVIEW_SIZE, PREVIEW_SIZE)
+        rl.addWidget(self.preview, 1)
+
+        btns = QHBoxLayout()
+        save = QPushButton("Save PNG")
+        save.setObjectName("Primary")
+        save.clicked.connect(self._save_png)
+        copy = QPushButton("Copy payload")
+        copy.clicked.connect(self._copy_payload)
+        btns.addWidget(save)
+        btns.addWidget(copy)
+        btns.addStretch(1)
+        rl.addLayout(btns)
+        self.status = QLabel("")
+        self.status.setObjectName("Muted")
+        rl.addWidget(self.status)
+
+        root.addWidget(left, 0)
+        root.addWidget(right, 1)
         self._rebuild_type_fields()
 
-    # ------------------------------------------------------------------ UI
+    def _clear_fields(self):
+        while self.fields_lay.count():
+            item = self.fields_lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        self._fields = {}
 
-    def _build_layout(self) -> None:
-        self.grid_columnconfigure(0, weight=0, minsize=340)
-        self.grid_columnconfigure(1, weight=1)
-        self.grid_rowconfigure(1, weight=1)
+    def _add_line(self, key, label, *, password=False, multiline=False):
+        cap = QLabel(label)
+        cap.setObjectName("Muted")
+        self.fields_lay.addWidget(cap)
+        if multiline:
+            w = QPlainTextEdit()
+            w.setMaximumHeight(80)
+            w.textChanged.connect(self._schedule)
+        else:
+            w = QLineEdit()
+            if password:
+                w.setEchoMode(QLineEdit.EchoMode.Password)
+            w.textChanged.connect(self._schedule)
+        self.fields_lay.addWidget(w)
+        self._fields[key] = w
+        return w
 
-        header = ctk.CTkLabel(
-            self, text="QR Code Generator",
-            font=ctk.CTkFont(size=20, weight="bold"), text_color="white",
-        )
-        header.grid(row=0, column=0, columnspan=2, sticky="w", padx=16, pady=(16, 4))
+    def _field_text(self, key):
+        w = self._fields[key]
+        if isinstance(w, QPlainTextEdit):
+            return w.toPlainText()
+        if isinstance(w, QComboBox):
+            return w.currentText()
+        if isinstance(w, QCheckBox):
+            return w.isChecked()
+        return w.text()
 
-        # ---- left: controls ----
-        left = ctk.CTkScrollableFrame(self, fg_color=theme.PANEL, corner_radius=10)
-        left.grid(row=1, column=0, sticky="nsew", padx=(16, 8), pady=(0, 16))
-        left.grid_columnconfigure(0, weight=1)
-        self._left = left
-
-        ctk.CTkLabel(left, text="Type", text_color=theme.MUTED).grid(
-            row=0, column=0, sticky="w", padx=12, pady=(12, 2)
-        )
-        self.type_var = ctk.StringVar(value=QR_TYPES[0])
-        ctk.CTkOptionMenu(
-            left, values=QR_TYPES, variable=self.type_var,
-            fg_color=theme.PANEL_2, button_color=theme.ACCENT, button_hover_color=theme.ACCENT,
-            command=lambda _v: self._rebuild_type_fields(),
-        ).grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 12))
-
-        # Type-specific fields get rebuilt into this frame each time the
-        # type changes.
-        self._field_widgets_frame = ctk.CTkFrame(left, fg_color="transparent")
-        self._field_widgets_frame.grid(row=2, column=0, sticky="ew", padx=0, pady=0)
-        self._field_widgets_frame.grid_columnconfigure(0, weight=1)
-
-        # ---- options ----
-        ctk.CTkLabel(left, text="Error Correction", text_color=theme.MUTED).grid(
-            row=3, column=0, sticky="w", padx=12, pady=(16, 2)
-        )
-        self.ec_var = ctk.StringVar(value=DEFAULT_ERROR_CORRECTION)
-        ctk.CTkOptionMenu(
-            left, values=list(ERROR_CORRECTION_LEVELS.keys()), variable=self.ec_var,
-            fg_color=theme.PANEL_2, button_color=theme.ACCENT, button_hover_color=theme.ACCENT,
-            command=lambda _v: self._schedule_regenerate(),
-        ).grid(row=4, column=0, sticky="ew", padx=12, pady=(0, 12))
-
-        color_row = ctk.CTkFrame(left, fg_color="transparent")
-        color_row.grid(row=5, column=0, sticky="ew", padx=12, pady=(0, 12))
-        color_row.grid_columnconfigure((0, 1), weight=1)
-
-        fg_col = ctk.CTkFrame(color_row, fg_color="transparent")
-        fg_col.grid(row=0, column=0, sticky="w")
-        ctk.CTkLabel(fg_col, text="Foreground", text_color=theme.MUTED).pack(anchor="w")
-        self.fg_var = ctk.StringVar(value="#000000")
-        ctk.CTkEntry(fg_col, textvariable=self.fg_var, width=90, fg_color=theme.PANEL_2).pack(anchor="w", pady=(2, 0))
-        self.fg_var.trace_add("write", lambda *_: self._schedule_regenerate())
-
-        bg_col = ctk.CTkFrame(color_row, fg_color="transparent")
-        bg_col.grid(row=0, column=1, sticky="w")
-        ctk.CTkLabel(bg_col, text="Background", text_color=theme.MUTED).pack(anchor="w")
-        self.bg_var = ctk.StringVar(value="#ffffff")
-        ctk.CTkEntry(bg_col, textvariable=self.bg_var, width=90, fg_color=theme.PANEL_2).pack(anchor="w", pady=(2, 0))
-        self.bg_var.trace_add("write", lambda *_: self._schedule_regenerate())
-
-        self.error_label = ctk.CTkLabel(left, text="", text_color=theme.DANGER, wraplength=300, justify="left")
-        self.error_label.grid(row=6, column=0, sticky="ew", padx=12, pady=(0, 8))
-
-        # ---- right: preview ----
-        right = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=10)
-        right.grid(row=1, column=1, sticky="nsew", padx=(8, 16), pady=(0, 16))
-        right.grid_columnconfigure(0, weight=1)
-        right.grid_rowconfigure(0, weight=1)
-
-        self.preview_label = ctk.CTkLabel(right, text="", fg_color="transparent")
-        self.preview_label.grid(row=0, column=0, pady=(24, 12))
-
-        btn_row = ctk.CTkFrame(right, fg_color="transparent")
-        btn_row.grid(row=1, column=0, pady=(0, 16))
-
-        ctk.CTkButton(
-            btn_row, text="Save as PNG…", width=140,
-            fg_color=theme.ACCENT, hover_color="#3d8fe0", command=self._save_png,
-        ).pack(side="left", padx=6)
-
-        ctk.CTkButton(
-            btn_row, text="Copy Encoded Text", width=160,
-            fg_color=theme.PANEL_2, hover_color=theme.ACCENT, command=self._copy_payload,
-        ).pack(side="left", padx=6)
-
-        self.status_label = ctk.CTkLabel(right, text="", text_color=theme.MUTED)
-        self.status_label.grid(row=2, column=0, pady=(0, 16))
-
-    # -------------------------------------------------------- type fields
-
-    def _rebuild_type_fields(self) -> None:
-        for child in self._field_widgets_frame.winfo_children():
-            child.destroy()
-        self._field_vars = {}
-
-        qr_type = self.type_var.get()
-        row = 0
-
-        def add_field(key: str, label: str, *, show: str | None = None) -> ctk.StringVar:
-            nonlocal row
-            ctk.CTkLabel(self._field_widgets_frame, text=label, text_color=theme.MUTED).grid(
-                row=row, column=0, sticky="w", padx=12, pady=(8, 2)
-            )
-            row += 1
-            var = ctk.StringVar()
-            entry = ctk.CTkEntry(self._field_widgets_frame, textvariable=var, fg_color=theme.PANEL_2, show=show or "")
-            entry.grid(row=row, column=0, sticky="ew", padx=12, pady=(0, 4))
-            row += 1
-            var.trace_add("write", lambda *_: self._schedule_regenerate())
-            self._field_vars[key] = var
-            return var
-
+    def _rebuild_type_fields(self, _text=None):
+        self._clear_fields()
+        qr_type = self.type_combo.currentText()
         if qr_type == "Text / URL":
-            add_field("text", "Text or URL")
-
+            self._add_line("text", "Text or URL", multiline=True)
         elif qr_type == "Wi-Fi Network":
-            add_field("ssid", "Network Name (SSID)")
-            add_field("password", "Password", show="*")
-            ctk.CTkLabel(self._field_widgets_frame, text="Security", text_color=theme.MUTED).grid(
-                row=row, column=0, sticky="w", padx=12, pady=(8, 2)
-            )
-            row += 1
-            sec_var = ctk.StringVar(value=WIFI_SECURITY_TYPES[0])
-            ctk.CTkOptionMenu(
-                self._field_widgets_frame, values=WIFI_SECURITY_TYPES, variable=sec_var,
-                fg_color=theme.PANEL_2, button_color=theme.ACCENT, button_hover_color=theme.ACCENT,
-                command=lambda _v: self._schedule_regenerate(),
-            ).grid(row=row, column=0, sticky="ew", padx=12, pady=(0, 4))
-            row += 1
-            self._field_vars["security"] = sec_var
-            hidden_var = ctk.BooleanVar(value=False)
-            ctk.CTkCheckBox(
-                self._field_widgets_frame, text="Hidden network", variable=hidden_var,
-                fg_color=theme.ACCENT, hover_color=theme.ACCENT, command=self._schedule_regenerate,
-            ).grid(row=row, column=0, sticky="w", padx=12, pady=(4, 4))
-            row += 1
-            self._field_vars["hidden"] = hidden_var
-
+            self._add_line("ssid", "Network Name (SSID)")
+            self._add_line("password", "Password", password=True)
+            cap = QLabel("Security")
+            cap.setObjectName("Muted")
+            self.fields_lay.addWidget(cap)
+            sec = QComboBox()
+            sec.addItems(qr_builder.WIFI_SECURITY_TYPES)
+            sec.currentTextChanged.connect(self._schedule)
+            self.fields_lay.addWidget(sec)
+            self._fields["security"] = sec
+            hidden = QCheckBox("Hidden network")
+            hidden.toggled.connect(self._schedule)
+            self.fields_lay.addWidget(hidden)
+            self._fields["hidden"] = hidden
         elif qr_type == "Email":
-            add_field("address", "Email Address")
-            add_field("subject", "Subject (optional)")
-            add_field("body", "Body (optional)")
-
+            self._add_line("address", "Email Address")
+            self._add_line("subject", "Subject (optional)")
+            self._add_line("body", "Body (optional)", multiline=True)
         elif qr_type == "Phone Number":
-            add_field("phone", "Phone Number")
-
+            self._add_line("phone", "Phone Number")
         elif qr_type == "SMS":
-            add_field("number", "Phone Number")
-            add_field("message", "Message (optional)")
+            self._add_line("number", "Phone Number")
+            self._add_line("message", "Message (optional)", multiline=True)
+        self._schedule()
 
-        self._schedule_regenerate()
+    def _schedule(self, *_args):
+        self._regen.start()
 
-    # --------------------------------------------------------- generation
-
-    def _schedule_regenerate(self) -> None:
-        if self._regen_after_id is not None:
-            try:
-                self.after_cancel(self._regen_after_id)
-            except Exception:
-                pass
-        self._regen_after_id = self.after(REGENERATE_DELAY_MS, self._regenerate)
-
-    def _build_current_payload(self) -> str:
-        qr_type = self.type_var.get()
-        v = self._field_vars
-
+    def _build_payload(self):
+        qr_type = self.type_combo.currentText()
+        v = self._field_text
         if qr_type == "Text / URL":
-            return build_payload(qr_type, text=v["text"].get())
-
+            return qr_builder.build_payload(qr_type, text=v("text"))
         if qr_type == "Wi-Fi Network":
-            return build_payload(qr_type, wifi=WifiFields(
-                ssid=v["ssid"].get(),
-                password=v["password"].get(),
-                security=v["security"].get(),
-                hidden=bool(v["hidden"].get()),
-            ))
-
+            return qr_builder.build_payload(
+                qr_type,
+                wifi=qr_builder.WifiFields(
+                    ssid=v("ssid"),
+                    password=v("password"),
+                    security=v("security"),
+                    hidden=bool(v("hidden")),
+                ),
+            )
         if qr_type == "Email":
-            return build_payload(qr_type, email=EmailFields(
-                address=v["address"].get(),
-                subject=v["subject"].get(),
-                body=v["body"].get(),
-            ))
-
+            return qr_builder.build_payload(
+                qr_type,
+                email=qr_builder.EmailFields(
+                    address=v("address"),
+                    subject=v("subject"),
+                    body=v("body"),
+                ),
+            )
         if qr_type == "Phone Number":
-            return build_payload(qr_type, phone=v["phone"].get())
-
+            return qr_builder.build_payload(qr_type, phone=v("phone"))
         if qr_type == "SMS":
-            return build_payload(qr_type, sms=SmsFields(
-                number=v["number"].get(),
-                message=v["message"].get(),
-            ))
+            return qr_builder.build_payload(
+                qr_type,
+                sms=qr_builder.SmsFields(number=v("number"), message=v("message")),
+            )
+        return qr_builder.build_payload(qr_type)
 
-        return build_payload(qr_type)
-
-    def _regenerate(self) -> None:
-        self._regen_after_id = None
-        self.error_label.configure(text="")
-
+    def _regenerate(self):
+        self.error.setText("")
         try:
-            payload = self._build_current_payload()
-        except QRBuildError as e:
-            self._show_placeholder(str(e))
+            payload = self._build_payload()
+        except qr_builder.QRBuildError as exc:
+            self._placeholder(str(exc))
             return
-
-        fg = self.fg_var.get().strip() or "#000000"
-        bg = self.bg_var.get().strip() or "#ffffff"
+        fg = self.fg_edit.text().strip() or "#000000"
+        bg = self.bg_edit.text().strip() or "#ffffff"
         for value, name in ((fg, "Foreground"), (bg, "Background")):
             if not (value.startswith("#") and len(value) in (4, 7)):
-                self.error_label.configure(text=f"{name} color must be a hex code like #000000.")
+                self.error.setText(f"{name} color must be a hex code like #000000.")
                 return
-
         try:
-            img = generate_image(
+            img = qr_builder.generate_image(
                 payload,
-                error_correction=self.ec_var.get(),
+                error_correction=self.ec_combo.currentText(),
                 fill_color=fg,
                 back_color=bg,
             )
-        except QRBuildError as e:
-            self._show_placeholder(str(e))
+        except qr_builder.QRBuildError as exc:
+            self._placeholder(str(exc))
             return
-        except Exception as e:
-            self.error_label.configure(text=f"Couldn't generate QR code: {e}")
+        except Exception as exc:
+            self.error.setText(f"Couldn't generate QR code: {exc}")
             return
-
         self._current_image = img
         self._current_payload = payload
-
         display = img.copy()
-        display.thumbnail((PREVIEW_SIZE, PREVIEW_SIZE), Image.LANCZOS)
-        ctk_img = ctk.CTkImage(light_image=display, dark_image=display, size=display.size)
-        self.preview_label.configure(image=ctk_img, text="")
-        self.preview_label.image = ctk_img  # keep a reference
-        self.status_label.configure(text=f"{len(payload)} character(s) encoded")
+        display.thumbnail((PREVIEW_SIZE, PREVIEW_SIZE))
+        pix = _pil_to_pixmap(display)
+        self.preview.setPixmap(pix)
+        self.preview.setObjectName("")
+        self.status.setText(f"{len(payload)} character(s) encoded")
 
-    def _show_placeholder(self, message: str) -> None:
+    def _placeholder(self, message):
         self._current_image = None
         self._current_payload = ""
-        self.preview_label.configure(image=None, text=message, text_color=theme.MUTED, wraplength=260)
-        self.preview_label.image = None
-        self.status_label.configure(text="")
+        self.preview.clear()
+        self.preview.setText(message)
+        self.preview.setObjectName("Muted")
+        self.status.setText("")
 
-    # ------------------------------------------------------------- actions
-
-    def _save_png(self) -> None:
+    def _save_png(self):
         if self._current_image is None:
-            self.status_label.configure(text="Nothing to save yet — fix the fields above first.")
+            self.status.setText("Nothing to save yet — fix the fields first.")
             return
-        path = filedialog.asksaveasfilename(
-            defaultextension=".png",
-            filetypes=[("PNG image", "*.png")],
-            initialfile="qrcode.png",
-            title="Save QR Code",
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save QR Code", "qrcode.png", "PNG image (*.png)"
         )
         if not path:
             return
         try:
             self._current_image.save(path)
-            self.status_label.configure(text=f"Saved to {path}")
-        except Exception as e:
-            self.status_label.configure(text=f"Couldn't save: {e}")
+            self.status.setText(f"Saved to {path}")
+        except Exception as exc:
+            self.status.setText(f"Couldn't save: {exc}")
 
-    def _copy_payload(self) -> None:
+    def _copy_payload(self):
         if not self._current_payload:
-            self.status_label.configure(text="Nothing to copy yet — fix the fields above first.")
+            self.status.setText("Nothing to copy yet — fix the fields first.")
             return
-        self.root_widget.clipboard_clear()
-        self.root_widget.clipboard_append(self._current_payload)
-        self.status_label.configure(text="Encoded text copied to clipboard")
+        QApplication.clipboard().setText(self._current_payload)
+        self.status.setText("Encoded text copied to clipboard")

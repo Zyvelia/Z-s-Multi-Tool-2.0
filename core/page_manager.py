@@ -7,7 +7,7 @@ class PageManager:
         self.pages = {}
         self.current = None
 
-        # Pressing Escape jumps back to the catalog (home) page.
+        # Pressing Escape jumps back to the catalog (home).
         # Bound directly on the root window, so it only ever fires
         # while this app's window actually has focus — pressing Esc
         # in some other app won't trigger it. Works automatically for
@@ -44,7 +44,7 @@ class PageManager:
         self.current = page
         page.tkraise()
 
-        if name in ("catalog", "settings"):
+        if name in ("catalog", "settings", "now"):
             try:
                 from core.theme import restore_default_theme
                 restore_default_theme()

@@ -19,6 +19,11 @@
     installers it actually got a URL (and successful download) for, so
     a hiccup on one site shouldn't block the other.
 
+    -SkipNpcap / -SkipNmap let install.iss opt a tool out of the lookup
+    entirely (it already knows via the registry that the tool is
+    installed) so we don't waste a network round-trip resolving a URL
+    that's just going to be thrown away.
+
     Always exits 0 unless it couldn't write -OutFile at all, matching
     install.iss's expectation (ResultCode <> 0 there means "treat the
     whole lookup as failed").
@@ -29,10 +34,19 @@
 
 param(
     [Parameter(Mandatory = $true)]
-    [string]$OutFile
+    [string]$OutFile,
+    [switch]$SkipNpcap,
+    [switch]$SkipNmap
 )
 
 $ErrorActionPreference = "Stop"
+
+# Invoke-WebRequest has no timeout by default - if npcap.com or nmap.org
+# is unreachable or just slow to respond, this hangs the request (and
+# the installer sitting on top of it) indefinitely instead of failing
+# fast and falling back to "no URL resolved". 20s is generous for a
+# small directory-listing page.
+$WebTimeoutSec = 20
 
 function Resolve-LatestHref {
     param(
@@ -40,7 +54,7 @@ function Resolve-LatestHref {
         [string]$Pattern
     )
     try {
-        $page = Invoke-WebRequest -Uri $IndexUrl -UseBasicParsing
+        $page = Invoke-WebRequest -Uri $IndexUrl -UseBasicParsing -TimeoutSec $WebTimeoutSec
         # Both dist/ pages list newest-first, so the first regex match
         # is the current release - same approach download_vlc.ps1 uses.
         $href = ($page.Links |
@@ -64,21 +78,29 @@ $results = @()
 # Npcap: e.g. "npcap-1.88.exe" - excludes npcap-*-debug.exe,
 # npcap-*-DebugSymbols.zip, npcap-sdk-*.zip and the legacy
 # npcap-nmap-*.exe bundle installers.
-$npcapUrl = Resolve-LatestHref `
-    -IndexUrl "https://npcap.com/dist/" `
-    -Pattern '^npcap-[\d.]+\.exe$'
-if ($npcapUrl) {
-    Write-Host "[resolve_net_tools] Npcap -> $npcapUrl"
-    $results += "NPCAP_URL=$npcapUrl"
+if ($SkipNpcap) {
+    Write-Host "[resolve_net_tools] Npcap already installed - skipping lookup."
+} else {
+    $npcapUrl = Resolve-LatestHref `
+        -IndexUrl "https://npcap.com/dist/" `
+        -Pattern '^npcap-[\d.]+\.exe$'
+    if ($npcapUrl) {
+        Write-Host "[resolve_net_tools] Npcap -> $npcapUrl"
+        $results += "NPCAP_URL=$npcapUrl"
+    }
 }
 
 # Nmap: e.g. "nmap-7.991-setup.exe" - the Windows self-installer only.
-$nmapUrl = Resolve-LatestHref `
-    -IndexUrl "https://nmap.org/dist/" `
-    -Pattern '^nmap-[\d.]+-setup\.exe$'
-if ($nmapUrl) {
-    Write-Host "[resolve_net_tools] Nmap -> $nmapUrl"
-    $results += "NMAP_URL=$nmapUrl"
+if ($SkipNmap) {
+    Write-Host "[resolve_net_tools] Nmap already installed - skipping lookup."
+} else {
+    $nmapUrl = Resolve-LatestHref `
+        -IndexUrl "https://nmap.org/dist/" `
+        -Pattern '^nmap-[\d.]+-setup\.exe$'
+    if ($nmapUrl) {
+        Write-Host "[resolve_net_tools] Nmap -> $nmapUrl"
+        $results += "NMAP_URL=$nmapUrl"
+    }
 }
 
 try {

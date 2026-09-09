@@ -1,1662 +1,1090 @@
+"""Qt Media Player — artist/folder browser, virtual track table, sticky bar."""
+
+from __future__ import annotations
+
 import os
-import random
+import sys
 import threading
 import time
-from array import array
 
-import customtkinter as ctk
-from tkinter import filedialog
-
-from .player import VLCMusicEngine, State, LazyPlaylist
-from . import db as musicdb
-from .media_types import file_dialog_media_types, is_media_path, is_playlist_path
-from . import auto_index
-from . import playlist as playlistfile
-from .web_server import MusicWebServer
-from .remote_access_tab import RemoteAccessTab
-from core import theme
-from ._buttons import (
-    cool_button_kwargs, make_btn as _make_btn, cool_accent, cool_accent_hover,
-    highlight_action_kwargs, selected_track_kwargs, highlight_fill_hover, highlight_border,
-    play_button_kwargs, seek_bar_kwargs,
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, QPointF, QRectF, Qt, QTimer
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QPolygonF
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QDialog,
+    QFileDialog,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QPushButton,
+    QSlider,
+    QSplitter,
+    QTableView,
+    QVBoxLayout,
+    QWidget,
 )
 
-# Video Player gets folded in here as an extra tab (see _build_ui) rather
-# than living as its own top-level page/package — it's a self-contained
-# ctk.CTkFrame with the same (parent, manager) constructor this page uses,
-# and it keeps its own separate VLCMediaEngine (manager.media_engine), so
-# there's no conflict with this page's own music engine.
-from .video_player import VideoPlayerPage
+import importlib
 
-try:
-    import tkinterdnd2
-    from tkinterdnd2 import DND_FILES, COPY
-    HAS_DND = True
-except ImportError:
-    tkinterdnd2 = None
-    DND_FILES = COPY = None
-    HAS_DND = False
+from core.module_themes import get_saved_module_theme, resolve_module_theme
+from core.qt.module_shell import find_qt_module_shell
+from core.qt.remote_common import MusicRemoteSettings
 
+_db = importlib.import_module("modules.Media.Media Player.db")
+_player = importlib.import_module("modules.Media.Media Player.player")
+_types = importlib.import_module("modules.Media.Media Player.media_types")
+_index = importlib.import_module("modules.Media.Media Player.auto_index")
+Library = _db.Library
+FilteredPlaylist = _player.FilteredPlaylist
+VLCMusicEngine = _player.VLCMusicEngine
+file_dialog_video_types = _types.file_dialog_video_types
+AutoIndexer = _index.AutoIndexer
 
-def normalize_folder(folder: str) -> str:
-    return musicdb.normalize_path(folder) if folder else ""
-
-
-def _styled_entry(parent, **overrides):
-    kw = dict(
-        fg_color=theme.PANEL_2,
-        border_color=theme.BORDER,
-        border_width=1,
-        text_color=theme.TEXT,
-        placeholder_text_color=theme.FAINT,
-        corner_radius=8,
-        height=36,
-    )
-    kw.update(overrides)
-    return ctk.CTkEntry(parent, **kw)
+REPEAT_MODES = ("off", "one", "all")
+UNKNOWN = "(Unknown)"
 
 
-PAGE_SIZE   = 100     # rows rendered at once — fine even with 750,000+ songs total
-SCAN_WORKERS = 6      # concurrent tag-reader threads (network share = I/O bound, so
-                       # a handful of threads in flight speeds this up a lot)
-STARTUP_SCAN_MAX_AGE = 6 * 3600   # skip redundant full scan if indexed within 6 h
-AUTOINDEX_START_DELAY_MS = 3_000  # brief pause after UI/library settle — watch-only, no scan
-_RENDER_CHUNK = 20    # song rows built per UI frame — keeps open/page-turn responsive
-_ROW_SCROLL_HEIGHT = 40  # approx row frame + pady for index-based scroll fallback
-
-
-def _fmt_row(meta, fallback_path):
-    if meta:
-        title = meta.get("title") or os.path.basename(meta.get("path") or fallback_path)
-        artist = meta.get("artist")
-        return f"{artist} - {title}" if artist else title
-    return os.path.basename(fallback_path or "?")
-
-
-def _fmt_count(n):
-    return f"{n:,}"
+def _qss_for_music(bundle):
+    t = bundle.t
+    accent_bg = getattr(t, "ACCENT_GLOW", None) or getattr(t, "ACCENT_MUTED", t.PANEL_2)
+    return f"""
+QWidget#MPRoot {{
+    background-color: {t.BG};
+    color: {t.TEXT};
+}}
+QWidget#MPRoot QPushButton {{
+    background-color: {t.PANEL_2};
+    color: {t.TEXT};
+    border: 1px solid {t.BORDER};
+    border-radius: 8px;
+    padding: 7px 14px;
+    font-size: 13px;
+}}
+QWidget#MPRoot QPushButton:hover {{
+    background-color: {t.PANEL_HOVER};
+}}
+QWidget#MPRoot QPushButton:disabled {{
+    color: {t.MUTED};
+    background-color: {t.PANEL};
+    border: 1px solid {t.BORDER};
+}}
+QWidget#MPRoot QPushButton#MPPlayBtn {{
+    background-color: {accent_bg};
+    color: {t.ACCENT};
+    border: 1px solid {t.ACCENT};
+    border-radius: 10px;
+    padding: 0;
+}}
+QWidget#MPRoot QPushButton#MPPlayBtn:hover {{
+    background-color: {t.ACCENT};
+}}
+QWidget#MPRoot QPushButton#MPTransportBtn {{
+    background-color: transparent;
+    border: 1px solid {t.BORDER};
+    border-radius: 10px;
+    color: {t.ACCENT};
+    padding: 0;
+}}
+QWidget#MPRoot QPushButton#MPTransportBtn:hover {{
+    border: 1px solid {t.ACCENT};
+}}
+QWidget#MPRoot QPushButton#MPPillBtn {{
+    background-color: transparent;
+    border: 1px solid {t.BORDER};
+    border-radius: 16px;
+    padding: 0 12px;
+    color: {t.MUTED};
+    font-size: 12px;
+}}
+QWidget#MPRoot QPushButton#MPPillBtn:checked {{
+    background-color: {t.ACCENT};
+    border: 1px solid {t.ACCENT};
+    color: {t.PANEL};
+    font-weight: 700;
+}}
+QWidget#MPRoot QPushButton#MPPillBtn:checked:hover {{
+    background-color: {t.ACCENT};
+}}
+QWidget#MPRoot QTableView {{
+    background-color: {t.PANEL};
+    color: {t.TEXT};
+    border: 1px solid {t.BORDER};
+    border-radius: 8px;
+    gridline-color: {t.BORDER};
+    outline: none;
+}}
+QWidget#MPRoot QTableView::item:selected {{
+    background: {accent_bg};
+    color: {t.ACCENT};
+}}
+QWidget#MPRoot QHeaderView::section {{
+    background-color: {t.PANEL_2};
+    color: {t.MUTED};
+    border: none;
+    border-right: 1px solid {t.BORDER};
+    padding: 6px 8px;
+    font-weight: 700;
+}}
+QWidget#MPRoot QListWidget {{
+    background-color: {t.PANEL};
+    color: {t.TEXT};
+    border: 1px solid {t.BORDER};
+    border-radius: 8px;
+    outline: none;
+}}
+QWidget#MPRoot QListWidget::item:selected {{
+    background: {accent_bg};
+    color: {t.ACCENT};
+}}
+QWidget#MPRoot QLabel#MPNowPlaying {{
+    color: {t.TEXT};
+    font-size: 14px;
+    font-weight: 600;
+}}
+QWidget#MPRoot QWidget#MPBar {{
+    background-color: {t.PANEL};
+    border-top: 1px solid {t.BORDER};
+}}
+QWidget#MPRoot QSlider::groove:horizontal {{
+    height: 4px;
+    background: {t.BORDER};
+    border-radius: 2px;
+}}
+QWidget#MPRoot QSlider::handle:horizontal {{
+    width: 12px;
+    height: 12px;
+    margin: -4px 0;
+    background: {t.ACCENT};
+    border-radius: 6px;
+}}
+QWidget#MPRoot QSlider::sub-page:horizontal {{
+    background: {t.ACCENT};
+    border-radius: 2px;
+}}
+QWidget#MPRoot QLabel#MPStatus {{
+    color: {t.MUTED};
+    font-size: 12px;
+    padding-top: 6px;
+}}
+"""
 
 
 def _fmt_time(seconds):
-    s = int(max(0, seconds))
-    return f"{s // 60:02d}:{s % 60:02d}"
+    seconds = max(0, int(seconds or 0))
+    return f"{seconds // 60}:{seconds % 60:02d}"
 
 
-class MusicPage(ctk.CTkFrame):
+def _disk_folders(root):
+    if not root or not os.path.isdir(root):
+        return []
+    out = []
+    try:
+        for name in sorted(os.listdir(root), key=str.lower):
+            path = os.path.join(root, name)
+            if os.path.isdir(path) and not name.startswith("."):
+                out.append((name, os.path.normpath(path)))
+    except OSError:
+        pass
+    return out[:400]
 
-    MODULE_SETTINGS_TITLE = "Remote access"
 
-    @staticmethod
-    def build_module_settings(parent, manager):
-        return RemoteAccessTab(parent, manager)
+class TransportButton(QPushButton):
+    """Painted prev / play / pause / next — no font-dependent media glyphs."""
 
-    def __init__(self, parent, manager):
-        super().__init__(parent, fg_color=theme.BG)
+    def __init__(self, kind, primary=False, parent=None):
+        super().__init__(parent)
+        self._kind = kind
+        self._ink = QColor("#FFE6F2")
+        self._ink_on_accent = QColor("#0a0006")
+        self.setObjectName("MPPlayBtn" if primary else "MPTransportBtn")
+        side = 40 if primary else 32
+        self.setFixedSize(side, side)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setToolTip({"play": "Play", "pause": "Pause", "prev": "Previous", "next": "Next"}.get(kind, kind))
 
-        self.manager = manager
-        self._engine_ready = False
-        self.engine = getattr(manager, "music_engine", None)
-        if self.engine is not None:
-            self._engine_ready = True
-        manager.music_engine = self.engine
+    def set_kind(self, kind):
+        if kind == self._kind:
+            return
+        self._kind = kind
+        self.setToolTip("Pause" if kind == "pause" else "Play" if kind == "play" else self.toolTip())
+        self.update()
 
-        # Shared SQLite library index — lives on local disk, not the
-        # network share, so browsing/searching/shuffling stay instant
-        # even with 750,000+ songs indexed.
-        self.db = getattr(manager, "music_db", None) or musicdb.Library()
-        manager.music_db = self.db
+    def set_ink(self, color, on_accent=None):
+        self._ink = QColor(color)
+        if on_accent:
+            self._ink_on_accent = QColor(on_accent)
+        self.update()
 
-        # Remote-access web server — engine wired once VLC finishes loading.
-        self.web_server = getattr(manager, "music_web_server", None)
-        if self.web_server is None:
-            self.web_server = MusicWebServer(library=self.db, engine=self.engine)
-            manager.music_web_server = self.web_server
-        elif self.engine is not None:
-            self.web_server.engine = self.engine
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        self.update()
 
-        # Scan progress is stored on the manager (not on this widget) so
-        # a background scan keeps going and stays trackable even if the
-        # user closes and reopens the Music Player page mid-scan.
-        self.scan_state = getattr(manager, "music_scan_state", None)
-        if self.scan_state is None:
-            self.scan_state = {"scanning": False, "found": 0, "updated": 0,
-                                "stage": "idle", "stop_event": threading.Event()}
-            manager.music_scan_state = self.scan_state
-        self._last_seen_stage = self.scan_state["stage"]
-        self._last_seen_autoindex_text = None
-        self._was_scanning = bool(self.scan_state.get("scanning"))
-        self._status_override = None
-        self._status_override_until = 0.0
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        self.update()
 
-        # Background auto-indexer (filesystem watcher + periodic safety
-        # scan) — lives on the manager so it keeps running even if the
-        # user closes and reopens the Music Player page.
-        self.auto_indexer = getattr(manager, "music_auto_indexer", None)
-        if self.auto_indexer is None:
-            self.auto_indexer = auto_index.AutoIndexer(self.db)
-            manager.music_auto_indexer = self.auto_indexer
-        self.autoindex_status = getattr(manager, "music_autoindex_status", None)
-        if self.autoindex_status is None:
-            self.autoindex_status = {"text": ""}
-            manager.music_autoindex_status = self.autoindex_status
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        hovered = self.underMouse() and self.isEnabled()
+        primary = self.objectName() == "MPPlayBtn"
+        color = self._ink_on_accent if primary and hovered else self._ink
+        if not self.isEnabled():
+            color.setAlpha(90)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        pad = max(7.0, min(self.width(), self.height()) * 0.24)
+        box = QRectF(self.rect()).adjusted(pad, pad, -pad, -pad)
+        if self._kind == "play":
+            path = QPainterPath()
+            path.moveTo(box.left() + box.width() * 0.18, box.top())
+            path.lineTo(box.right(), box.center().y())
+            path.lineTo(box.left() + box.width() * 0.18, box.bottom())
+            path.closeSubpath()
+            painter.drawPath(path)
+        elif self._kind == "pause":
+            gap = box.width() * 0.22
+            w = (box.width() - gap) / 2
+            painter.drawRoundedRect(QRectF(box.left(), box.top(), w, box.height()), 1.5, 1.5)
+            painter.drawRoundedRect(QRectF(box.right() - w, box.top(), w, box.height()), 1.5, 1.5)
+        elif self._kind == "prev":
+            mid = QPolygonF([
+                QPointF(box.right(), box.top()),
+                QPointF(box.left() + box.width() * 0.18, box.center().y()),
+                QPointF(box.right(), box.bottom()),
+            ])
+            painter.drawPolygon(mid)
+            painter.drawRoundedRect(QRectF(box.left(), box.top(), 2.4, box.height()), 1, 1)
+        elif self._kind == "next":
+            mid = QPolygonF([
+                QPointF(box.left(), box.top()),
+                QPointF(box.right() - box.width() * 0.18, box.center().y()),
+                QPointF(box.left(), box.bottom()),
+            ])
+            painter.drawPolygon(mid)
+            painter.drawRoundedRect(QRectF(box.right() - 2.4, box.top(), 2.4, box.height()), 1, 1)
+        painter.end()
 
-        self.active_index = -1
-        self._loop_running = False
-        self._discord_rpc_active = False
 
-        # Browse/search state — ids load in a background thread so open stays snappy.
-        self._result_ids = array("q")
-        self._library_loading = False
-        self._pending_playback = None  # (callback, needs_library)
-        self._library_load_seq = 0
-        self._render_job = None
-        self._page = 0
-        self._search_seq = 0
-        self._search_after_id = None
-        self.row_widgets = []
-        self._seek_dragging = False
-        self._seek_programmatic = False
-        self._seek_track_length = 0.0
-        self._last_followed_index = -1
-        self._last_highlighted_index = -1
-        self._last_engine_index_tracked = -1
-        self._last_tracked_song_id = None
-        self._preferred_volume = 0.5
-        self._song_id_index: dict[int, int] = {}
-        self._follow_scroll_idx: int | None = None
-        self._song_list_hidden_for_follow = False
-        self._scroll_retry_seq = 0
+class TrackTableModel(QAbstractTableModel):
+    HEADERS = ("Title", "Artist", "Album", "Time")
+    CHUNK = 250
 
-        self._build_ui()
-        self._sync_initial_state()
-        self.results_count.configure(text="Loading library…")
-        self._start_loop()
-        self.after(0, self._kickoff_async_init)
+    def __init__(self, db):
+        super().__init__()
+        self.db = db
+        self.query = ""
+        self.artist = None
+        self.folder = None
+        self._total = 0
+        self._rows = {}
 
-    # ── Build ─────────────────────────────────────────────────
-
-    def _build_ui(self):
-        self._build_header()
-
-        self.tabview = ctk.CTkTabview(
-            self,
-            fg_color=theme.BG,
-            segmented_button_fg_color=theme.PANEL,
-            segmented_button_selected_color=theme.ACCENT,
-            segmented_button_selected_hover_color=theme.ACCENT_HOVER,
-            segmented_button_unselected_color=theme.PANEL_2,
-            segmented_button_unselected_hover_color=theme.PANEL_HOVER,
-            text_color=theme.MUTED,
-            text_color_disabled=theme.FAINT,
-            command=self._on_tab_changed,
+    def set_filter(self, query="", artist=None, folder=None):
+        self.beginResetModel()
+        self.query = query or ""
+        self.artist = artist
+        self.folder = folder
+        self._rows.clear()
+        self._total = self.db.browse_count(
+            query=self.query, artist=self.artist, folder=self.folder
         )
-        self.tabview.pack(fill="both", expand=True, padx=12, pady=(4, 12))
-
-        library_tab = self.tabview.add("🎵 Library")
-        video_player_tab = self.tabview.add("🎬 Video Player")
-
-        # Everything below builds into `self._tab_body` (not `self`) so the
-        # existing pack()-based layout works unchanged inside its tab.
-        self._tab_body = library_tab
-
-        self._build_library_controls()
-
-        # Bottom-anchored (side="bottom"), built bottom-most-first so the
-        # visual top-to-bottom order stays "now playing" above the
-        # transport controls, with the controls panel flush against the
-        # window's bottom edge no matter how short the window gets — it
-        # used to be packed after the expanding browse panel and could
-        # get pushed past the visible area on a small window.
-        self._build_controls()
-        self._build_now_playing()
-
-        # Flexible middle - takes whatever space is left, shrinks first.
-        self._build_browse_panel()
-
-        # Video Player isn't built until this tab is actually opened the
-        # first time (see _on_tab_changed) — no point spinning up a second
-        # VLC player + its 300ms update loop for people who never touch
-        # video playback. This page (like every page in this app, see
-        # core/page_manager.py) is only ever constructed once and then
-        # shown/hidden for the rest of the session, so a plain instance
-        # attribute is enough here — no need to also cache it on manager.
-        self._video_player_tab = video_player_tab
-        self._video_player_page = None
-
-    def _on_tab_changed(self):
-        if self.tabview.get() != "🎬 Video Player":
-            return
-        if self._video_player_page is not None:
-            return
-        self._video_player_page = VideoPlayerPage(self._video_player_tab, self.manager)
-        self._video_player_page.pack(fill="both", expand=True)
-
-    def _build_header(self):
-        header = ctk.CTkFrame(
-            self, fg_color=theme.PANEL, corner_radius=10,
-            border_width=1, border_color=theme.BORDER,
-        )
-        header.pack(fill="x", padx=12, pady=(12, 4))
-
-        ctk.CTkLabel(
-            header, text="🎵  Music Player",
-            font=("Segoe UI", 22, "bold"), text_color=theme.TEXT,
-        ).pack(side="left", padx=14, pady=10)
-
-    def _kickoff_async_init(self):
-        """Yield one frame, then start heavy work off the UI thread."""
-        self.after(0, self._refresh_status)
-        if not self._engine_ready:
-            existing = getattr(self.manager, "music_engine", None)
-            if existing is not None:
-                self._attach_engine(existing)
-            else:
-                threading.Thread(target=self._init_engine_worker, daemon=True).start()
-        self._begin_library_load()
-        self.after(500, self._on_module_ready)
-        self.after(250, self._setup_drag_drop)
-
-    def _attach_engine(self, engine):
-        """Wire a ready VLC engine to this page and sync UI state."""
-        self.engine = engine
-        self.manager.music_engine = engine
-        self.web_server.engine = engine
-        self._engine_ready = True
-        try:
-            vol = float(self.volume.get())
-        except Exception:
-            vol = getattr(engine, "volume", self._preferred_volume)
-        vol = max(0.0, min(1.0, vol))
-        self._preferred_volume = vol
-        self.volume.set(vol)
-        engine.set_volume(vol)
-        self._update_playback_ui_state()
-        self._flush_pending_playback()
-        self._refresh_status()
-
-    def _init_engine_worker(self):
-        existing = getattr(self.manager, "music_engine", None)
-        if existing is not None:
-            self.after(0, lambda: self._attach_engine(existing))
-            return
-
-        try:
-            engine = VLCMusicEngine()
-        except Exception as exc:
-            print(f"[MusicPlayer] VLC init failed: {exc}")
-            engine = None
-
-        def apply():
-            if not self.winfo_exists():
-                return
-            if engine is None:
-                self._flash_status("Audio engine failed to start")
-                return
-            self._attach_engine(engine)
-
-        self.after(0, apply)
-
-    def _can_playback_now(self, needs_library: bool) -> bool:
-        if not self._engine_ready or self.engine is None:
-            return False
-        if needs_library and self._library_loading:
-            return False
-        return True
-
-    def _queue_playback(self, callback, *, needs_library: bool = True):
-        """Defer playback until VLC + (optionally) library ids are ready."""
-        if self._can_playback_now(needs_library):
-            callback()
-            return
-        self._pending_playback = (callback, needs_library)
-        if not self._engine_ready or self.engine is None:
-            self._flash_status("Starting audio engine…")
-        elif needs_library and self._library_loading:
-            self._flash_status("Loading library…")
-
-    def _flush_pending_playback(self):
-        if not self._pending_playback or not self.winfo_exists():
-            return
-        callback, needs_library = self._pending_playback
-        if not self._can_playback_now(needs_library):
-            return
-        self._pending_playback = None
-        callback()
-
-    def _ensure_engine(self) -> bool:
-        if self._engine_ready and self.engine is not None:
-            return True
-        self._flash_status("Starting audio engine…")
-        return False
-
-    def _begin_library_load(self):
-        self._library_loading = True
-        self._refresh_status()
-        self._library_load_seq += 1
-        seq = self._library_load_seq
-        cached = getattr(self.manager, "music_library_ids", None)
-        if cached is not None:
-            self.after(0, lambda s=seq, c=cached: self._apply_library_load(s, c, len(c)))
-            return
-        threading.Thread(target=self._load_library_worker, args=(seq,), daemon=True).start()
-
-    def _load_library_worker(self, seq: int):
-        try:
-            count = self.db.count()
-            ids = self.db.all_ids()
-        except Exception as exc:
-            print(f"[MusicPlayer] library load failed: {exc}")
-            count, ids = 0, array("q")
-
-        def apply():
-            if seq != self._library_load_seq or not self.winfo_exists():
-                return
-            self.manager.music_library_ids = ids
-            self._apply_library_load(seq, ids, count)
-
-        self.after(0, apply)
-
-    def _apply_library_load(self, seq: int, ids, count: int):
-        if seq != self._library_load_seq or not self.winfo_exists():
-            return
-        self._result_ids = ids
-        self._rebuild_song_id_index()
-        self._library_loading = False
-        self._page = 0
-        self.results_count.configure(text=f"{_fmt_count(count)} songs")
-        self._render_page()
-        self._flush_pending_playback()
-        self._refresh_status()
-        self.after(100, lambda: self._ensure_active_track_visible(force=True))
-        self._schedule_autoindex_start()
-
-    def _invalidate_library_cache(self):
-        self.manager.music_library_ids = None
-        self._begin_library_load()
-
-    def _flash_status(self, text: str, *, duration_ms: int = 5000):
-        """Show a short-lived message; persistent state resumes via _refresh_status."""
-        self._status_override = text
-        self._status_override_until = time.monotonic() + (duration_ms / 1000.0)
-        if hasattr(self, "scan_status"):
-            self.scan_status.configure(text=text)
-
-    def _refresh_status(self):
-        """Update the status bar from current load / engine / scan / auto-index state."""
-        if not hasattr(self, "scan_status"):
-            return
-        if self._status_override and time.monotonic() < self._status_override_until:
-            return
-        self._status_override = None
-
-        state = self.scan_state
-        if state.get("scanning"):
-            self._was_scanning = True
-            self.scan_status.configure(
-                text=f"Scanning… {_fmt_count(state['found'])} files seen, "
-                     f"{_fmt_count(state['updated'])} indexed")
-            return
-
-        if self._was_scanning and not state.get("scanning"):
-            self._was_scanning = False
-            if state.get("stage") == "done":
-                self.scan_status.configure(
-                    text=f"Scan complete — {_fmt_count(self.db.count())} songs in library")
-                return
-            if state.get("stage") == "aborted":
-                self.scan_status.configure(text="Scan cancelled")
-                return
-
-        count = len(self._result_ids) if len(self._result_ids) else self.db.count()
-        folder = self.db.get_setting("music_folder")
-        if not folder and not state.get("scanning"):
-            self.scan_status.configure(text="Set a music folder to get started")
-            return
-
-        parts: list[str] = []
-
-        if self._library_loading:
-            parts.append(f"Loading library ({_fmt_count(count)} in database)…")
-        elif self._render_job is not None:
-            parts.append(f"Building song list ({_fmt_count(count)} songs)…")
-        elif count <= 0:
-            parts.append("Library empty — use Rescan Now to index your folder")
-        else:
-            parts.append(f"Ready — {_fmt_count(count)} songs")
-
-        if not self._engine_ready:
-            parts.append("starting audio engine…")
-        elif self.engine is None:
-            parts.append("audio engine unavailable")
-
-        ai_text = (self.autoindex_status.get("text") or "").strip()
-        if ai_text.startswith("Auto-indexed"):
-            self.scan_status.configure(text=ai_text)
-            return
-        if self.auto_indexer.running and ai_text:
-            parts.append(ai_text)
-
-        self.scan_status.configure(text=" · ".join(parts))
-
-    def _build_library_controls(self):
-        panel = ctk.CTkFrame(
-            self._tab_body, fg_color=theme.PANEL, corner_radius=10,
-            border_width=1, border_color=theme.BORDER,
-        )
-        panel.pack(fill="x", padx=12, pady=6)
-
-        row = ctk.CTkFrame(panel, fg_color="transparent")
-        row.pack(fill="x", padx=10, pady=(10, 4))
-        self.folder_row = row
-
-        _make_btn(row, "📁  Set Music Folder", self.pick_folder,
-                  width=170).pack(side="left", padx=(0, 6))
-        _make_btn(row, "🔄  Rescan Now", self.rescan_now,
-                  width=130).pack(side="left", padx=(0, 6))
-
-        self.autoindex_var = ctk.BooleanVar(
-            value=self.db.get_setting("auto_index_enabled", "1") == "1")
-        ctk.CTkCheckBox(
-            row, text="Auto-index new files", variable=self.autoindex_var,
-            command=self._on_toggle_autoindex, text_color=theme.TEXT,
-            fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
-            border_color=theme.BORDER,
-        ).pack(side="left", padx=(0, 6))
-
-        self.folder_label = ctk.CTkLabel(
-            row, text=self._folder_display(), text_color=theme.TEXT,
-            font=("Segoe UI", 11), anchor="w",
-        )
-        self.folder_label.pack(side="left", fill="x", expand=True, padx=(6, 0))
-
-        self.scan_status = ctk.CTkLabel(
-            panel, text="", text_color=theme.MUTED, anchor="w",
-            font=("Segoe UI", 11))
-        self.scan_status.pack(fill="x", padx=14, pady=(0, 10))
-
-    def _build_browse_panel(self):
-        panel = ctk.CTkFrame(
-            self._tab_body, fg_color=theme.PANEL, corner_radius=10,
-            border_width=1, border_color=theme.BORDER,
-        )
-        panel.pack(side="top", fill="both", expand=True, padx=12, pady=6)
-        self.library_panel = panel
-
-        top = ctk.CTkFrame(panel, fg_color="transparent")
-        top.pack(fill="x", padx=10, pady=(8, 4))
-
-        ctk.CTkLabel(top, text="Library",
-                     font=("Segoe UI", 16, "bold"), text_color=theme.TEXT).pack(side="left")
-
-        self.results_count = ctk.CTkLabel(
-            top, text="0 songs", text_color=theme.TEXT, font=("Segoe UI", 12, "bold"),
-        )
-        self.results_count.pack(side="right")
-
-        self.now_playing_list_hint = ctk.CTkLabel(
-            panel, text="", text_color=theme.ACCENT, font=("Segoe UI", 11, "bold"),
-            anchor="w",
-        )
-        self.now_playing_list_hint.pack(fill="x", padx=10, pady=(0, 2))
-
-        big_row = ctk.CTkFrame(panel, fg_color="transparent")
-        big_row.pack(fill="x", padx=10, pady=(0, 6))
-
-        _make_btn(big_row, "🔀  Shuffle All", self.shuffle_all,
-                  **highlight_action_kwargs(), width=170).pack(side="left", padx=(0, 6))
-        _make_btn(big_row, "Play All (in order)", self.play_all,
-                  width=170).pack(side="left", padx=(0, 6))
-        _make_btn(big_row, "＋  Add Files (quick queue)", self.load_files,
-                  width=190).pack(side="left")
-
-        if HAS_DND:
-            ctk.CTkLabel(
-                big_row, text="…or drag files/a folder anywhere on this page",
-                text_color=theme.MUTED, font=("Segoe UI", 11),
-            ).pack(side="left", padx=(10, 0))
-
-        self.search_entry = _styled_entry(
-            panel, placeholder_text="Search title / artist / album…",
-        )
-        self.search_entry.pack(fill="x", padx=10, pady=(0, 6))
-        self.search_entry.bind("<KeyRelease>", self._on_search_key)
-
-        pager = ctk.CTkFrame(panel, fg_color="transparent")
-        pager.pack(fill="x", padx=10, pady=(0, 6))
-
-        self.prev_page_btn = _make_btn(pager, "◀ Prev", self.prev_page, width=90)
-        self.prev_page_btn.pack(side="left")
-
-        self.page_label = ctk.CTkLabel(
-            pager, text="Page 1 / 1", text_color=theme.TEXT, font=("Segoe UI", 12),
-        )
-        self.page_label.pack(side="left", expand=True)
-
-        self.locate_playing_btn = _make_btn(
-            pager, "▶ In list", self._locate_now_playing_in_list, width=90,
-        )
-        self.locate_playing_btn.pack(side="left", padx=(0, 8))
-
-        self.next_page_btn = _make_btn(pager, "Next ▶", self.next_page, width=90)
-        self.next_page_btn.pack(side="right")
-
-        self.song_buttons_frame = ctk.CTkScrollableFrame(
-            panel, fg_color=theme.BG, corner_radius=8,
-            border_width=1, border_color=theme.BORDER,
-            scrollbar_button_color=theme.PANEL_2,
-            scrollbar_button_hover_color=theme.PANEL_HOVER,
-        )
-        self.song_buttons_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
-
-    def _build_now_playing(self):
-        card = ctk.CTkFrame(
-            self._tab_body, fg_color=theme.PANEL_2, corner_radius=10,
-            border_width=1, border_color=theme.ACCENT_DIM,
-        )
-        card.pack(side="bottom", fill="x", padx=12, pady=6)
-
-        ctk.CTkLabel(
-            card, text="Now Playing",
-            font=("Segoe UI", 11, "bold"), text_color=theme.ACCENT,
-        ).pack(anchor="w", padx=14, pady=(10, 0))
-
-        self.current_song_label = ctk.CTkLabel(
-            card, text="Nothing playing", text_color=theme.TEXT,
-            font=("Segoe UI", 16, "bold"), anchor="w",
-        )
-        self.current_song_label.pack(fill="x", padx=14, pady=(4, 8))
-
-        seek_row = ctk.CTkFrame(card, fg_color="transparent")
-        seek_row.pack(fill="x", padx=14, pady=(0, 12))
-        seek_row.grid_columnconfigure(1, weight=1)
-
-        self.seek_current_label = ctk.CTkLabel(
-            seek_row, text="00:00", text_color=theme.ACCENT,
-            font=("Consolas", 12, "bold"), width=44,
-        )
-        self.seek_current_label.grid(row=0, column=0, padx=(0, 10))
-
-        self.seek_slider = ctk.CTkSlider(
-            seek_row,
-            from_=0,
-            to=1,
-            number_of_steps=1000,
-            height=18,
-            command=self._on_seek_slide,
-            **seek_bar_kwargs(),
-        )
-        self.seek_slider.set(0)
-        self.seek_slider.grid(row=0, column=1, sticky="ew")
-        self.seek_slider.bind("<ButtonRelease-1>", self._on_seek_release)
-        self.seek_slider.bind("<Button-1>", self._on_seek_press)
-
-        self.seek_total_label = ctk.CTkLabel(
-            seek_row, text="00:00", text_color=theme.FAINT,
-            font=("Consolas", 12), width=44,
-        )
-        self.seek_total_label.grid(row=0, column=2, padx=(10, 0))
-
-    def _build_controls(self):
-        outer = ctk.CTkFrame(
-            self._tab_body, fg_color=theme.PANEL, corner_radius=10,
-            border_width=1, border_color=theme.BORDER,
-        )
-        outer.pack(side="bottom", fill="x", padx=12, pady=(4, 12))
-
-        transport_row = ctk.CTkFrame(outer, fg_color="transparent")
-        transport_row.pack(fill="x", padx=14, pady=(10, 12))
-        transport_row.grid_columnconfigure(0, weight=1)
-        transport_row.grid_columnconfigure(1, weight=0)
-        transport_row.grid_columnconfigure(2, weight=1)
-
-        transport = ctk.CTkFrame(transport_row, fg_color="transparent")
-        transport.grid(row=0, column=1)
-
-        transport_btns = [
-            ("⏮", self.prev, False),
-            ("▶", self.toggle_play_pause, True),
-            ("⏭", self.next, False),
-        ]
-        for col, (text, cmd, is_play) in enumerate(transport_btns):
-            if is_play:
-                self.play_pause_btn = ctk.CTkButton(
-                    transport, text=text, command=cmd, **play_button_kwargs())
-                self.play_pause_btn.grid(row=0, column=col, padx=4)
-            else:
-                btn = _make_btn(transport, text, cmd, width=56, height=44)
-                btn.grid(row=0, column=col, padx=4)
-
-        self.repeat_btn = _make_btn(transport, "🔁  Repeat", self.toggle_repeat, width=130)
-        self.repeat_btn.grid(row=0, column=3, padx=(8, 0))
-
-        vol_row = ctk.CTkFrame(transport_row, fg_color="transparent")
-        vol_row.grid(row=0, column=2, sticky="ew", padx=(12, 0))
-        vol_row.grid_columnconfigure(1, weight=1)
-
-        ctk.CTkLabel(
-            vol_row, text="Volume", text_color=theme.TEXT,
-            font=("Segoe UI", 12, "bold"),
-        ).grid(row=0, column=0, padx=(0, 8))
-
-        self.volume = ctk.CTkSlider(
-            vol_row, from_=0, to=2, number_of_steps=200,
-            progress_color=cool_accent(), button_color=cool_accent(),
-            button_hover_color=cool_accent_hover(), fg_color=theme.BORDER,
-            command=self.set_volume, corner_radius=4, height=16,
-        )
-        self.volume.set(self._preferred_volume)
-        self.volume.grid(row=0, column=1, sticky="ew")
-        self.volume.bind("<ButtonRelease-1>", self._on_volume_release)
-
-    def _set_seek_display(self, current: float, total: float):
-        self._seek_track_length = max(0.0, total)
-        self.seek_current_label.configure(text=_fmt_time(current))
-        self.seek_total_label.configure(text=_fmt_time(total))
-
-    def _on_seek_press(self, _event=None):
-        self._seek_dragging = True
-
-    def _on_seek_slide(self, value):
-        if self._seek_programmatic:
-            return
-        self._seek_dragging = True
-        total = self._seek_track_length
-        if total <= 0 and self._engine_ready and self.engine is not None:
-            total = max(0.0, self.engine.get_length())
-            self._seek_track_length = total
-        if total > 0:
-            self.seek_current_label.configure(text=_fmt_time(float(value) * total))
-
-    def _on_seek_release(self, _event=None):
-        if not self._engine_ready or self.engine is None:
-            self._seek_dragging = False
-            return
-        total = max(0.0, self.engine.get_length())
-        if total > 0:
-            pos = float(self.seek_slider.get()) * total
-            self.engine.seek(pos)
-            self._set_seek_display(pos, total)
-        self._seek_dragging = False
-
-    # ── Initial State Sync ────────────────────────────────────
-
-    def _sync_initial_state(self):
-        if self._engine_ready and self.engine is not None:
-            try:
-                vol = float(self.volume.get())
-            except Exception:
-                vol = getattr(self.engine, "volume", self._preferred_volume)
-            vol = max(0.0, min(1.0, vol))
-            self._preferred_volume = vol
-            self.volume.set(vol)
-            self.engine.set_volume(vol)
-
-            mode = self.engine.repeat_mode
-            if mode == "all":
-                self.repeat_btn.configure(text="🔁  Repeat All", fg_color=theme.ACCENT, text_color="#0b0d10")
-            elif mode == "one":
-                self.repeat_btn.configure(text="🔂  Repeat One", fg_color=theme.SUCCESS, text_color="#0b0d10")
-
-        self._update_playback_ui_state()
-        self.after(200, lambda: self._ensure_active_track_visible(force=True))
-
-    def _folder_display(self):
-        folder = self.db.get_setting("music_folder")
-        return folder if folder else "No music folder set yet"
-
-    # ── Loop ─────────────────────────────────────────────────
-
-    def _start_loop(self):
-        if not self._loop_running:
-            self._loop_running = True
-            self.after(300, self._update_loop)
-
-    def _update_loop(self):
-        if not self._loop_running:
-            return
-
-        if self._engine_ready and self.engine is not None:
-            current = max(0, self.engine.get_time())
-            total   = max(0, self.engine.get_length())
-
-            if total > 0:
-                if not self._seek_dragging:
-                    self._seek_programmatic = True
-                    self.seek_slider.set(current / total)
-                    self._seek_programmatic = False
-                    self._set_seek_display(current, total)
-            else:
-                if not self._seek_dragging:
-                    self._seek_programmatic = True
-                    self.seek_slider.set(0)
-                    self._seek_programmatic = False
-                    self._set_seek_display(0, 0)
-
-        self._update_playback_ui_state()
-        self._poll_scan_state()
-
-        self.after(300, self._update_loop)
-
-    # ── Library folder / scanning ───────────────────────────────
-
-    def pick_folder(self):
-        folder = filedialog.askdirectory()
-        if not folder:
-            return
-        self.db.set_setting("music_folder", folder)
-        self.folder_label.configure(text=folder)
-        self.rescan_now()
-        self._sync_autoindexer(folder, force=True)
-
-    def rescan_now(self):
-        folder = self.db.get_setting("music_folder")
-        if not folder:
-            self._flash_status("Set a music folder first")
-            return
-        if self.scan_state["scanning"]:
-            self._flash_status("Already scanning…")
-            return
-        self._begin_scan(folder)
-
-    def _schedule_autoindex_start(self):
-        """Start background file watch shortly after the library UI is ready."""
-        pending = getattr(self.manager, "_music_autoindex_pending_id", None)
-        if pending is not None:
-            try:
-                self.after_cancel(pending)
-            except Exception:
-                pass
-            self.manager._music_autoindex_pending_id = None
-
-        folder = self.db.get_setting("music_folder")
-        if not folder or not self.autoindex_var.get():
-            return
-        if self._library_loading:
-            return
-        if self.auto_indexer.running and normalize_folder(folder) == normalize_folder(self.auto_indexer.folder):
-            if not self.autoindex_status.get("text"):
-                self.autoindex_status["text"] = "Watching for changes…"
-            return
-
-        def _start():
-            self.manager._music_autoindex_pending_id = None
-            self._sync_autoindexer(self.db.get_setting("music_folder"))
-
-        self.manager._music_autoindex_pending_id = self.after(AUTOINDEX_START_DELAY_MS, _start)
-
-    def _on_module_ready(self):
-        """Kick off background file watch once the page shell is up."""
-        if self.auto_indexer.running and not self.autoindex_status.get("text"):
-            self.autoindex_status["text"] = "Watching for changes…"
-        self._schedule_autoindex_start()
-        self._refresh_status()
-
-    def _should_skip_startup_scan(self, folder: str) -> bool:
-        """Avoid a full folder walk on every app open when the index is fresh."""
-        if self.db.count() <= 0:
-            return False
-        if normalize_folder(self.db.get_setting("music_last_scan_folder") or "") != normalize_folder(folder):
-            return False
-        try:
-            last_at = float(self.db.get_setting("music_last_scan_at") or 0)
-        except (TypeError, ValueError):
-            return False
-        return (time.time() - last_at) <= STARTUP_SCAN_MAX_AGE
-
-    def _sync_autoindexer(self, folder, *, force: bool = False):
-        """Start/stop the background auto-indexer to match folder + checkbox."""
-        want_running = bool(folder) and self.autoindex_var.get()
-        already_running = (
-            self.auto_indexer.running
-            and normalize_folder(folder) == normalize_folder(self.auto_indexer.folder)
-        )
-        if want_running and (force or not already_running):
-            self.auto_indexer.start(
-                folder,
-                status_cb=self._on_autoindex_status,
-                scan_busy_cb=lambda: self.scan_state.get("scanning", False),
-                library_fresh=self._should_skip_startup_scan(folder) if folder else False,
-            )
-        elif not want_running and self.auto_indexer.running:
-            self.auto_indexer.stop()
-            self.autoindex_status["text"] = ""
-        self._refresh_status()
-
-    def _on_toggle_autoindex(self):
-        enabled = self.autoindex_var.get()
-        self.db.set_setting("auto_index_enabled", "1" if enabled else "0")
-        self._sync_autoindexer(self.db.get_setting("music_folder"), force=True)
-
-    def _on_autoindex_status(self, text):
-        # Called from a background thread — stash it; the GUI thread refreshes.
-        self.autoindex_status["text"] = text
-
-    def _begin_scan(self, folder):
-        state = self.scan_state
-        state["scanning"] = True
-        state["found"] = 0
-        state["updated"] = 0
-        state["stage"] = "starting"
-        state["stop_event"] = threading.Event()
-        self._last_seen_stage = "starting"
-        self._was_scanning = True
-        self._refresh_status()
-
-        def progress_cb(found, updated, stage):
-            state["found"] = found
-            state["updated"] = updated
-            state["stage"] = stage
-            if stage == "done":
-                self.db.set_setting("music_last_scan_folder", folder)
-                self.db.set_setting("music_last_scan_at", str(time.time()))
-
-        def worker():
-            try:
-                self.db.scan(
-                    folder, progress_cb=progress_cb,
-                    stop_event=state["stop_event"], workers=SCAN_WORKERS, full=True)
-            finally:
-                state["scanning"] = False
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _poll_scan_state(self):
-        state = self.scan_state
-        if not state["scanning"] and self._last_seen_stage != state["stage"] and state["stage"] in ("done", "aborted"):
-            self._last_seen_stage = state["stage"]
-            self.manager.music_library_ids = None
-            self._begin_library_load()
-
-        ai_text = self.autoindex_status.get("text", "")
-        if ai_text and ai_text != self._last_seen_autoindex_text:
-            self._last_seen_autoindex_text = ai_text
-            if ai_text.startswith("Auto-indexed"):
-                self.manager.music_library_ids = None
-                self._begin_library_load()
-
-        self._refresh_status()
-
-    # ── Add Files (small ad-hoc queue, bypasses the library index) ──
-
-    def _expand_playlist_selection(self, paths):
-        """
-        Given a mix of selected/dropped paths, expand any playlist files
-        (.m3u/.m3u8/.pls/.xspf) into the audio tracks they reference, and
-        pass ordinary audio files through unchanged.
-
-        Returns (resolved, playlist_notes):
-          - resolved: flat, ordered list of playable paths.
-          - playlist_notes: one status string per playlist file that was
-            expanded, e.g. "list.m3u: 12/12 tracks found" or
-            "list.m3u: 0/8 tracks found — check the paths inside it",
-            so a playlist that resolves to nothing doesn't just look
-            like the drop/selection was silently ignored.
-        """
-        out = []
-        playlist_notes = []
-        for p in paths:
-            if p.lower().endswith(musicdb.PLAYLIST_EXTS):
-                resolved, total = playlistfile.parse_playlist_report(p)
-                out.extend(resolved)
-                name = os.path.basename(p)
-                if total == 0:
-                    playlist_notes.append(f"{name}: no tracks listed (empty or unreadable)")
-                elif not resolved:
-                    playlist_notes.append(
-                        f"{name}: 0/{total} tracks found — the paths inside it "
-                        f"don't match any files on this machine")
-                else:
-                    playlist_notes.append(f"{name}: {len(resolved)}/{total} tracks found")
-            else:
-                out.append(p)
-        return out, playlist_notes
-
-    def load_files(self):
-        files = filedialog.askopenfilenames(filetypes=file_dialog_media_types())
-        if files:
-            resolved, playlist_notes = self._expand_playlist_selection(files)
-            # All Files picker may include odd extensions — VLC/ffmpeg will try them.
-            resolved = [
-                p for p in resolved
-                if is_media_path(p) or os.path.isfile(p)
-            ]
-            if not resolved:
-                msg = "; ".join(playlist_notes) if playlist_notes else "No playable tracks found in that selection"
-                self._flash_status(msg)
-                return
-            if not self._ensure_engine():
-                return
-            self.engine.load(resolved)
-            self.engine.play()
-            n = len(resolved)
-            msg = f"{n} file{'s' if n != 1 else ''} loaded"
-            if playlist_notes:
-                msg += " — " + "; ".join(playlist_notes)
-            self._flash_status(msg)
-            self._update_playback_ui_state()
-
-    # ── Drag and drop ────────────────────────────────────────────
-    #
-    # Dropping audio file(s) anywhere on the page queues/plays them,
-    # same as "Add Files". Dropping a folder (with no loose audio files
-    # alongside it) sets it as the music library folder and scans it,
-    # same as "Set Music Folder". Requires the optional `tkinterdnd2`
-    # package — if it's missing, or tkdnd fails to load on this
-    # platform, drag-and-drop is silently unavailable and everything
-    # else still works via the buttons/dialogs as before.
-
-    def _setup_drag_drop(self):
-        if not HAS_DND:
-            return
-
-        ready = getattr(self.manager, "_music_dnd_ready", None)
-        if ready is None:
-            try:
-                tkinterdnd2.TkinterDnD.require(self.winfo_toplevel())
-                ready = True
-            except Exception:
-                ready = False
-            self.manager._music_dnd_ready = ready
-        if not ready:
-            return
-
-        # Register the page itself plus the main visible container frames
-        # — dropping directly on top of a button/entry still works via
-        # the dialogs, this just covers the surrounding background areas.
-        targets = [self, self.library_panel, self.folder_row, self.song_buttons_frame]
-        for widget in targets:
-            try:
-                widget.drop_target_register(DND_FILES)
-                widget.dnd_bind("<<Drop>>", self._on_drop)
-            except Exception:
-                pass
-
-    def _on_drop(self, event):
-        try:
-            paths = self.tk.splitlist(event.data)
-        except Exception:
-            paths = [event.data]
-
-        dirs = [p for p in paths if os.path.isdir(p)]
-        dropped_files = [p for p in paths if os.path.isfile(p)]
-        audio_files, playlist_notes = self._expand_playlist_selection(dropped_files)
-        media_files = [p for p in audio_files if is_media_path(p)]
-        if media_files:
-            audio_files = media_files
-        elif audio_files:
-            audio_files = [p for p in audio_files if not is_playlist_path(p)]
-
-        if audio_files:
-            if not self._ensure_engine():
-                return
-            self.engine.load(audio_files)
-            self.engine.play()
-            n = len(audio_files)
-            msg = f"{n} file{'s' if n != 1 else ''} added from drag & drop"
-            if playlist_notes:
-                msg += " — " + "; ".join(playlist_notes)
-            self._flash_status(msg)
-            self._update_playback_ui_state()
-        elif dirs:
-            folder = dirs[0]
-            self.db.set_setting("music_folder", folder)
-            self.folder_label.configure(text=folder)
-            self._flash_status(f"Indexing dropped folder: {folder}")
-            self.rescan_now()
-            self._sync_autoindexer(folder, force=True)
-        elif playlist_notes:
-            # A playlist file was dropped but every entry inside it
-            # failed to resolve — tell the user why instead of the
-            # generic "no supported files" message below.
-            self._flash_status("; ".join(playlist_notes))
-        else:
-            self._flash_status("No supported audio files in that drop")
-
-        return COPY
-
-    # ── Browse / Search / Paging ─────────────────────────────────
-
-    def _on_search_key(self, event=None):
-        if self._search_after_id:
-            self.after_cancel(self._search_after_id)
-        self._search_after_id = self.after(350, self._run_search)
-
-    def _run_search(self, immediate=False):
-        query = self.search_entry.get() if hasattr(self, "search_entry") else ""
-        self._search_seq += 1
-        seq = self._search_seq
-
-        def worker():
-            q = (query or "").strip()
-            if not q:
-                cached = getattr(self.manager, "music_library_ids", None)
-                if cached is not None:
-                    ids = cached
-                else:
-                    ids = self.db.all_ids()
-            else:
-                ids = self.db.search_ids(q)
-            self.after(0, lambda: self._apply_search_results(seq, ids))
-
-        if immediate:
-            worker()
-        else:
-            threading.Thread(target=worker, daemon=True).start()
-
-    def _apply_search_results(self, seq, ids):
-        if seq != self._search_seq:
-            return  # a newer search superseded this one
-        self._result_ids = ids
-        self._rebuild_song_id_index()
-        self._page = 0
-        self._last_followed_index = -1
-        self.results_count.configure(text=f"{_fmt_count(len(ids))} songs")
-        self._render_page()
-        self.after(100, lambda: self._ensure_active_track_visible(force=True))
-
-    def _rebuild_song_id_index(self) -> None:
-        """Map database song id → position in the current browse/search list."""
-        self._song_id_index = {int(sid): i for i, sid in enumerate(self._result_ids)}
-
-    def _total_pages(self):
-        return max(1, (len(self._result_ids) + PAGE_SIZE - 1) // PAGE_SIZE)
-
-    def prev_page(self):
-        self._follow_scroll_idx = None
-        if self._page > 0:
-            self._page -= 1
-            self._render_page()
-
-    def next_page(self):
-        self._follow_scroll_idx = None
-        if self._page + 1 < self._total_pages():
-            self._page += 1
-            self._render_page()
-
-    def _render_page(self):
-        if self._render_job is not None:
-            try:
-                self.after_cancel(self._render_job)
-            except Exception:
-                pass
-            self._render_job = None
-
-        for w in self.song_buttons_frame.winfo_children():
-            w.destroy()
-        self.row_widgets = []
-        self._last_highlighted_index = -1
-
-        start = self._page * PAGE_SIZE
-        end = min(start + PAGE_SIZE, len(self._result_ids))
-        self._render_page_start = start
-        self._render_page_ids = list(self._result_ids[start:end])
-        self._render_page_metas = self.db.get_songs(self._render_page_ids)
-        self._render_chunk_idx = 0
-        now_idx = self._resolve_now_playing_browse_index()
-        self._now_playing_browse_idx = now_idx
-        self._render_chunk_batch()
-
-    def _render_chunk_batch(self):
-        if not self.winfo_exists():
-            return
-
-        page_ids = self._render_page_ids
-        metas = self._render_page_metas
-        page_start = self._render_page_start
-        chunk_end = min(self._render_chunk_idx + _RENDER_CHUNK, len(page_ids))
-
-        for offset in range(self._render_chunk_idx, chunk_end):
-            sid = page_ids[offset]
-            global_index = page_start + offset
-            meta = metas.get(sid)
-            if global_index == self._now_playing_browse_idx:
-                text = self._row_label(global_index, meta, playing=True)
-            else:
-                text = self._row_label(global_index, meta, playing=False)
-
-            row = ctk.CTkFrame(
-                self.song_buttons_frame, fg_color=theme.PANEL_2,
-                corner_radius=6, border_width=1, border_color=theme.BORDER,
-            )
-            row.pack(fill="x", padx=4, pady=2)
-
-            btn = ctk.CTkButton(
-                row, text=text,
-                fg_color="transparent",
-                hover_color=theme.PANEL_HOVER,
-                text_color=theme.TEXT,
-                font=("Segoe UI", 13),
-                anchor="w", height=34, corner_radius=6,
-                command=lambda gi=global_index: self.play_result(gi),
-            )
-            btn.pack(side="left", fill="x", expand=True, padx=2, pady=1)
-            self.row_widgets.append((global_index, btn))
-            if global_index == self._now_playing_browse_idx:
-                btn.configure(**selected_track_kwargs())
-                row.configure(border_color=highlight_border())
-                self.active_index = global_index
-                self._last_highlighted_index = global_index
-
-        self._render_chunk_idx = chunk_end
-        if chunk_end < len(page_ids):
-            if self._follow_scroll_idx is not None:
-                self._render_chunk_batch()
-            else:
-                self._render_job = self.after(1, self._render_chunk_batch)
-            return
-
-        self._render_job = None
-        total_pages = self._total_pages()
-        self.page_label.configure(text=f"Page {self._page + 1} / {total_pages}")
-        self.prev_page_btn.configure(state="normal" if self._page > 0 else "disabled")
-        self.next_page_btn.configure(
-            state="normal" if self._page + 1 < total_pages else "disabled")
-        self._highlight_active(force=True)
-        self._refresh_status()
-        self._refresh_now_playing_list_hint()
-        page_start = self._render_page_start
-        page_end = page_start + len(page_ids)
-        now_idx = self._resolve_now_playing_browse_index()
-        self._now_playing_browse_idx = now_idx
-        if self._follow_scroll_idx is not None:
-            if now_idx >= 0 and page_start <= now_idx < page_end:
-                self.active_index = now_idx
-                self._last_followed_index = now_idx
-            self._finish_follow_scroll()
-        elif now_idx >= 0 and page_start <= now_idx < page_end:
-            self.active_index = now_idx
-            self._last_followed_index = now_idx
-            self._schedule_scroll_to_now_playing()
-        elif now_idx >= 0 and now_idx == self._last_followed_index:
-            self._schedule_scroll_to_now_playing()
-
-    # ── Playback ─────────────────────────────────────────────
-
-    def _now_playing_song_id(self) -> int | None:
-        if not self._engine_ready or self.engine is None:
-            return None
-        tracked = getattr(self.engine, "_current_song_id", None)
-        if tracked is not None:
-            return int(tracked)
-        if self.engine.index < 0:
-            return None
-        playlist = self.engine.playlist
-        if isinstance(playlist, LazyPlaylist):
-            try:
-                return int(playlist.id_at(self.engine.index))
-            except Exception:
-                return None
+        self.endResetModel()
+
+    def rowCount(self, parent=QModelIndex()):
+        if parent.isValid():
+            return 0
+        return self._total
+
+    def columnCount(self, parent=QModelIndex()):
+        return 4
+
+    def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
+        if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
+            return self.HEADERS[section]
         return None
 
-    def _browse_index_for_song_id(self, song_id: int) -> int:
-        return self._song_id_index.get(int(song_id), -1)
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if not index.isValid():
+            return None
+        row = self._row(index.row())
+        if not row:
+            return None
+        if role == Qt.ItemDataRole.UserRole:
+            return row.get("id")
+        if role != Qt.ItemDataRole.DisplayRole:
+            return None
+        col = index.column()
+        if col == 0:
+            return row.get("title") or os.path.basename(row.get("path") or "?")
+        if col == 1:
+            return row.get("artist") or ""
+        if col == 2:
+            return row.get("album") or ""
+        if col == 3:
+            return _fmt_time(row.get("duration"))
+        return None
 
-    def _resolve_now_playing_browse_index(self) -> int:
-        """Position of the now-playing track in the current library/search list."""
-        song_id = self._now_playing_song_id()
-        if song_id is not None:
-            idx = self._browse_index_for_song_id(song_id)
-            if idx >= 0:
-                return idx
-        if (
-            self._engine_ready
-            and self.engine is not None
-            and self._engine_queue_matches_browse()
-            and 0 <= self.engine.index < len(self._result_ids)
-        ):
-            return self.engine.index
-        return -1
+    def song_id_at(self, row):
+        data = self._row(row)
+        return data.get("id") if data else None
 
-    def _refresh_now_playing_list_hint(self) -> None:
-        if not hasattr(self, "now_playing_list_hint"):
-            return
-        idx = self._resolve_now_playing_browse_index()
-        if idx < 0:
-            if self._now_playing_song_id() is not None and self.search_entry.get().strip():
-                self.now_playing_list_hint.configure(
-                    text="▶ Now playing — clear search to see it in the list",
-                )
-            else:
-                self.now_playing_list_hint.configure(text="")
-            if hasattr(self, "locate_playing_btn"):
-                self.locate_playing_btn.configure(state="disabled")
-            return
-        page = idx // PAGE_SIZE + 1
-        row = idx + 1
-        on_page = page == self._page + 1
-        where = "on this page" if on_page else f"page {page}"
-        self.now_playing_list_hint.configure(
-            text=f"▶ Now playing: #{row} ({where}) — highlighted row below",
+    def _row(self, i):
+        if i < 0 or i >= self._total:
+            return None
+        cached = self._rows.get(i)
+        if cached is not None:
+            return cached
+        start = (i // self.CHUNK) * self.CHUNK
+        chunk = self.db.browse_rows(
+            query=self.query, artist=self.artist, folder=self.folder,
+            offset=start, limit=self.CHUNK,
         )
-        if hasattr(self, "locate_playing_btn"):
-            self.locate_playing_btn.configure(state="normal")
+        for j, row in enumerate(chunk):
+            self._rows[start + j] = row
+        if len(self._rows) > self.CHUNK * 10:
+            lo, hi = max(0, start - self.CHUNK), start + self.CHUNK * 2
+            self._rows = {k: v for k, v in self._rows.items() if lo <= k < hi}
+        return self._rows.get(i)
 
-    def _locate_now_playing_in_list(self) -> None:
-        self._ensure_active_track_visible(force=True)
 
-    def _follow_now_playing(self) -> None:
-        """Jump to the playing track in the library list (page + scroll)."""
-        if not self._engine_ready or self.engine is None:
+class MusicPage(QWidget):
+    def __init__(self, parent, manager):
+        super().__init__(parent)
+        self.manager = manager
+        self.db = getattr(manager, "music_db", None) or Library()
+        manager.music_db = self.db
+        self.engine = getattr(manager, "music_engine", None)
+        self._video = None
+        self._seeking = False
+        self._scan_busy = False
+        self._artist = None
+        self._folder = None
+        self._bundle = None
+        self._watch_note = ""
+        self._watch_busy = False
+        self._watch_t0 = 0.0
+        self._shown_song_id = None
+        self._status_tick = QTimer(self)
+        self._status_tick.setInterval(1000)
+        self._status_tick.timeout.connect(self._paint_status)
+
+        self.setObjectName("MPRoot")
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        split = QSplitter(Qt.Orientation.Horizontal)
+        split.addWidget(self._build_sidebar())
+        split.addWidget(self._build_table())
+        split.setStretchFactor(1, 1)
+        split.setSizes([240, 900])
+        root.addWidget(split, 1)
+        root.addWidget(self._build_bar())
+
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(180)
+        self._search_timer.timeout.connect(self._apply_filter)
+
+        self._tick = QTimer(self)
+        self._tick.setInterval(400)
+        self._tick.timeout.connect(self._update_now)
+
+        self.apply_theme()
+        self._restore_last()
+        QTimer.singleShot(0, self._after_first_paint)
+
+    @staticmethod
+    def build_qt_module_settings(parent, manager):
+        return MusicRemoteSettings(parent, manager)
+
+    def _build_sidebar(self):
+        side = QWidget()
+        lay = QVBoxLayout(side)
+        lay.setContentsMargins(10, 10, 8, 10)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Search library…")
+        self.search.textChanged.connect(lambda: self._search_timer.start())
+        self.search.returnPressed.connect(self._apply_filter)
+        lay.addWidget(self.search)
+
+        all_btn = QPushButton("All tracks")
+        all_btn.clicked.connect(self._clear_filters)
+        lay.addWidget(all_btn)
+
+        artists_lab = QLabel("Artists")
+        artists_lab.setObjectName("Muted")
+        lay.addWidget(artists_lab)
+        self.artists = QListWidget()
+        self.artists.itemClicked.connect(self._pick_artist)
+        lay.addWidget(self.artists, 3)
+
+        folders_lab = QLabel("Folders")
+        folders_lab.setObjectName("Muted")
+        lay.addWidget(folders_lab)
+        self.folders = QListWidget()
+        self.folders.itemClicked.connect(self._pick_folder_item)
+        lay.addWidget(self.folders, 2)
+
+        self.folder = QLineEdit(self.db.get_setting("music_folder") or "")
+        self.folder.setPlaceholderText("Music folder")
+        lay.addWidget(self.folder)
+        row = QHBoxLayout()
+        browse = QPushButton("Folder")
+        browse.clicked.connect(self._pick_root)
+        scan = QPushButton("Rescan")
+        scan.clicked.connect(self._rescan)
+        row.addWidget(browse)
+        row.addWidget(scan)
+        lay.addLayout(row)
+        self.status = QLabel("")
+        self.status.setObjectName("MPStatus")
+        self.status.setWordWrap(True)
+        self.status.setMinimumHeight(36)
+        lay.addWidget(self.status)
+        return side
+
+    def _build_table(self):
+        host = QWidget()
+        lay = QVBoxLayout(host)
+        lay.setContentsMargins(0, 10, 10, 8)
+        self.count_lab = QLabel("")
+        self.count_lab.setObjectName("Muted")
+        lay.addWidget(self.count_lab)
+        self.model = TrackTableModel(self.db)
+        self.table = QTableView()
+        self.table.setModel(self.model)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setShowGrid(False)
+        self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(26)
+        self.table.setAlternatingRowColors(False)
+        self.table.setWordWrap(False)
+        self.table.doubleClicked.connect(self._play_index)
+        header = self.table.horizontalHeader()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        lay.addWidget(self.table, 1)
+        return host
+
+    def _build_bar(self):
+        bar = QWidget()
+        bar.setObjectName("MPBar")
+        bar.setFixedHeight(120)
+        lay = QVBoxLayout(bar)
+        lay.setContentsMargins(16, 10, 16, 10)
+        lay.setSpacing(6)
+        self.now = QLabel("Nothing playing")
+        self.now.setObjectName("MPNowPlaying")
+        lay.addWidget(self.now)
+
+        seek_row = QHBoxLayout()
+        seek_row.setSpacing(8)
+        self.time_lab = QLabel("0:00")
+        self.time_lab.setObjectName("Muted")
+        self.time_lab.setFixedWidth(40)
+        self.seek = QSlider(Qt.Orientation.Horizontal)
+        self.seek.setRange(0, 1000)
+        self.seek.setFixedHeight(18)
+        self.seek.sliderPressed.connect(lambda: setattr(self, "_seeking", True))
+        self.seek.sliderReleased.connect(self._seek_released)
+        self.len_lab = QLabel("0:00")
+        self.len_lab.setObjectName("Muted")
+        self.len_lab.setFixedWidth(40)
+        seek_row.addWidget(self.time_lab)
+        seek_row.addWidget(self.seek, 1)
+        seek_row.addWidget(self.len_lab)
+        lay.addLayout(seek_row)
+
+        transport = QHBoxLayout()
+        transport.setSpacing(8)
+        transport.setContentsMargins(0, 0, 0, 0)
+        self.shuffle_btn = QPushButton("Shuffle")
+        self.shuffle_btn.setObjectName("MPPillBtn")
+        self.shuffle_btn.setCheckable(True)
+        self.shuffle_btn.setFixedHeight(32)
+        self.shuffle_btn.setChecked(bool(getattr(self.engine, "shuffle", False)))
+        self.shuffle_btn.toggled.connect(self._toggle_shuffle)
+        self.prev_btn = TransportButton("prev")
+        self.play_btn = TransportButton("play", primary=True)
+        self.next_btn = TransportButton("next")
+        self.repeat_btn = QPushButton(self._repeat_label())
+        self.repeat_btn.setObjectName("MPPillBtn")
+        self.repeat_btn.setFixedHeight(32)
+        self.prev_btn.clicked.connect(self._prev)
+        self.play_btn.clicked.connect(self._play_pause)
+        self.next_btn.clicked.connect(self._next)
+        self.repeat_btn.clicked.connect(self._cycle_repeat)
+        video = QPushButton("Video")
+        video.setFixedHeight(32)
+        video.clicked.connect(self._open_video)
+        transport.addWidget(self.shuffle_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        transport.addWidget(self.prev_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        transport.addWidget(self.play_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        transport.addWidget(self.next_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        transport.addWidget(self.repeat_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        transport.addSpacing(12)
+        vol_lab = QLabel("Volume")
+        vol_lab.setObjectName("Muted")
+        transport.addWidget(vol_lab, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.vol = QSlider(Qt.Orientation.Horizontal)
+        self.vol.setRange(0, 200)
+        self.vol.setFixedWidth(120)
+        self.vol.setFixedHeight(18)
+        self.vol.setValue(int((getattr(self.engine, "volume", 0.8) or 0.8) * 100))
+        self.vol.valueChanged.connect(self._set_volume)
+        transport.addWidget(self.vol, 0, Qt.AlignmentFlag.AlignVCenter)
+        transport.addStretch(1)
+        transport.addWidget(video, 0, Qt.AlignmentFlag.AlignVCenter)
+        lay.addLayout(transport)
+        return bar
+
+    def apply_theme(self, theme_id=None):
+        shell = find_qt_module_shell(self)
+        if shell is not None and getattr(shell, "_bundle", None) is not None:
+            bundle = shell._bundle
+        else:
+            settings = getattr(self.manager, "settings", None)
+            saved = get_saved_module_theme(settings, "Media Player") if settings else theme_id
+            bundle = resolve_module_theme(theme_id or saved)
+        self._bundle = bundle
+        self.setStyleSheet(_qss_for_music(bundle))
+        ink = bundle.t.ACCENT
+        on = getattr(bundle, "on_accent", "#0a0006")
+        for btn in (self.prev_btn, self.play_btn, self.next_btn):
+            btn.set_ink(ink, on)
+
+    def _after_first_paint(self):
+        self._apply_filter()
+        self._paint_status()
+        self._refresh_sidebar_async()
+        QTimer.singleShot(0, self._ensure_engine)
+        self._start_indexer()
+        if not self._tick.isActive():
+            self._tick.start()
+
+    def _folder_label(self):
+        raw = self.folder.text().strip().rstrip("\\/")
+        return os.path.basename(raw) or raw or "library"
+
+    def _paint_status(self):
+        try:
+            total = self.db.count()
+        except Exception:
+            total = self.model.rowCount()
+        head = f"{total:,} tracks in {self._folder_label()}"
+        note = self._watch_note
+        if self._watch_busy:
+            sec = max(0, int(time.monotonic() - self._watch_t0))
+            note = f"Setting up live updates… {sec}s — you can play now"
+        self.status.setText(f"{head}\n{note}" if note else head)
+
+    def _on_indexer_status(self, text):
+        text = (text or "").strip()
+        if text.startswith("Starting library watch"):
+            self._watch_busy = True
+            self._watch_t0 = time.monotonic()
+            self._watch_note = "Setting up live updates… — you can play now"
+            if not self._status_tick.isActive():
+                self._status_tick.start()
+            self._paint_status()
             return
-        self._last_followed_index = -1
-        self._update_playback_ui_state()
-        self._ensure_active_track_visible(force=True)
-        self.after(80, lambda: self._ensure_active_track_visible(force=True))
+        self._watch_busy = False
+        self._status_tick.stop()
+        if text.startswith("Watching for changes"):
+            self._watch_note = "Live folder updates on"
+        elif text.startswith("Auto-indexing"):
+            self._watch_note = "Background refresh on"
+        else:
+            self._watch_note = text
+        self._paint_status()
 
-    def play_result(self, global_index):
-        def _play():
-            if not self._ensure_engine():
-                return
-            self.engine.load_ids(self.db, self._result_ids, start_index=global_index)
-            self.engine.shuffle = False
-            self.engine.play()
-            self._follow_now_playing()
-
-        self._queue_playback(_play)
-
-    def shuffle_all(self):
-        def _shuffle():
-            if not self._ensure_engine():
-                return
-            ids = self._result_ids
-            if not len(ids):
-                self._flash_status("Library is empty — set a music folder first")
-                return
-            start = random.randrange(len(ids))
-            self.engine.load_ids(self.db, ids, start_index=start)
-            self.engine.shuffle = True
-            self.engine.play()
-            self._follow_now_playing()
-
-        self._queue_playback(_shuffle)
-
-    def play_all(self):
-        def _play():
-            if not self._ensure_engine():
-                return
-            ids = self._result_ids
-            if not len(ids):
-                self._flash_status("Library is empty — set a music folder first")
-                return
-            self.engine.load_ids(self.db, ids, start_index=0)
-            self.engine.shuffle = False
-            self.engine.play()
-            self._follow_now_playing()
-
-        self._queue_playback(_play)
-
-    def toggle_play_pause(self):
-        if not self._ensure_engine():
+    def _ensure_engine(self):
+        if self.engine is not None:
             return
+        existing = getattr(self.manager, "music_engine", None)
+        if existing is not None:
+            self.engine = existing
+            return
+        self.engine = VLCMusicEngine()
+        self.manager.music_engine = self.engine
+
+    def on_hide(self):
+        self._tick.stop()
+
+    def on_show(self):
+        if not self._tick.isActive():
+            self._tick.start()
+        self._update_now()
+
+    def _restore_last(self):
+        raw = self.db.get_setting("last_song_id")
+        if not raw:
+            return
+        try:
+            song = self.db.get_song(int(raw))
+        except (TypeError, ValueError):
+            return
+        if song:
+            self._set_now_text(song)
+
+    def _set_now_text(self, meta):
+        title = (meta or {}).get("title") or os.path.basename((meta or {}).get("path") or "?")
+        artist = (meta or {}).get("artist")
+        self.now.setText(f"{artist} — {title}" if artist else title)
+
+    def _playlist(self):
+        return FilteredPlaylist(
+            self.db, query=self.search.text().strip(),
+            artist=self._artist, folder=self._folder,
+        )
+
+    def _bind_queue(self, start_row=None, song_id=None):
+        self._ensure_engine()
+        playlist = self._playlist()
+        self.engine.playlist = playlist
+        self.engine.db = self.db
+        if start_row is not None:
+            self.engine.index = start_row
+            return playlist
+        if song_id is not None and hasattr(playlist, "index_of"):
+            found = playlist.index_of(song_id)
+            if found >= 0:
+                self.engine.index = found
+                return playlist
+        if getattr(self.engine, "index", -1) < 0 and playlist:
+            self.engine.index = 0
+        return playlist
+
+    def _apply_filter(self):
+        self.model.set_filter(
+            query=self.search.text().strip(),
+            artist=self._artist,
+            folder=self._folder,
+        )
+        self.count_lab.setText(f"{self.model.rowCount():,} tracks")
+        # The filter changed, so a row we previously highlighted may no
+        # longer be at the same position (or visible at all) — force
+        # _follow_song to re-resolve the now-playing song against the
+        # new view instead of assuming it's already showing correctly.
+        self._shown_song_id = None
+
+    def _clear_filters(self):
+        self._artist = None
+        self._folder = None
+        self.artists.clearSelection()
+        self.folders.clearSelection()
+        self._apply_filter()
+
+    def _pick_artist(self, item):
+        name = item.data(Qt.ItemDataRole.UserRole)
+        self._artist = name
+        self._folder = None
+        self.folders.clearSelection()
+        self._apply_filter()
+
+    def _pick_folder_item(self, item):
+        self._folder = item.data(Qt.ItemDataRole.UserRole)
+        self._artist = None
+        self.artists.clearSelection()
+        self._apply_filter()
+
+    def _refresh_sidebar(self):
+        self._refresh_sidebar_async()
+
+    def _refresh_sidebar_async(self):
+        root = self.folder.text().strip()
+
+        def work():
+            try:
+                artists = self.db.list_artists()
+            except Exception as exc:
+                print(f"[MusicPage] artists: {exc}")
+                artists = []
+            folders = _disk_folders(root)
+            QTimer.singleShot(0, lambda: self._fill_sidebar(artists, folders, root))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _fill_sidebar(self, artists, folders, root):
+        if self.folder.text().strip() != root:
+            return
+        self.artists.blockSignals(True)
+        self.artists.clear()
+        for name, n in artists:
+            label = UNKNOWN if not name else name
+            item = QListWidgetItem(f"{label}  ·  {n}")
+            item.setData(Qt.ItemDataRole.UserRole, name)
+            self.artists.addItem(item)
+        self.artists.blockSignals(False)
+
+        self.folders.blockSignals(True)
+        self.folders.clear()
+        if root:
+            here = QListWidgetItem("This folder")
+            here.setData(Qt.ItemDataRole.UserRole, os.path.normpath(root))
+            self.folders.addItem(here)
+        for name, path in folders:
+            item = QListWidgetItem(name)
+            item.setData(Qt.ItemDataRole.UserRole, path)
+            self.folders.addItem(item)
+        self.folders.blockSignals(False)
+
+    def _start_indexer(self):
+        folder = self.folder.text().strip()
+        if not folder:
+            return
+        indexer = getattr(self.manager, "music_indexer", None)
+        if indexer is None:
+            indexer = AutoIndexer(self.db)
+            self.manager.music_indexer = indexer
+        if indexer.running and indexer.folder == os.path.normcase(os.path.normpath(folder)):
+            return
+        indexer.start(
+            folder,
+            status_cb=lambda text: QTimer.singleShot(0, lambda t=text: self._on_indexer_status(t)),
+            scan_busy_cb=lambda: self._scan_busy,
+        )
+
+    def _pick_root(self):
+        chosen = QFileDialog.getExistingDirectory(self, "Music folder", self.folder.text())
+        if not chosen:
+            return
+        self.folder.setText(chosen)
+        self.db.set_setting("music_folder", chosen)
+        self._refresh_sidebar()
+        self._start_indexer()
+        self._rescan()
+
+    def _rescan(self):
+        folder = self.folder.text().strip()
+        if not folder:
+            return
+        self._scan_busy = True
+        self._watch_busy = False
+        self._status_tick.stop()
+        self._watch_note = "Scanning folder for new files…"
+        self._paint_status()
+
+        def work():
+            try:
+                self.db.scan(folder, full=True)
+            except Exception as e:
+                print(f"[MusicPage] scan: {e}")
+            self._scan_busy = False
+            QTimer.singleShot(0, self._after_scan)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _after_scan(self):
+        self._watch_note = "Scan finished"
+        self._paint_status()
+        self._refresh_sidebar()
+        self._apply_filter()
+
+    def _play_index(self, index):
+        row = index.row()
+        sid = self.model.song_id_at(row)
+        playlist = self._bind_queue(start_row=row)
+        if not playlist:
+            return
+        self.engine.play_at(row)
+        if sid is not None:
+            self.db.set_setting("last_song_id", str(sid))
+        self._update_now()
+
+    def _repeat_label(self):
+        mode = getattr(self.engine, "repeat_mode", "off")
+        return {"off": "Repeat: off", "one": "Repeat: one", "all": "Repeat: all"}.get(mode, "Repeat: off")
+
+    def _set_volume(self, value):
+        self._ensure_engine()
+        self.engine.set_volume(value / 100.0)
+
+    def _toggle_shuffle(self, on):
+        self._ensure_engine()
+        self.engine.shuffle = bool(on)
+
+    def _cycle_repeat(self):
+        self._ensure_engine()
+        mode = getattr(self.engine, "repeat_mode", "off")
+        nxt = REPEAT_MODES[(REPEAT_MODES.index(mode) + 1) % len(REPEAT_MODES)] if mode in REPEAT_MODES else "off"
+        self.engine.repeat_mode = nxt
+        self.repeat_btn.setText(self._repeat_label())
+
+    def _seek_released(self):
+        if self.engine is None:
+            self._seeking = False
+            return
+        length = 0
+        try:
+            length = self.engine.get_length() or 0
+        except Exception:
+            pass
+        if length > 0:
+            self.engine.seek((self.seek.value() / 1000.0) * length)
+        self._seeking = False
+
+    def _prev(self):
+        if not getattr(self.engine, "playlist", None):
+            self._bind_queue()
+        self.engine.prev()
+        self._update_now()
+
+    def _next(self):
+        if not getattr(self.engine, "playlist", None):
+            self._bind_queue()
+        self.engine.next()
+        self._update_now()
+
+    def _play_pause(self):
+        if self.engine is not None and self.engine.is_playing():
+            self.engine.pause()
+        else:
+            raw = self.db.get_setting("last_song_id")
+            sid = int(raw) if raw and str(raw).isdigit() else None
+            playlist = self._bind_queue(song_id=sid)
+            if not playlist:
+                return
+            self.engine.play()
+        self._update_now()
+
+    def _open_video(self):
+        if self._video is None:
+            self._video = VideoWindow(self, self.manager)
+        self._video.show()
+        self._video.raise_()
+        self._video.activateWindow()
+
+    def _update_now(self):
+        if self.engine is None:
+            return
+        try:
+            meta = self.engine.get_current_meta() if hasattr(self.engine, "get_current_meta") else None
+            playing = self.engine.is_playing()
+            sid = None
+            if meta:
+                self._set_now_text(meta)
+                sid = meta.get("id")
+                if sid is not None:
+                    self.db.set_setting("last_song_id", str(sid))
+            elif not self.now.text() or self.now.text() == "Nothing playing":
+                self.now.setText("Nothing playing")
+            self.play_btn.set_kind("pause" if playing else "play")
+            playlist = getattr(self.engine, "playlist", None)
+            has_playlist = bool(playlist)
+            can_move = has_playlist and len(playlist) > 0
+            self.prev_btn.setEnabled(can_move)
+            self.next_btn.setEnabled(can_move)
+            self._follow_song(sid)
+            pos = self.engine.get_time() if hasattr(self.engine, "get_time") else 0
+            length = self.engine.get_length() if hasattr(self.engine, "get_length") else 0
+            self.time_lab.setText(_fmt_time(pos))
+            self.len_lab.setText(_fmt_time(length))
+            if not self._seeking and length > 0:
+                self.seek.blockSignals(True)
+                self.seek.setValue(int((pos / length) * 1000))
+                self.seek.blockSignals(False)
+            self.repeat_btn.setText(self._repeat_label())
+            self.shuffle_btn.blockSignals(True)
+            self.shuffle_btn.setChecked(bool(getattr(self.engine, "shuffle", False)))
+            self.shuffle_btn.blockSignals(False)
+        except Exception as exc:
+            print(f"[MusicPage] now playing: {exc}")
+
+    def _follow_song(self, song_id):
+        """
+        Highlights the row for `song_id` in the *table's own* current
+        filter/search view. engine.index is a position in whatever
+        playlist was bound when playback started, which can be a
+        completely different filtered set than what the table is
+        showing right now (e.g. the user searched after hitting play) —
+        so we look the song up by id against the table's own filter
+        instead of trusting engine.index as a row number directly.
+        """
+        if song_id is None:
+            return
+        if song_id == self._shown_song_id:
+            return
+        try:
+            row = self.db.browse_index_of(
+                int(song_id), query=self.model.query,
+                artist=self.model.artist, folder=self.model.folder,
+            )
+        except Exception:
+            return
+        if row is None or row < 0 or row >= self.model.rowCount():
+            # Not visible under the current filter — leave whatever
+            # was last shown alone rather than selecting the wrong row.
+            return
+        self._shown_song_id = song_id
+        self.table.selectRow(row)
+        self.table.scrollTo(self.model.index(row, 0))
+
+
+class VideoWindow(QDialog):
+    def __init__(self, parent, manager):
+        super().__init__(parent)
+        self.setWindowTitle("Video")
+        self.resize(960, 640)
+        self.manager = manager
+        video = importlib.import_module("modules.Media.Media Player.video_engine")
+        self._is_url = video.is_url
+        self._url_display_name = video.url_display_name
+        self.engine = getattr(manager, "media_engine", None)
+        if self.engine is None:
+            self.engine = video.VLCMediaEngine()
+            manager.media_engine = self.engine
+        self._seeking = False
+        root = QVBoxLayout(self)
+        self.surface = QWidget()
+        self.surface.setMinimumHeight(240)
+        self.surface.setStyleSheet("background: #000;")
+        root.addWidget(self.surface, 3)
+        self.list = QListWidget()
+        self.list.itemDoubleClicked.connect(self._play_item)
+        root.addWidget(self.list, 1)
+        seek_row = QHBoxLayout()
+        self.time_lab = QLabel("0:00")
+        self.seek = QSlider(Qt.Orientation.Horizontal)
+        self.seek.setRange(0, 1000)
+        self.seek.sliderPressed.connect(lambda: setattr(self, "_seeking", True))
+        self.seek.sliderReleased.connect(self._seek_released)
+        self.len_lab = QLabel("0:00")
+        seek_row.addWidget(self.time_lab)
+        seek_row.addWidget(self.seek, 1)
+        seek_row.addWidget(self.len_lab)
+        root.addLayout(seek_row)
+        row = QHBoxLayout()
+        add = QPushButton("Add files")
+        add.clicked.connect(self._add_files)
+        add_url = QPushButton("Add URL")
+        add_url.clicked.connect(self._add_url)
+        row.addWidget(add)
+        row.addWidget(add_url)
+        row.addStretch(1)
+        self.prev_btn = QPushButton("Prev")
+        self.play_btn = QPushButton("Play")
+        self.next_btn = QPushButton("Next")
+        self.prev_btn.clicked.connect(self._prev)
+        self.play_btn.clicked.connect(self._play_pause)
+        self.next_btn.clicked.connect(self._next)
+        row.addWidget(self.prev_btn)
+        row.addWidget(self.play_btn)
+        row.addWidget(self.next_btn)
+        remove = QPushButton("Remove")
+        remove.clicked.connect(self._remove)
+        row.addWidget(remove)
+        root.addLayout(row)
+        self._tick = QTimer(self)
+        self._tick.setInterval(400)
+        self._tick.timeout.connect(self._tick_ui)
+        self._tick.start()
+        self._refresh_list()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        QTimer.singleShot(0, self._attach_hwnd)
+
+    def _attach_hwnd(self):
+        handle = int(self.surface.winId())
+        try:
+            if sys.platform.startswith("win"):
+                self.engine.player.set_hwnd(handle)
+            elif sys.platform == "linux":
+                self.engine.player.set_xwindow(handle)
+            elif sys.platform == "darwin":
+                self.engine.player.set_nsobject(handle)
+        except Exception as e:
+            print(f"[Video] video output: {e}")
+
+    def _filters(self):
+        parts = [f"{label} ({pattern})" for label, pattern in file_dialog_video_types()]
+        return ";;".join(parts)
+
+    def _add_files(self):
+        paths, _ = QFileDialog.getOpenFileNames(self, "Add video", "", self._filters())
+        for path in paths:
+            self.engine.add_track(path)
+        self._refresh_list()
+
+    def _add_url(self):
+        from PySide6.QtWidgets import QInputDialog
+        url, ok = QInputDialog.getText(self, "Add URL", "http(s) video URL")
+        if ok and url.strip():
+            self.engine.add_track(url.strip())
+            self._refresh_list()
+
+    def _refresh_list(self):
+        self.list.clear()
+        for i, path in enumerate(self.engine.playlist):
+            name = self._url_display_name(path) if self._is_url(path) else os.path.basename(path)
+            mark = "> " if i == self.engine.index else ""
+            item = QListWidgetItem(f"{mark}{name}")
+            item.setData(Qt.ItemDataRole.UserRole, i)
+            self.list.addItem(item)
+        self._update_transport()
+
+    def _play_item(self, item):
+        self._attach_hwnd()
+        self.engine.play_at(item.data(Qt.ItemDataRole.UserRole))
+        self._refresh_list()
+
+    def _play_pause(self):
         if self.engine.is_playing():
             self.engine.pause()
         else:
+            self._attach_hwnd()
             self.engine.play()
-        self._update_playback_ui_state()
+        self._refresh_list()
 
-    def play(self):
-        if not self._ensure_engine():
-            return
-        self.engine.play()
-        self._update_playback_ui_state()
-
-    def pause(self):
-        if not self._ensure_engine():
-            return
-        self.engine.pause()
-        self._update_playback_ui_state()
-
-    def next(self):
-        if not self._ensure_engine():
-            return
+    def _next(self):
+        self._attach_hwnd()
         self.engine.next()
-        self._follow_now_playing()
+        self._refresh_list()
 
-    def prev(self):
-        if not self._ensure_engine():
-            return
+    def _prev(self):
+        self._attach_hwnd()
         self.engine.prev()
-        self._follow_now_playing()
+        self._refresh_list()
 
-    def set_volume(self, value):
-        try:
-            vol = float(value)
-        except (TypeError, ValueError):
+    def _update_transport(self):
+        self.play_btn.setText("Pause" if self.engine.is_playing() else "Play")
+        playlist = getattr(self.engine, "playlist", None)
+        index = getattr(self.engine, "index", -1)
+        self.prev_btn.setEnabled(bool(playlist) and index > 0)
+        self.next_btn.setEnabled(bool(playlist) and index + 1 < len(playlist))
+
+    def _remove(self):
+        item = self.list.currentItem()
+        if item is None:
             return
-        vol = max(0.0, min(1.0, vol))
-        self._preferred_volume = vol
-        if self.engine is not None:
-            self.engine.set_volume(vol)
+        self.engine.remove_track(item.data(Qt.ItemDataRole.UserRole))
+        self._refresh_list()
 
-    def _on_volume_release(self, _event=None):
-        self.set_volume(self.volume.get())
+    def _seek_released(self):
+        length = self.engine.get_length() or 0
+        if length > 0:
+            self.engine.seek((self.seek.value() / 1000.0) * length)
+        self._seeking = False
 
-    # ── Repeat ────────────────────────────────────────────────
-
-    def toggle_repeat(self):
-        if not self._ensure_engine():
-            return
-        modes = ["off", "all", "one"]
-        next_mode = modes[(modes.index(self.engine.repeat_mode) + 1) % len(modes)]
-        self.engine.repeat_mode = next_mode
-
-        if next_mode == "off":
-            self.repeat_btn.configure(**cool_button_kwargs(width=130, text="🔁  Repeat"))
-        elif next_mode == "all":
-            self.repeat_btn.configure(
-                text="🔁  Repeat All", fg_color=theme.ACCENT,
-                hover_color=theme.ACCENT_HOVER, text_color="#0b0d10",
-                border_color=theme.ACCENT,
-            )
-        else:
-            self.repeat_btn.configure(
-                text="🔂  Repeat One", fg_color=theme.SUCCESS,
-                hover_color=theme.SUCCESS, text_color="#0b0d10",
-                border_color=theme.SUCCESS,
-            )
-
-    # ── Highlight ─────────────────────────────────────────────
-
-    def _ensure_active_track_visible(self, *, force=False):
-        """Jump to the library page showing the currently playing track."""
-        if not self._engine_ready or self.engine is None:
-            return
-        idx = self._resolve_now_playing_browse_index()
-        if idx < 0 or not len(self._result_ids):
-            self._refresh_now_playing_list_hint()
-            return
-
-        self.active_index = idx
-        if not force and idx == self._last_followed_index:
-            self._highlight_active(force=True)
-            self._refresh_now_playing_list_hint()
-            return
-
-        self._last_followed_index = idx
-        target_page = idx // PAGE_SIZE
-        if target_page != self._page:
-            self._follow_scroll_idx = idx
-            self._page = target_page
-            self._hide_song_list_for_follow()
-            self._render_page()
-            return
-
-        self._highlight_active(force=True)
-        self._schedule_scroll_to_now_playing()
-        self._refresh_now_playing_list_hint()
-
-    def _hide_song_list_for_follow(self) -> None:
-        if self._song_list_hidden_for_follow:
-            return
-        self.song_buttons_frame.pack_forget()
-        self._song_list_hidden_for_follow = True
-
-    def _show_song_list_after_follow(self) -> None:
-        if not self._song_list_hidden_for_follow:
-            return
-        self.song_buttons_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
-        self._song_list_hidden_for_follow = False
-
-    def _finish_follow_scroll(self) -> None:
-        """Scroll to the playing row while hidden, then reveal the list once."""
-        self._scroll_active_row_into_view()
-        self.update_idletasks()
-        self._scroll_active_row_into_view()
-        self._follow_scroll_idx = None
-        self._show_song_list_after_follow()
-
-    def _schedule_scroll_to_now_playing(self) -> None:
-        """Scroll the list so the now-playing row is visible near the top."""
-        self._scroll_retry_seq += 1
-        seq = self._scroll_retry_seq
-
-        def retry(delay_ms: int):
-            def run():
-                if seq != self._scroll_retry_seq:
-                    return
-                self._scroll_active_row_into_view()
-            self.after(delay_ms, run)
-
-        if self._scroll_active_row_into_view():
-            return
-        retry(50)
-
-    def _scroll_active_row_into_view(self) -> bool:
-        """Scroll the song list so the active row sits near the top of the viewport."""
-        idx = self._resolve_now_playing_browse_index()
-        if idx < 0:
-            idx = self.active_index
-        if idx < 0:
-            return False
-
-        page_start = getattr(self, "_render_page_start", 0)
-        page_len = len(getattr(self, "_render_page_ids", ()))
-        if page_len and not (page_start <= idx < page_start + page_len):
-            return False
-
-        sf = self.song_buttons_frame
-        canvas = getattr(sf, "_parent_canvas", None)
-        if canvas is None:
-            return False
-
-        target_row = None
-        for global_index, btn in self.row_widgets:
-            if global_index == idx:
-                target_row = btn.master
-                break
-
-        try:
-            sf.update_idletasks()
-            canvas.update_idletasks()
-            bbox = canvas.bbox("all")
-            if bbox:
-                canvas.configure(scrollregion=bbox)
-
-            inner_h = max(1, sf.winfo_reqheight())
-            view_h = max(1, canvas.winfo_height())
-            if inner_h <= view_h:
-                return target_row is not None
-
-            if target_row is not None and target_row.winfo_exists():
-                target_row.update_idletasks()
-                y = max(0, int(target_row.winfo_y()))
-            else:
-                y = max(0, (idx - page_start) * _ROW_SCROLL_HEIGHT)
-
-            window = view_h / inner_h
-            pad = 6
-            new_top = max(0.0, min(1.0 - window, (y - pad) / inner_h))
-            canvas.yview_moveto(new_top)
-            return target_row is not None
-        except Exception:
-            return False
-
-    def _row_label(self, global_index: int, meta, *, playing: bool) -> str:
-        text = _fmt_row(meta, None)
-        if playing:
-            return f"▶  {text}"
-        return f"{global_index + 1}.  {text}"
-
-    def _highlight_active(self, *, force=False):
-        browse_idx = self._resolve_now_playing_browse_index()
-        if browse_idx >= 0:
-            self.active_index = browse_idx
-        if not force and self._last_highlighted_index == browse_idx:
-            return
-        if browse_idx < 0:
-            self._last_highlighted_index = -1
-            inactive_kw = dict(
-                fg_color="transparent",
-                hover_color=theme.PANEL_HOVER,
-                text_color=theme.TEXT,
-                font=("Segoe UI", 13),
-            )
-            page_start = getattr(self, "_render_page_start", 0)
-            metas = getattr(self, "_render_page_metas", {})
-            page_ids = getattr(self, "_render_page_ids", [])
-            for global_index, btn in self.row_widgets:
-                offset = global_index - page_start
-                meta = metas.get(page_ids[offset]) if 0 <= offset < len(page_ids) else None
-                if meta is not None:
-                    btn.configure(text=self._row_label(global_index, meta, playing=False), **inactive_kw)
-                else:
-                    btn.configure(**inactive_kw)
-                btn.master.configure(border_color=theme.BORDER)
-            return
-
-        self._last_highlighted_index = browse_idx
-        active_kw = selected_track_kwargs()
-        inactive_kw = dict(
-            fg_color="transparent",
-            hover_color=theme.PANEL_HOVER,
-            text_color=theme.TEXT,
-            font=("Segoe UI", 13),
-        )
-        page_start = getattr(self, "_render_page_start", 0)
-        metas = getattr(self, "_render_page_metas", {})
-        page_ids = getattr(self, "_render_page_ids", [])
-        for global_index, btn in self.row_widgets:
-            offset = global_index - page_start
-            meta = metas.get(page_ids[offset]) if 0 <= offset < len(page_ids) else None
-            if global_index == browse_idx:
-                if meta is not None:
-                    btn.configure(text=self._row_label(global_index, meta, playing=True), **active_kw)
-                else:
-                    btn.configure(**active_kw)
-                btn.master.configure(border_color=highlight_border())
-            else:
-                if meta is not None:
-                    btn.configure(text=self._row_label(global_index, meta, playing=False), **inactive_kw)
-                else:
-                    btn.configure(**inactive_kw)
-                btn.master.configure(border_color=theme.BORDER)
-
-    def _engine_queue_matches_browse(self) -> bool:
-        """True when the engine queue is the same library list we're browsing."""
-        if not self.engine:
-            return False
-        playlist = self.engine.playlist
-        if not isinstance(playlist, LazyPlaylist):
-            return False
-        if playlist.ids is self._result_ids:
-            return True
-        cached = getattr(self.manager, "music_library_ids", None)
-        if cached is not None and playlist.ids is cached and self._result_ids is cached:
-            return True
-        if (
-            cached is not None
-            and self._result_ids is cached
-            and len(playlist.ids) == len(cached)
-        ):
-            return True
-        return False
-
-    def _current_queue_is(self, ids):
-        if not self.engine:
-            return False
-        playlist = self.engine.playlist
-        return getattr(playlist, "ids", None) is ids
-
-    # ── NEW: Unified UI Playback State Updater ────────────────
-
-    def _update_playback_ui_state(self):
-        if not self._engine_ready or self.engine is None:
-            if hasattr(self, "play_pause_btn"):
-                self.play_pause_btn.configure(text="▶")
-            return
-
-        current_engine_index = self.engine.index
-        is_playing = self.engine.is_playing()
-        engine_state = self.engine.get_state()
-        prev_engine_idx = self._last_engine_index_tracked
-        current_song_id = self._now_playing_song_id()
-
-        browse_idx = self._resolve_now_playing_browse_index()
-        track_changed = (
-            current_song_id != self._last_tracked_song_id
-            or current_engine_index != prev_engine_idx
-        )
-        if browse_idx != self.active_index or track_changed:
-            self.active_index = browse_idx
-            if browse_idx >= 0:
-                if track_changed:
-                    self._last_followed_index = -1
-                self._ensure_active_track_visible(force=track_changed)
-            else:
-                self._highlight_active(force=True)
-        elif browse_idx >= 0:
-            self._highlight_active()
-
-        self._last_engine_index_tracked = current_engine_index
-        self._last_tracked_song_id = current_song_id
-        self._refresh_now_playing_list_hint()
-
-        if self.engine.index >= 0 and self.engine.playlist:
-            meta = self.engine.get_current_meta()
-            if meta:
-                self.current_song_label.configure(text=_fmt_row(meta, None))
-            else:
-                try:
-                    path = self.engine.playlist[self.engine.index]
-                    self.current_song_label.configure(text=os.path.basename(path))
-                except Exception:
-                    self.current_song_label.configure(text="Nothing playing")
-        else:
-            self.current_song_label.configure(text="Nothing playing")
-
-        if hasattr(self, "play_pause_btn"):
-            self.play_pause_btn.configure(text="⏸" if is_playing else "▶")
-
-        if is_playing:
-            if not self._discord_rpc_active or prev_engine_idx != current_engine_index:
-                self.update_discord_song(force_update=True)
-        elif engine_state == State.Paused:
-            if self._discord_rpc_active:
-                self.update_discord_song(force_clear=True)
-        elif (current_engine_index == -1 and not self.engine.playlist) or \
-             (current_engine_index == -1 and self.engine.playlist and engine_state == State.Stopped):
-            if self._discord_rpc_active:
-                self.update_discord_song(force_clear=True)
-        elif engine_state == State.Ended:
-            if self._discord_rpc_active:
-                self.update_discord_song(force_clear=True)
-
-    # ──────────────────────────────────────────────────────────
-
-    def update_discord_song(self, force_clear=False, force_update=False):
-        try:
-            discord_service = self.manager.container.discord_service
-
-            if force_clear:
-                if self._discord_rpc_active:
-                    discord_service.clear()
-                    self._discord_rpc_active = False
-                return
-
-            if not self._engine_ready or self.engine is None:
-                return
-
-            if self.engine.index < 0 or not self.engine.is_playing():
-                if self._discord_rpc_active:
-                    discord_service.clear()
-                    self._discord_rpc_active = False
-                return
-
-            meta = self.engine.get_current_meta()
-            song = _fmt_row(meta, self.engine.playlist[self.engine.index]) if meta \
-                else os.path.basename(self.engine.playlist[self.engine.index])
-
-            if force_update or not self._discord_rpc_active or \
-               (self._discord_rpc_active and discord_service.last_details != "🎵 Listening to Music") or \
-               (self._discord_rpc_active and discord_service.last_state != song):
-                discord_service.update("🎵 Listening to Music", song)
-                self._discord_rpc_active = True
-
-        except Exception as e:
-            print(f"Error updating Discord RPC: {e}")
-            if self._discord_rpc_active:
-                try:
-                    discord_service.clear()
-                except Exception:
-                    pass
-                self._discord_rpc_active = False
+    def _tick_ui(self):
+        pos = self.engine.get_time()
+        length = self.engine.get_length()
+        self.time_lab.setText(_fmt_time(pos))
+        self.len_lab.setText(_fmt_time(length))
+        if not self._seeking and length > 0:
+            self.seek.blockSignals(True)
+            self.seek.setValue(int((pos / length) * 1000))
+            self.seek.blockSignals(False)
+        self._update_transport()

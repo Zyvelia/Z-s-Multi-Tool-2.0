@@ -1,305 +1,265 @@
-# modules/Icon Favicon Generator/ui.py
-#
-# Load an image, pick which outputs you want (multi-size .ico, the
-# standard favicon/app-icon PNG sizes, a site.webmanifest), pick a
-# destination folder, and generate the whole set in one go.
+"""Qt Icon/Favicon Generator — load image, fit/fill, generate icon set."""
 
 from __future__ import annotations
 
+import importlib
 import os
-import subprocess
-import sys
 import threading
-from tkinter import filedialog, messagebox
 
-import customtkinter as ctk
+from io import BytesIO
+
 from PIL import Image
+from PySide6.QtCore import QBuffer, Qt, QTimer
+from PySide6.QtGui import QPixmap
+from PySide6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QFileDialog,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPlainTextEdit,
+    QPushButton,
+    QRadioButton,
+    QVBoxLayout,
+    QWidget,
+)
 
-from .generator import HTML_SNIPPET, IconGeneratorError, generate
-from core import theme
-
-SUCCESS = "#4caf7d"
+generator = importlib.import_module("modules.Design.Icon Favicon Generator.generator")
 
 PREVIEW_MAX = 220
 
 
-class IconFaviconGeneratorPage(ctk.CTkFrame):
+def _pil_to_pixmap(image) -> QPixmap:
+    raw = BytesIO()
+    image.save(raw, format="PNG")
+    buf = QBuffer()
+    buf.setData(raw.getvalue())
+    pix = QPixmap()
+    pix.loadFromData(buf.data())
+    return pix
 
-    def __init__(self, master, manager=None, **kwargs):
-        super().__init__(master, fg_color=theme.BG, **kwargs)
+
+def _open_folder(path):
+    try:
+        os.makedirs(path, exist_ok=True)
+        os.startfile(path)
+    except Exception as exc:
+        QMessageBox.warning(None, "Couldn't open folder", str(exc))
+
+
+class IconFaviconGeneratorPage(QWidget):
+    def __init__(self, parent, manager):
+        super().__init__(parent)
         self.manager = manager
-        self.root_widget = manager.container if manager is not None else master
+        self.source_path = None
+        self.output_dir = None
+        self._last_written = []
 
-        self.source_path: str | None = None
-        self.output_dir: str | None = None
-        self._preview_img = None
-        self._last_written: list[str] = []
+        root = QHBoxLayout(self)
+        left = QFrame()
+        left.setObjectName("Panel")
+        ll = QVBoxLayout(left)
+        title = QLabel("Icon / Favicon Generator")
+        title.setObjectName("AccentTitle")
+        ll.addWidget(title)
 
-        self._build_layout()
+        self.preview = QLabel("No image loaded")
+        self.preview.setObjectName("Muted")
+        self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview.setMinimumHeight(PREVIEW_MAX)
+        ll.addWidget(self.preview)
 
-    # ------------------------------------------------------------------ UI
+        choose = QPushButton("Choose source image…")
+        choose.setObjectName("Primary")
+        choose.clicked.connect(self._choose_source)
+        ll.addWidget(choose)
+        self.source_label = QLabel("")
+        self.source_label.setObjectName("Muted")
+        self.source_label.setWordWrap(True)
+        ll.addWidget(self.source_label)
 
-    def _build_layout(self) -> None:
-        self.grid_columnconfigure(0, weight=0, minsize=360)
-        self.grid_columnconfigure(1, weight=1)
-        self.grid_rowconfigure(1, weight=1)
+        fit_lab = QLabel("Non-square images")
+        fit_lab.setObjectName("CardTitle")
+        ll.addWidget(fit_lab)
+        self.fit_radio = QRadioButton("Fit (pad with transparency)")
+        self.fill_radio = QRadioButton("Fill (crop to square)")
+        self.fit_radio.setChecked(True)
+        ll.addWidget(self.fit_radio)
+        ll.addWidget(self.fill_radio)
 
-        header = ctk.CTkLabel(
-            self, text="Icon / Favicon Generator",
-            font=ctk.CTkFont(size=20, weight="bold"), text_color="white",
-        )
-        header.grid(row=0, column=0, columnspan=2, sticky="w", padx=16, pady=(16, 4))
+        out_lab = QLabel("Outputs")
+        out_lab.setObjectName("CardTitle")
+        ll.addWidget(out_lab)
+        self.make_png = QCheckBox("PNG set (16 to 512px, incl. apple-touch-icon)")
+        self.make_ico = QCheckBox("favicon.ico (16/32/48px multi-size)")
+        self.make_manifest = QCheckBox("site.webmanifest")
+        self.make_png.setChecked(True)
+        self.make_ico.setChecked(True)
+        self.make_manifest.setChecked(True)
+        ll.addWidget(self.make_png)
+        ll.addWidget(self.make_ico)
+        ll.addWidget(self.make_manifest)
 
-        # ---------------------------------------------------------- left
-        left = ctk.CTkScrollableFrame(self, fg_color=theme.PANEL, corner_radius=10)
-        left.grid(row=1, column=0, sticky="nsew", padx=(16, 8), pady=(0, 16))
-        left.grid_columnconfigure(0, weight=1)
+        self.app_name = QLineEdit()
+        self.app_name.setPlaceholderText("App name (used in manifest)")
+        ll.addWidget(self.app_name)
 
-        self.preview = ctk.CTkLabel(
-            left, text="No image loaded", height=PREVIEW_MAX, corner_radius=8,
-            fg_color=theme.PANEL_2, text_color=theme.MUTED,
-        )
-        self.preview.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 8))
+        out_btn = QPushButton("Choose output folder…")
+        out_btn.clicked.connect(self._choose_output)
+        ll.addWidget(out_btn)
+        self.output_label = QLabel("")
+        self.output_label.setObjectName("Muted")
+        self.output_label.setWordWrap(True)
+        ll.addWidget(self.output_label)
 
-        ctk.CTkButton(
-            left, text="Choose Source Image...", fg_color=theme.ACCENT, hover_color="#3d8fe0",
-            command=self._choose_source,
-        ).grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 4))
+        self.generate_btn = QPushButton("Generate")
+        self.generate_btn.setObjectName("Primary")
+        self.generate_btn.setEnabled(False)
+        self.generate_btn.clicked.connect(self._generate)
+        ll.addWidget(self.generate_btn)
+        self.status = QLabel("")
+        self.status.setObjectName("Muted")
+        self.status.setWordWrap(True)
+        ll.addWidget(self.status)
+        ll.addStretch(1)
 
-        self.source_label = ctk.CTkLabel(left, text="", text_color=theme.MUTED, wraplength=320, justify="left")
-        self.source_label.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 10))
+        right = QFrame()
+        right.setObjectName("Panel")
+        rl = QVBoxLayout(right)
+        top = QHBoxLayout()
+        gen_lab = QLabel("Generated files")
+        gen_lab.setObjectName("CardTitle")
+        self.open_btn = QPushButton("Open folder")
+        self.open_btn.setEnabled(False)
+        self.open_btn.clicked.connect(lambda: _open_folder(self.output_dir) if self.output_dir else None)
+        top.addWidget(gen_lab)
+        top.addStretch(1)
+        top.addWidget(self.open_btn)
+        rl.addLayout(top)
+        self.results = QLabel("Choose a source image and an output folder, then hit Generate.")
+        self.results.setObjectName("Muted")
+        self.results.setWordWrap(True)
+        rl.addWidget(self.results)
+        snippet_lab = QLabel("HTML <head> snippet")
+        snippet_lab.setObjectName("Muted")
+        rl.addWidget(snippet_lab)
+        self.snippet = QPlainTextEdit(generator.HTML_SNIPPET)
+        self.snippet.setReadOnly(True)
+        self.snippet.setMaximumHeight(130)
+        rl.addWidget(self.snippet)
+        copy_snip = QPushButton("Copy snippet")
+        copy_snip.clicked.connect(self._copy_snippet)
+        rl.addWidget(copy_snip, alignment=Qt.AlignmentFlag.AlignRight)
+        rl.addStretch(1)
 
-        ctk.CTkLabel(left, text="Non-square images", text_color=theme.MUTED,
-                     font=ctk.CTkFont(weight="bold")).grid(row=3, column=0, sticky="w", padx=12, pady=(4, 2))
+        root.addWidget(left, 0)
+        root.addWidget(right, 1)
 
-        self.fit_mode_var = ctk.StringVar(value="fit")
-        mode_row = ctk.CTkFrame(left, fg_color="transparent")
-        mode_row.grid(row=4, column=0, sticky="ew", padx=12, pady=(0, 10))
-        ctk.CTkRadioButton(
-            mode_row, text="Fit (pad with transparency)", variable=self.fit_mode_var, value="fit",
-            fg_color=theme.ACCENT,
-        ).pack(anchor="w", pady=2)
-        ctk.CTkRadioButton(
-            mode_row, text="Fill (crop to square)", variable=self.fit_mode_var, value="fill",
-            fg_color=theme.ACCENT,
-        ).pack(anchor="w", pady=2)
+    def _update_ready(self):
+        self.generate_btn.setEnabled(bool(self.source_path and self.output_dir))
 
-        ctk.CTkLabel(left, text="Outputs", text_color=theme.MUTED,
-                     font=ctk.CTkFont(weight="bold")).grid(row=5, column=0, sticky="w", padx=12, pady=(4, 2))
-
-        self.make_png_var = ctk.BooleanVar(value=True)
-        self.make_ico_var = ctk.BooleanVar(value=True)
-        self.make_manifest_var = ctk.BooleanVar(value=True)
-
-        ctk.CTkCheckBox(
-            left, text="PNG set (16 to 512px, incl. apple-touch-icon)",
-            variable=self.make_png_var, fg_color=theme.ACCENT,
-        ).grid(row=6, column=0, sticky="w", padx=12, pady=2)
-        ctk.CTkCheckBox(
-            left, text="favicon.ico (16/32/48px multi-size)",
-            variable=self.make_ico_var, fg_color=theme.ACCENT,
-        ).grid(row=7, column=0, sticky="w", padx=12, pady=2)
-        ctk.CTkCheckBox(
-            left, text="site.webmanifest",
-            variable=self.make_manifest_var, fg_color=theme.ACCENT,
-        ).grid(row=8, column=0, sticky="w", padx=12, pady=(2, 10))
-
-        self.app_name_entry = ctk.CTkEntry(left, placeholder_text="App name (used in manifest)", fg_color=theme.PANEL_2)
-        self.app_name_entry.grid(row=9, column=0, sticky="ew", padx=12, pady=(0, 10))
-
-        ctk.CTkButton(
-            left, text="Choose Output Folder...", fg_color=theme.PANEL_2, hover_color=theme.ACCENT,
-            command=self._choose_output,
-        ).grid(row=10, column=0, sticky="ew", padx=12, pady=(0, 4))
-
-        self.output_label = ctk.CTkLabel(left, text="", text_color=theme.MUTED, wraplength=320, justify="left")
-        self.output_label.grid(row=11, column=0, sticky="ew", padx=12, pady=(0, 10))
-
-        self.generate_btn = ctk.CTkButton(
-            left, text="Generate", fg_color=theme.ACCENT, hover_color="#3d8fe0",
-            command=self._generate_clicked, state="disabled",
-        )
-        self.generate_btn.grid(row=12, column=0, sticky="ew", padx=12, pady=(4, 4))
-
-        self.status_label = ctk.CTkLabel(left, text="", text_color=theme.MUTED, wraplength=320, justify="left")
-        self.status_label.grid(row=13, column=0, sticky="ew", padx=12, pady=(0, 12))
-
-        # --------------------------------------------------------- right
-        right = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=10)
-        right.grid(row=1, column=1, sticky="nsew", padx=(8, 16), pady=(0, 16))
-        right.grid_columnconfigure(0, weight=1)
-        right.grid_rowconfigure(1, weight=1)
-
-        top_row = ctk.CTkFrame(right, fg_color="transparent")
-        top_row.grid(row=0, column=0, sticky="ew", padx=16, pady=(16, 8))
-        top_row.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(top_row, text="Generated Files", text_color=theme.MUTED,
-                     font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, sticky="w")
-
-        self.open_folder_btn = ctk.CTkButton(
-            top_row, text="Open Folder", width=110, fg_color=theme.PANEL_2, hover_color=theme.ACCENT,
-            command=self._open_output_folder, state="disabled",
-        )
-        self.open_folder_btn.grid(row=0, column=1, sticky="e")
-
-        self.results_frame = ctk.CTkScrollableFrame(right, fg_color="transparent")
-        self.results_frame.grid(row=1, column=0, sticky="nsew", padx=16, pady=(0, 8))
-        self.results_frame.grid_columnconfigure(0, weight=1)
-
-        self._render_empty_results()
-
-        snippet_label = ctk.CTkLabel(
-            right, text="HTML <head> snippet (copied files use these exact names):",
-            text_color=theme.MUTED, anchor="w",
-        )
-        snippet_label.grid(row=2, column=0, sticky="ew", padx=16, pady=(4, 2))
-
-        self.snippet_box = ctk.CTkTextbox(right, height=110, fg_color=theme.PANEL_2, text_color=theme.MUTED)
-        self.snippet_box.grid(row=3, column=0, sticky="ew", padx=16, pady=(0, 16))
-        self.snippet_box.insert("1.0", HTML_SNIPPET)
-        self.snippet_box.configure(state="disabled")
-
-        ctk.CTkButton(
-            right, text="Copy Snippet", width=110, fg_color=theme.PANEL_2, hover_color=theme.ACCENT,
-            command=lambda: self._copy_text(HTML_SNIPPET),
-        ).grid(row=4, column=0, sticky="e", padx=16, pady=(0, 16))
-
-    # ---------------------------------------------------------------- image
-
-    def _choose_source(self) -> None:
-        path = filedialog.askopenfilename(
-            title="Choose a source image",
-            filetypes=[
-                ("Images", "*.png *.jpg *.jpeg *.bmp *.gif *.webp *.tiff"),
-                ("All files", "*.*"),
-            ],
+    def _choose_source(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Choose a source image",
+            "",
+            "Images (*.png *.jpg *.jpeg *.bmp *.gif *.webp *.tiff);;All files (*.*)",
         )
         if not path:
             return
-
         try:
             img = Image.open(path)
             img.verify()
             img = Image.open(path).convert("RGBA")
-        except Exception as e:
-            messagebox.showerror("Icon/Favicon Generator", f"Couldn't open that image:\n{e}")
+        except Exception as exc:
+            QMessageBox.warning(self, "Icon/Favicon Generator", f"Couldn't open that image:\n{exc}")
             return
-
         self.source_path = path
-        self.source_label.configure(text=os.path.basename(path))
-        self._update_generate_state()
-        self.status_label.configure(text="")
-
+        self.source_label.setText(os.path.basename(path))
+        self._update_ready()
+        self.status.setText("")
         thumb = img.copy()
         thumb.thumbnail((PREVIEW_MAX, PREVIEW_MAX))
-        self._preview_img = ctk.CTkImage(light_image=thumb, dark_image=thumb, size=thumb.size)
-        self.preview.configure(image=self._preview_img, text="")
+        self.preview.setPixmap(_pil_to_pixmap(thumb))
+        self.preview.setObjectName("")
 
-    def _choose_output(self) -> None:
-        chosen = filedialog.askdirectory(title="Choose output folder")
+    def _choose_output(self):
+        chosen = QFileDialog.getExistingDirectory(self, "Choose output folder")
         if not chosen:
             return
         self.output_dir = chosen
-        self.output_label.configure(text=chosen)
-        self._update_generate_state()
+        self.output_label.setText(chosen)
+        self._update_ready()
 
-    def _update_generate_state(self) -> None:
-        ready = bool(self.source_path and self.output_dir)
-        self.generate_btn.configure(state="normal" if ready else "disabled")
-
-    # ------------------------------------------------------------ generate
-
-    def _generate_clicked(self) -> None:
+    def _generate(self):
         if not (self.source_path and self.output_dir):
             return
-
-        if not (self.make_png_var.get() or self.make_ico_var.get() or self.make_manifest_var.get()):
-            self.status_label.configure(text="Pick at least one output.", text_color=theme.DANGER)
+        if not (self.make_png.isChecked() or self.make_ico.isChecked() or self.make_manifest.isChecked()):
+            self.status.setText("Pick at least one output.")
+            self.status.setObjectName("Danger")
+            self.status.style().unpolish(self.status)
+            self.status.style().polish(self.status)
             return
-
-        self.generate_btn.configure(state="disabled", text="Generating...")
-        self.status_label.configure(text="Generating...", text_color=theme.MUTED)
-
+        self.generate_btn.setEnabled(False)
+        self.generate_btn.setText("Generating…")
+        self.status.setObjectName("Muted")
+        self.status.setText("Generating…")
         source_path = self.source_path
         output_dir = self.output_dir
-        fit_mode = self.fit_mode_var.get()
-        make_png = self.make_png_var.get()
-        make_ico = self.make_ico_var.get()
-        make_manifest = self.make_manifest_var.get()
-        app_name = self.app_name_entry.get().strip() or "App"
+        fit_mode = "fill" if self.fill_radio.isChecked() else "fit"
+        make_png = self.make_png.isChecked()
+        make_ico = self.make_ico.isChecked()
+        make_manifest = self.make_manifest.isChecked()
+        app_name = self.app_name.text().strip() or "App"
 
         def worker():
             try:
-                written = generate(
-                    source_path, output_dir,
+                written = generator.generate(
+                    source_path,
+                    output_dir,
                     fit_mode=fit_mode,
-                    make_png=make_png, make_ico=make_ico, make_manifest=make_manifest,
+                    make_png=make_png,
+                    make_ico=make_ico,
+                    make_manifest=make_manifest,
                     app_name=app_name,
                 )
                 error = None
-            except IconGeneratorError as e:
+            except generator.IconGeneratorError as exc:
                 written = None
-                error = str(e)
-
-            self.after(0, lambda: self._on_generated(written, error))
+                error = str(exc)
+            QTimer.singleShot(0, lambda: self._on_generated(written, error))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_generated(self, written, error) -> None:
-        self.generate_btn.configure(state="normal", text="Generate")
-
+    def _on_generated(self, written, error):
+        self.generate_btn.setEnabled(True)
+        self.generate_btn.setText("Generate")
         if error:
-            self.status_label.configure(text=error, text_color=theme.DANGER)
+            self.status.setText(error)
+            self.status.setObjectName("Danger")
+            self.status.style().unpolish(self.status)
+            self.status.style().polish(self.status)
             return
-
-        self._last_written = written
-        self.status_label.configure(text=f"Generated {len(written)} file(s).", text_color=SUCCESS)
-        self.open_folder_btn.configure(state="normal")
-        self._render_results(written)
-
-    # --------------------------------------------------------------- render
-
-    def _render_empty_results(self) -> None:
-        for child in self.results_frame.winfo_children():
-            child.destroy()
-        ctk.CTkLabel(
-            self.results_frame,
-            text="Choose a source image and an output folder, then hit Generate.",
-            text_color=theme.MUTED, wraplength=420, justify="left",
-        ).grid(row=0, column=0, sticky="w", padx=4, pady=8)
-
-    def _render_results(self, written: list[str]) -> None:
-        for child in self.results_frame.winfo_children():
-            child.destroy()
-
-        if not written:
-            self._render_empty_results()
+        self._last_written = written or []
+        self.status.setText(f"Generated {len(self._last_written)} file(s).")
+        self.status.setObjectName("Success")
+        self.status.style().unpolish(self.status)
+        self.status.style().polish(self.status)
+        self.open_btn.setEnabled(True)
+        if not self._last_written:
+            self.results.setText("Choose a source image and an output folder, then hit Generate.")
             return
-
-        for row, path in enumerate(written):
+        lines = []
+        for path in self._last_written:
             size_kb = os.path.getsize(path) / 1024
-            ctk.CTkLabel(
-                self.results_frame, text=f"✅ {os.path.basename(path)}   ({size_kb:.1f} KB)",
-                text_color=theme.MUTED, anchor="w",
-            ).grid(row=row, column=0, sticky="w", padx=4, pady=3)
+            lines.append(f"{os.path.basename(path)}  ({size_kb:.1f} KB)")
+        self.results.setText("\n".join(lines))
+        self.results.setObjectName("")
 
-    # --------------------------------------------------------------- actions
-
-    def _open_output_folder(self) -> None:
-        if not self.output_dir:
-            return
-        try:
-            if sys.platform.startswith("win"):
-                os.startfile(self.output_dir)
-            elif sys.platform == "darwin":
-                subprocess.Popen(["open", self.output_dir])
-            else:
-                subprocess.Popen(["xdg-open", self.output_dir])
-        except Exception as e:
-            messagebox.showerror("Icon/Favicon Generator", f"Couldn't open the folder:\n{e}")
-
-    def _copy_text(self, text: str) -> None:
-        self.root_widget.clipboard_clear()
-        self.root_widget.clipboard_append(text)
-        self.status_label.configure(text="Snippet copied.", text_color=theme.MUTED)
+    def _copy_snippet(self):
+        QApplication.clipboard().setText(generator.HTML_SNIPPET)
+        self.status.setText("Snippet copied.")
+        self.status.setObjectName("Muted")

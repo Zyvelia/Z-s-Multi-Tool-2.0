@@ -1,382 +1,218 @@
+"""Qt Network Auditor — ARP discover, nmap scan, threat report."""
+
+from __future__ import annotations
+
 import threading
-import customtkinter as ctk
 
-from .scanner import NetworkScanner, NetworkScannerError
-from .port_scanner import PortScanner, PortScannerError
-from .threat_report import ThreatReporter
-from core import theme
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtWidgets import (
+    QComboBox,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QScrollArea,
+    QSplitter,
+    QVBoxLayout,
+    QWidget,
+)
 
-# ── Palette (matches app-wide theme) ─────────────────────
-# ─────────────────────────────────────────────────────────
-
-# Severity → color mapping
-SEVERITY_COLORS = {
-    "critical": "#ff4444",
-    "high":     "#ff8c42",
-    "medium":   "#f5c542",
-    "low":      "#4ea1ff",
-    "info":     "#9aa4b2",
-}
+from modules.Network.network_auditor.port_scanner import PortScanner, PortScannerError
+from modules.Network.network_auditor.scanner import NetworkScanner, NetworkScannerError
+from modules.Network.network_auditor.threat_report import ThreatReporter
 
 
-class NetworkAuditorUI(ctk.CTkFrame):
-
+class NetworkAuditorUI(QWidget):
     def __init__(self, parent, manager):
-        super().__init__(parent, fg_color=theme.BG)
+        super().__init__(parent)
         self.manager = manager
         self.scanner = NetworkScanner()
         self.port_scanner = PortScanner()
         self.threat_reporter = ThreatReporter()
         self.devices = []
-        self.selected_device = None
-        self.build_ui()
-        self.auto_detect_network()
-        self._check_nmap_available()
 
-    # ── widget helpers ───────────────────────────────────
+        root = QVBoxLayout(self)
+        header = QHBoxLayout()
+        title = QLabel("Network Auditor")
+        title.setObjectName("AccentTitle")
+        self.network = QLineEdit()
+        self.network.setPlaceholderText("e.g. 192.168.1.0/24")
+        detect = QPushButton("Auto detect")
+        detect.clicked.connect(self.auto_detect_network)
+        discover = QPushButton("Discover")
+        discover.setObjectName("Primary")
+        discover.clicked.connect(self.discover_devices)
+        header.addWidget(title)
+        header.addWidget(self.network, 1)
+        header.addWidget(detect)
+        header.addWidget(discover)
+        root.addLayout(header)
 
-    def _btn(self, parent, text, cmd=None, width=120,
-             fg=theme.ACCENT, hover="#2f7fd6", tc=theme.BG, **kw):
-        return ctk.CTkButton(
-            parent, text=text, command=cmd, width=width,
-            fg_color=fg, hover_color=hover, text_color=tc,
-            corner_radius=6, font=(theme.FONT_FAMILY, 12, "bold"), **kw
-        )
+        split = QSplitter(Qt.Orientation.Horizontal)
+        left = QFrame()
+        left.setObjectName("Panel")
+        ll = QVBoxLayout(left)
+        devices_title = QLabel("Devices")
+        devices_title.setObjectName("CardTitle")
+        ll.addWidget(devices_title)
+        hint = QLabel("Discovered devices on the network.")
+        hint.setObjectName("Muted")
+        hint.setWordWrap(True)
+        ll.addWidget(hint)
+        self.device_pick = QComboBox()
+        self.device_pick.addItem("No devices found")
+        ll.addWidget(self.device_pick)
+        scan = QPushButton("Scan device")
+        scan.setObjectName("Primary")
+        scan.clicked.connect(self.scan_selected)
+        ll.addWidget(scan)
+        self.device_count = QLabel("No devices discovered yet.")
+        self.device_count.setObjectName("Muted")
+        ll.addWidget(self.device_count)
+        ll.addStretch(1)
 
-    def _ghost_btn(self, parent, text, cmd=None, width=100, **kw):
-        return ctk.CTkButton(
-            parent, text=text, command=cmd, width=width,
-            fg_color=theme.PANEL_2, hover_color=theme.BORDER,
-            text_color=theme.MUTED, border_width=0,
-            corner_radius=6, font=(theme.FONT_FAMILY, 12), **kw
-        )
+        right = QFrame()
+        right.setObjectName("Panel")
+        rl = QVBoxLayout(right)
+        results_title = QLabel("Scan results")
+        results_title.setObjectName("CardTitle")
+        rl.addWidget(results_title)
+        sub = QLabel("Open ports and threat analysis for the selected device.")
+        sub.setObjectName("Muted")
+        sub.setWordWrap(True)
+        rl.addWidget(sub)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        self.results_host = QWidget()
+        self.results_lay = QVBoxLayout(self.results_host)
+        scroll.setWidget(self.results_host)
+        rl.addWidget(scroll, 1)
+        split.addWidget(left)
+        split.addWidget(right)
+        split.setStretchFactor(1, 2)
+        root.addWidget(split, 1)
 
-    def _label(self, parent, text, size=13, weight="normal",
-               color=theme.MUTED, **kw):
-        return ctk.CTkLabel(
-            parent, text=text, text_color=color,
-            font=(theme.FONT_FAMILY, size, weight), **kw
-        )
-
-    def _section_label(self, parent, text):
-        row = ctk.CTkFrame(parent, fg_color="transparent")
-        row.pack(fill="x", padx=16, pady=(14, 6))
-        ctk.CTkLabel(
-            row, text=text.upper(),
-            text_color=theme.MUTED, font=(theme.FONT_FAMILY, 9, "bold")
-        ).pack(side="left")
-        ctk.CTkFrame(row, height=1, fg_color=theme.BORDER).pack(
-            side="left", fill="x", expand=True, padx=(8, 0))
-
-    # ── layout ───────────────────────────────────────────
-
-    def build_ui(self):
-        self.grid_rowconfigure(1, weight=1)
-        self.grid_columnconfigure(0, weight=1)
-        self._build_header()
-        self._build_main()
-        self._build_status_bar()
-
-    def _build_header(self):
-        bar = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=0)
-        bar.grid(row=0, column=0, sticky="ew")
-        ctk.CTkFrame(bar, height=1, fg_color=theme.BORDER).pack(
-            fill="x", side="bottom")
-
-        inner = ctk.CTkFrame(bar, fg_color="transparent")
-        inner.pack(fill="x", padx=18, pady=12)
-
-        ctk.CTkLabel(
-            inner, text="Network Auditor",
-            text_color=theme.TEXT, font=(theme.FONT_FAMILY, 20, "bold")
-        ).pack(side="left", padx=14)
-
-        # Right: network entry + controls
-        right = ctk.CTkFrame(inner, fg_color="transparent")
-        right.pack(side="right")
-
-        self.network_entry = ctk.CTkEntry(
-            right, width=200,
-            placeholder_text="e.g. 192.168.1.0/24",
-            fg_color=theme.PANEL_2, border_color=theme.BORDER,
-            text_color=theme.TEXT, placeholder_text_color=theme.MUTED,
-            font=(theme.FONT_FAMILY, 12)
-        )
-        self.network_entry.pack(side="left", padx=(0, 8))
-
-        self._ghost_btn(
-            right, "⟳  Auto Detect", width=120,
-            cmd=self.auto_detect_network
-        ).pack(side="left", padx=(0, 8))
-
-        self._btn(
-            right, "🔍  Discover", width=110,
-            cmd=self.discover_devices
-        ).pack(side="left")
-
-    def _build_main(self):
-        main = ctk.CTkFrame(self, fg_color=theme.BG)
-        main.grid(row=1, column=0, sticky="nsew", padx=14, pady=12)
-        main.grid_columnconfigure(0, weight=1)
-        main.grid_columnconfigure(1, weight=2)
-        main.grid_rowconfigure(0, weight=1)
-
-        self._build_left(main)
-        self._build_right(main)
-
-    # ── left: device list ────────────────────────────────
-
-    def _build_left(self, parent):
-        panel = ctk.CTkFrame(parent, fg_color=theme.PANEL,
-                             corner_radius=10, border_width=1,
-                             border_color=theme.BORDER)
-        panel.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-
-        self._label(panel, "Devices",
-                    size=15, weight="bold", color=theme.TEXT).pack(
-            anchor="w", padx=16, pady=(16, 2))
-        self._label(panel, "Discovered devices on the network.",
-                    size=11).pack(anchor="w", padx=16)
-
-        self._section_label(panel, "Select device")
-
-        self.device_dropdown = ctk.CTkOptionMenu(
-            panel, values=["No Devices Found"],
-            fg_color=theme.PANEL_2, button_color=theme.PANEL_2,
-            button_hover_color=theme.BORDER,
-            dropdown_fg_color=theme.PANEL,
-            dropdown_hover_color=theme.PANEL_2,
-            text_color=theme.TEXT, font=(theme.FONT_FAMILY, 12)
-        )
-        self.device_dropdown.pack(fill="x", padx=16, pady=(0, 10))
-
-        self._btn(
-            panel, "⟳  Scan Device",
-            cmd=self.scan_selected
-        ).pack(fill="x", padx=16, pady=(0, 16))
-
-        # Device count badge
-        self._section_label(panel, "Summary")
-
-        self.device_count_label = self._label(
-            panel, "No devices discovered yet.", size=11)
-        self.device_count_label.pack(anchor="w", padx=16, pady=(0, 16))
-
-    # ── right: results ───────────────────────────────────
-
-    def _build_right(self, parent):
-        panel = ctk.CTkFrame(parent, fg_color=theme.PANEL,
-                             corner_radius=10, border_width=1,
-                             border_color=theme.BORDER)
-        panel.grid(row=0, column=1, sticky="nsew")
-        panel.grid_rowconfigure(1, weight=1)
-        panel.grid_columnconfigure(0, weight=1)
-
-        self._label(panel, "Scan Results",
-                    size=15, weight="bold", color=theme.TEXT).pack(
-            anchor="w", padx=16, pady=(16, 2))
-        self._label(panel, "Open ports and threat analysis for the selected device.",
-                    size=11).pack(anchor="w", padx=16)
-
-        # Scrollable results area
-        self.results_scroll = ctk.CTkScrollableFrame(
-            panel, fg_color="transparent",
-            scrollbar_button_color=theme.BORDER,
-            scrollbar_button_hover_color=theme.ACCENT
-        )
-        self.results_scroll.pack(fill="both", expand=True,
-                                 padx=12, pady=(8, 12))
+        self.status = QLabel("Ready")
+        self.status.setObjectName("Muted")
+        root.addWidget(self.status)
 
         self._render_placeholder()
+        self.auto_detect_network()
+        if not PortScanner.is_nmap_available():
+            self.status.setText("Nmap not found — port scanning is disabled until it's installed (nmap.org).")
+
+    def _clear_results(self):
+        while self.results_lay.count():
+            item = self.results_lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
 
     def _render_placeholder(self):
-        for w in self.results_scroll.winfo_children():
-            w.destroy()
-        self._label(
-            self.results_scroll,
-            "Select a device and click  ⟳ Scan Device  to begin.",
-            size=12
-        ).pack(pady=40)
-
-    def _render_results(self, ports, threats):
-        for w in self.results_scroll.winfo_children():
-            w.destroy()
-
-        # ── Open Ports ───────────────────────────────────
-        self._section_label(self.results_scroll, "Open Ports")
-
-        if not ports:
-            self._label(self.results_scroll,
-                        "No open ports found.", size=12).pack(
-                anchor="w", padx=4, pady=(0, 8))
-        else:
-            for port in ports:
-                row = ctk.CTkFrame(
-                    self.results_scroll, fg_color=theme.PANEL_2,
-                    corner_radius=6, border_width=1, border_color=theme.BORDER
-                )
-                row.pack(fill="x", padx=4, pady=3)
-
-                ctk.CTkLabel(
-                    row, text=str(port.port),
-                    text_color=theme.ACCENT, font=(theme.FONT_FAMILY, 12, "bold"),
-                    width=60, anchor="center",
-                    fg_color=theme.BG, corner_radius=4
-                ).pack(side="left", padx=(8, 10), pady=8)
-
-                ctk.CTkLabel(
-                    row, text=port.service,
-                    text_color=theme.TEXT, font=(theme.FONT_FAMILY, 12),
-                    anchor="w"
-                ).pack(side="left", fill="x", expand=True, pady=8)
-
-        # ── Threat Report ─────────────────────────────────
-        self._section_label(self.results_scroll, "Threat Report")
-
-        if not threats:
-            row = ctk.CTkFrame(
-                self.results_scroll, fg_color=theme.PANEL_2,
-                corner_radius=6, border_width=1, border_color=theme.BORDER
-            )
-            row.pack(fill="x", padx=4, pady=3)
-            ctk.CTkLabel(
-                row, text="✓  No threats detected.",
-                text_color="#34d399", font=(theme.FONT_FAMILY, 12, "bold")
-            ).pack(anchor="w", padx=14, pady=12)
-        else:
-            for threat in threats:
-                sev = threat.severity.lower()
-                color = SEVERITY_COLORS.get(sev, theme.MUTED)
-
-                card = ctk.CTkFrame(
-                    self.results_scroll, fg_color=theme.PANEL_2,
-                    corner_radius=8, border_width=1, border_color=theme.BORDER
-                )
-                card.pack(fill="x", padx=4, pady=5)
-
-                # Colored top strip per severity
-                ctk.CTkFrame(card, height=3, fg_color=color,
-                             corner_radius=0).pack(fill="x")
-
-                body = ctk.CTkFrame(card, fg_color="transparent")
-                body.pack(fill="x", padx=14, pady=(8, 12))
-
-                title_row = ctk.CTkFrame(body, fg_color="transparent")
-                title_row.pack(fill="x")
-
-                ctk.CTkLabel(
-                    title_row, text=threat.title,
-                    text_color=theme.TEXT, font=(theme.FONT_FAMILY, 13, "bold"),
-                    anchor="w"
-                ).pack(side="left")
-
-                ctk.CTkLabel(
-                    title_row,
-                    text=threat.severity.upper(),
-                    text_color=color,
-                    fg_color=theme.BG, corner_radius=4,
-                    font=(theme.FONT_FAMILY, 9, "bold"),
-                    padx=7, pady=2
-                ).pack(side="right")
-
-                ctk.CTkLabel(
-                    body, text=threat.description,
-                    text_color=theme.MUTED, font=(theme.FONT_FAMILY, 11),
-                    anchor="w", wraplength=380, justify="left"
-                ).pack(fill="x", pady=(4, 0))
-
-    # ── status bar ───────────────────────────────────────
-
-    def _build_status_bar(self):
-        bar = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=0)
-        bar.grid(row=2, column=0, sticky="ew")
-        ctk.CTkFrame(bar, height=1, fg_color=theme.BORDER).pack(
-            fill="x", side="top")
-
-        self.status = ctk.CTkLabel(
-            bar, text="Ready",
-            text_color=theme.MUTED, font=(theme.FONT_FAMILY, 11)
-        )
-        self.status.pack(side="left", padx=18, pady=8)
-
-    # ── network detection & discovery ────────────────────
+        self._clear_results()
+        empty = QLabel("Select a device and click Scan device.")
+        empty.setObjectName("Muted")
+        self.results_lay.addWidget(empty)
+        self.results_lay.addStretch(1)
 
     def auto_detect_network(self):
-        network = self.scanner.auto_detect_network()
-        self.network_entry.delete(0, "end")
-        self.network_entry.insert(0, network)
+        def work():
+            network = self.scanner.auto_detect_network()
+            QTimer.singleShot(0, lambda: self.network.setText(network))
 
-    def _check_nmap_available(self):
-        if not PortScanner.is_nmap_available():
-            self.status.configure(
-                text="Nmap not found — port scanning is disabled until it's installed (nmap.org)."
-            )
+        threading.Thread(target=work, daemon=True).start()
 
     def discover_devices(self):
-        threading.Thread(
-            target=self._discover_thread, daemon=True).start()
+        self.status.setText("Scanning network…")
+        network = self.network.text().strip() or "192.168.1.0/24"
 
-    def _discover_thread(self):
-        self.after(0, lambda: self.status.configure(
-            text="Scanning network…"))
-        network = self.network_entry.get().strip() or "192.168.1.0/24"
-        try:
-            devices = self.scanner.discover(network)
-        except NetworkScannerError as e:
-            self.after(0, lambda: self.status.configure(text=str(e)))
-            return
-        self.after(0, lambda: self._update_devices(devices))
+        def work():
+            try:
+                devices = self.scanner.discover(network)
+            except NetworkScannerError as e:
+                msg = str(e)
+                QTimer.singleShot(0, lambda m=msg: self.status.setText(m))
+                return
+            QTimer.singleShot(0, lambda: self._update_devices(devices))
+
+        threading.Thread(target=work, daemon=True).start()
 
     def _update_devices(self, devices):
         self.devices = devices
-        names = [f"{d.vendor}  ({d.ip})" for d in devices]
-
-        if names:
-            self.device_dropdown.configure(values=names)
-            self.device_dropdown.set(names[0])
-            self.device_count_label.configure(
-                text=f"{len(devices)} device{'s' if len(devices) != 1 else ''} found.")
+        self.device_pick.clear()
+        if devices:
+            for d in devices:
+                self.device_pick.addItem(f"{d.vendor}  ({d.ip})", d.ip)
+            n = len(devices)
+            self.device_count.setText(f"{n} device{'s' if n != 1 else ''} found.")
         else:
-            self.device_dropdown.configure(values=["No Devices Found"])
-            self.device_dropdown.set("No Devices Found")
-            self.device_count_label.configure(text="No devices discovered yet.")
-
-        self.status.configure(text=f"Found {len(devices)} devices")
-
-    # ── port scan ────────────────────────────────────────
+            self.device_pick.addItem("No devices found")
+            self.device_count.setText("No devices discovered yet.")
+        self.status.setText(f"Found {len(devices)} devices")
 
     def scan_selected(self):
         if not self.devices:
-            self.status.configure(text="No devices found — run Discover first.")
+            self.status.setText("No devices found — run Discover first.")
             return
-
-        selected = self.device_dropdown.get()
-        device = next((d for d in self.devices if d.ip in selected), None)
-
-        if not device:
-            self.status.configure(text="No device selected.")
+        ip = self.device_pick.currentData()
+        if not ip:
+            self.status.setText("No device selected.")
             return
+        self.status.setText(f"Scanning {ip}…")
 
-        threading.Thread(
-            target=self._scan_thread,
-            args=(device.ip,), daemon=True
-        ).start()
+        def work():
+            try:
+                ports = self.port_scanner.scan(ip)
+            except PortScannerError as e:
+                msg = str(e)
+                QTimer.singleShot(0, lambda m=msg: self.status.setText(m))
+                return
+            threats = self.threat_reporter.analyze(ports)
+            QTimer.singleShot(0, lambda: self._update_results(ports, threats))
 
-    def _scan_thread(self, ip):
-        self.after(0, lambda: self.status.configure(
-            text=f"Scanning {ip}…"))
-        try:
-            ports = self.port_scanner.scan(ip)
-        except PortScannerError as e:
-            self.after(0, lambda: self.status.configure(text=str(e)))
-            return
-        threats = self.threat_reporter.analyze(ports)
-        self.after(0, lambda: self._update_results(ports, threats))
+        threading.Thread(target=work, daemon=True).start()
 
     def _update_results(self, ports, threats):
-        self._render_results(ports, threats)
-        threat_count = len(threats)
-        self.status.configure(
-            text=f"Scan complete — {len(ports)} open port{'s' if len(ports) != 1 else ''}, "
-                 f"{threat_count} threat{'s' if threat_count != 1 else ''} found."
+        self._clear_results()
+        ports_title = QLabel("Open ports")
+        ports_title.setObjectName("CardTitle")
+        self.results_lay.addWidget(ports_title)
+        if not ports:
+            none = QLabel("No open ports found.")
+            none.setObjectName("Muted")
+            self.results_lay.addWidget(none)
+        else:
+            for port in ports:
+                row = QLabel(f"{port.port}  ·  {port.service}")
+                self.results_lay.addWidget(row)
+        threat_title = QLabel("Threat report")
+        threat_title.setObjectName("CardTitle")
+        self.results_lay.addWidget(threat_title)
+        if not threats:
+            ok = QLabel("No threats detected.")
+            ok.setObjectName("Success")
+            self.results_lay.addWidget(ok)
+        else:
+            for threat in threats:
+                card = QFrame()
+                card.setObjectName("Panel")
+                cl = QVBoxLayout(card)
+                head = QHBoxLayout()
+                t = QLabel(threat.title)
+                t.setObjectName("CardTitle")
+                sev = QLabel(threat.severity.upper())
+                sev.setObjectName("Danger" if threat.severity.lower() in ("high", "critical") else "Muted")
+                head.addWidget(t, 1)
+                head.addWidget(sev)
+                desc = QLabel(threat.description)
+                desc.setObjectName("Muted")
+                desc.setWordWrap(True)
+                cl.addLayout(head)
+                cl.addWidget(desc)
+                self.results_lay.addWidget(card)
+        self.results_lay.addStretch(1)
+        self.status.setText(
+            f"Scan complete — {len(ports)} open port{'s' if len(ports) != 1 else ''}, "
+            f"{len(threats)} threat{'s' if len(threats) != 1 else ''} found."
         )

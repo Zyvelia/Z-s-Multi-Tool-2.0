@@ -17,6 +17,10 @@ DEFAULT = {
     "tool_order": [],
     "catalog_theme": "neon",
     "module_themes": {},
+    "watchdog_enabled": True,
+    "watchdog_retries": 2,
+    "agent_confirm_writes": True,
+    "marketplace_url": "",
 }
 
 

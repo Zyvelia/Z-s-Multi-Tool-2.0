@@ -43,14 +43,41 @@ taskkill /f /im "Z's Multi Tool (Console).exe" >nul 2>nul
 taskkill /f /im "Zs Multi Tool (Console).exe" >nul 2>nul
 timeout /t 1 /nobreak >nul
 
-REM ---- 4. WebView2 Python bindings for Brick Breaker in-app play ----
+REM ---- 4. Qt UI (CustomTkinter is gone - the frozen exe is PySide6-only) ----
+echo [INFO] Ensuring PySide6 is installed...
+python -m pip install "PySide6>=6.6.0"
+if errorlevel 1 (
+    echo [ERROR] Failed to install PySide6. The Qt UI cannot be bundled without it.
+    pause
+    exit /b 1
+)
+
+REM ---- 4a. WebView2 Python bindings for Brick Breaker in-app play ----
 echo [INFO] Ensuring WebView2 Python packages (pythonnet, pywebview)...
 python -m pip install "pythonnet>=3.0.0" "pywebview>=5.0"
 if errorlevel 1 (
     echo [WARN] Could not install WebView2 Python packages - Brick Breaker in-app play may not work.
 )
 
-REM ---- 4b. Make sure pywin32 is installed AND its postinstall has run ----
+REM ---- 4a2. YouTube Downloader / yt-dlp runtime ----
+REM The source build can see these packages from site-packages, but a
+REM PyInstaller one-file build must explicitly collect yt-dlp's dynamic
+REM package data and the EJS challenge-solver package.
+echo [INFO] Ensuring yt-dlp + EJS + PO-token provider are installed...
+python -m pip install --upgrade "yt-dlp[default]" "bgutil-ytdlp-pot-provider"
+if errorlevel 1 (
+    echo [WARN] Could not update yt-dlp/EJS/PO-token packages.
+    echo        Continuing, but the YouTube EXE may fail at runtime.
+)
+
+REM ---- 4b. simple-websocket for the Messaging module's WS server ----
+echo [INFO] Ensuring simple-websocket is installed (Messaging module)...
+python -m pip install "simple-websocket>=1.0.0"
+if errorlevel 1 (
+    echo [WARN] Could not install simple-websocket - the Messages module's server won't start.
+)
+
+REM ---- 4c. Make sure pywin32 is installed AND its postinstall has run ----
 REM PyInstaller bundles win32com/pythoncom/pywintypes by walking real DLL
 REM dependencies on disk. pip installing pywin32 alone does NOT guarantee
 REM pywintypesXX.dll / pythoncomXX.dll exist where that walker looks -
@@ -114,6 +141,12 @@ REM data/ folder for one-time legacy migration if it happens to exist.
 REM Bundling it would (a) fail the build on a fresh checkout, since
 REM data/ is gitignored and usually won't exist, and (b) if it DID
 REM exist, would ship your real vault.json + master.key inside the exe.
+REM NOTE: do NOT --collect-all PySide6. That pulls QML/Charts/3D/WebEngine
+REM this app never imports, inflates the exe, and emits missing-plugin
+REM warnings for files the PySide6 wheel does not even ship. Hidden-import
+REM the modules we actually use; PyInstaller's PySide6 hooks grab the
+REM platform/style/imageformat plugins. Tk hidden imports stay because
+REM the updater dialogs and core.qt.tk_after still import tkinter at launch.
 python -m PyInstaller ^
     --noconfirm ^
     --onefile ^
@@ -122,7 +155,26 @@ python -m PyInstaller ^
     --name "Zs Multi Tool (Console)" ^
     --icon "assets\icon.ico" ^
     --additional-hooks-dir hooks ^
-    --collect-all customtkinter ^
+    --hidden-import "PySide6.QtCore" ^
+    --hidden-import "PySide6.QtGui" ^
+    --hidden-import "PySide6.QtWidgets" ^
+    --hidden-import "PySide6.QtMultimedia" ^
+    --exclude-module customtkinter ^
+    --exclude-module PySide6.QtCharts ^
+    --exclude-module PySide6.QtQml ^
+    --exclude-module PySide6.QtQuick ^
+    --exclude-module PySide6.QtQuick3D ^
+    --exclude-module PySide6.Qt3DCore ^
+    --exclude-module PySide6.QtWebEngine ^
+    --exclude-module PySide6.QtWebEngineCore ^
+    --exclude-module PySide6.QtWebEngineWidgets ^
+    --exclude-module PySide6.QtBluetooth ^
+    --exclude-module PySide6.QtPositioning ^
+    --exclude-module PySide6.QtSensors ^
+    --exclude-module PySide6.QtPdf ^
+    --exclude-module PySide6.QtPdfWidgets ^
+    --exclude-module PySide6.QtDataVisualization ^
+    --exclude-module PySide6.QtGraphs ^
     --collect-all mutagen ^
     --collect-all PIL ^
     --collect-all pystray ^
@@ -130,7 +182,8 @@ python -m PyInstaller ^
     --collect-all openai ^
     --collect-all pywebview ^
     --collect-all clr_loader ^
-    --collect-all playwright ^
+    --collect-all simple_websocket ^
+    --collect-all wsproto ^
     --collect-data pypresence ^
     --hidden-import "PIL._tkinter_finder" ^
     --hidden-import "_tkinter" ^
@@ -145,14 +198,20 @@ python -m PyInstaller ^
     --hidden-import "psutil" ^
     --hidden-import "cryptography.fernet" ^
     --hidden-import "yt_dlp" ^
+    --collect-all yt_dlp ^
+    --collect-all yt_dlp_ejs ^
+    --collect-all yt_dlp_plugins ^
+    --copy-metadata yt-dlp ^
+    --copy-metadata yt-dlp-ejs ^
     --hidden-import "openai" ^
+    --hidden-import "simple_websocket" ^
+    --hidden-import "wsproto" ^
+    --hidden-import "h11" ^
     --hidden-import "webview.platforms.edgechromium" ^
     --hidden-import "webview.platforms.winforms" ^
     --hidden-import "webview.guilib" ^
     --hidden-import "clr" ^
     --hidden-import "pythonnet" ^
-    --hidden-import "playwright.sync_api" ^
-    --hidden-import "playwright.async_api" ^
     --hidden-import "win32com" ^
     --hidden-import "win32com.client" ^
     --hidden-import "win32timezone" ^
@@ -180,7 +239,7 @@ if exist "dist\Zs Multi Tool (Console).exe" (
 )
 
 REM ---- 8. Bundle the VLC runtime next to the exe ----
-REM python-vlc (used by media_center AND music_player) needs libvlc.dll,
+REM python-vlc (used by Media Player) needs libvlc.dll,
 REM libvlccore.dll, and the whole plugins\ folder sitting next to the exe -
 REM PyInstaller can't discover/bundle these on its own since they're not
 REM Python packages. Auto-detect a local VLC install and copy them in so
@@ -224,7 +283,7 @@ if defined VLC_DIR (
     echo [INFO] VLC runtime bundled into dist\.
 ) else (
     echo [WARN] No VLC runtime found and auto-download failed ^(check your
-    echo        internet connection^). media_center and music_player will
+    echo        internet connection^). Media Player will
     echo        fail with "Could not find module libvlc.dll" until you either:
     echo          - re-run this build with an internet connection so
     echo            download_vlc.ps1 can fetch it automatically, or
@@ -234,30 +293,6 @@ if defined VLC_DIR (
     echo          - install VLC from videolan.org on this machine and
     echo            re-run this build, or
     echo          - manually copy those same files into dist\ yourself.
-)
-
-REM ---- 9. Bundle the Playwright browser binaries next to the exe ----
-REM --collect-all playwright above only grabs the playwright PYTHON
-REM PACKAGE (its driver/node launcher etc.) - it does NOT grab the actual
-REM browser binaries (Chromium/Firefox/WebKit), because those live outside
-REM the package in a separate cache folder that `playwright install`
-REM downloads to (normally %USERPROFILE%\AppData\Local\ms-playwright).
-REM PyInstaller has no way to know that folder exists, so without this
-REM step the built exe imports fine but any page.goto()/browser.launch()
-REM call fails at runtime with "Executable doesn't exist" because it's
-REM looking for browsers that were never bundled.
-echo.
-echo [INFO] Looking for Playwright browser binaries to bundle...
-set "PLAYWRIGHT_CACHE=%LOCALAPPDATA%\ms-playwright"
-if exist "%PLAYWRIGHT_CACHE%" (
-    echo [INFO] Found Playwright browsers at "%PLAYWRIGHT_CACHE%" - copying into dist\ms-playwright\...
-    if exist "dist\ms-playwright" rmdir /s /q "dist\ms-playwright"
-    xcopy "%PLAYWRIGHT_CACHE%" "dist\ms-playwright\" /e /i /q >nul
-    echo [INFO] Playwright browsers bundled into dist\.
-) else (
-    echo [WARN] No Playwright browser cache found at "%PLAYWRIGHT_CACHE%".
-    echo        Run "python -m playwright install" once on this machine,
-    echo        then re-run this build so the browsers get bundled.
 )
 
 echo.
@@ -272,15 +307,16 @@ echo    Explorer or a terminal and watch that console for
 echo    [PluginManager]/[PageManager]/[App] print() lines and any
 echo    unhandled tracebacks - this is the fastest way to see exactly
 echo    why a module failed to load or errored on open.
+echo  - yt-dlp, yt-dlp-ejs, and yt-dlp plugin package data are explicitly
+echo    collected into the frozen EXE; this is important because the Python
+echo    source run can see site-packages directly while the EXE cannot.
 echo  - requirements-lock.txt was refreshed with your currently installed
 echo    package versions ^(pip freeze^) before this build ran.
 echo  - The exe bundles JSON/config files as they exist RIGHT NOW.
 echo    If you edit settings.json etc. later, rebuild to include changes.
 echo  - python-vlc needs libvlc.dll + the "plugins" folder from your
 echo    VLC install sitting next to the exe (or a system-wide VLC install)
-echo    for the media_center AND music_player modules to work (music_player
-echo    switched from pygame to VLC so it isn't blocked by pygame lagging
-echo    behind on new Python releases).
+echo    for Media Player to work.
 echo  - scapy/nmap (network_auditor module) need Npcap and Nmap installed
 echo    on any machine that runs the exe, PyInstaller can't bundle those.
 echo    If you compile install.iss, the installer will now auto-download
@@ -294,17 +330,6 @@ echo    they use different --name values ("Zs Multi Tool (Console)" vs
 echo    "Zs Multi Tool"), so building one never overwrites the other's
 echo    exe in dist\ as long as you don't run both builds back to back
 echo    without moving the first exe out of dist\ first.
-echo  - Playwright: the exe now bundles the browser binaries it finds in
-echo    %%LOCALAPPDATA%%\ms-playwright (as dist\ms-playwright\). Your app
-echo    code needs to point Playwright at that folder at runtime by
-echo    setting the PLAYWRIGHT_BROWSERS_PATH environment variable BEFORE
-echo    importing playwright, e.g. in main.py:
-echo        import os, sys
-echo        if getattr(sys, 'frozen', False):
-echo            os.environ['PLAYWRIGHT_BROWSERS_PATH'] = os.path.join(
-echo                os.path.dirname(sys.executable), 'ms-playwright')
-echo    Without that, Playwright will still look in the default per-user
-echo    cache path and fail on a machine where it wasn't installed.
 echo  - pywin32: this build now checks that pywintypesXX.dll/pythoncomXX.dll
 echo    exist (running pywin32's postinstall script if not) before invoking
 echo    PyInstaller, since a missing postinstall step is the usual cause of

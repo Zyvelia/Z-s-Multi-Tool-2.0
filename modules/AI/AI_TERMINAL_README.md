@@ -27,11 +27,11 @@ yourself, and generated projects are **only ever** written there.
 ## 2. Dependencies
 
 ```bash
-pip install openai customtkinter
+pip install openai PySide6
 ```
 
-Nothing else is required. The module only imports `customtkinter` (GUI) and
-`openai` (SDK) — both already implied by your existing stack.
+Nothing else is required. The module's Qt page lives in `core/qt/tools/ai_chat.py`
+and uses `openai` for hosted models.
 
 ## 3. Wiring it into your app
 

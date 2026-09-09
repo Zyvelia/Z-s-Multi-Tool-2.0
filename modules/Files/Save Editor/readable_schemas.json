@@ -1,0 +1,87 @@
+{
+  "borderlands4": {
+    "categories": [
+      {
+        "name": "Character",
+        "prefixes": [
+          "state.char_name",
+          "state.class",
+          "state.character"
+        ]
+      },
+      {
+        "name": "Level & Experience",
+        "prefixes": [
+          "state.experience",
+          "globals.vault_hunter_level",
+          "globals.player_level"
+        ]
+      },
+      {
+        "name": "Currency & Resources",
+        "prefixes": [
+          "state.money",
+          "state.currency",
+          "globals.currency",
+          "stats.currency"
+        ]
+      },
+      {
+        "name": "Inventory & Equipment",
+        "prefixes": [
+          "state.inventory",
+          "state.equipment",
+          "inventory",
+          "equipment"
+        ]
+      },
+      {
+        "name": "Skills & Progression",
+        "prefixes": [
+          "state.skills",
+          "state.skill",
+          "progression",
+          "globals.progression"
+        ]
+      },
+      {
+        "name": "Missions & World",
+        "prefixes": [
+          "missions",
+          "state.missions",
+          "world",
+          "state.world"
+        ]
+      },
+      {
+        "name": "Unlocks",
+        "prefixes": [
+          "unlockables",
+          "unlocks",
+          "state.unlock"
+        ]
+      },
+      {
+        "name": "Challenges & Achievements",
+        "prefixes": [
+          "stats.challenge",
+          "stats.achievements",
+          "achievements",
+          "challenges"
+        ]
+      },
+      {
+        "name": "Globals",
+        "prefixes": [
+          "globals"
+        ]
+      },
+      {
+        "name": "Other Stats",
+        "prefixes": [
+          "stats"
+        ]
+      }
+    ]
+  }
+}

@@ -1,239 +1,170 @@
-import customtkinter as ctk
-from tkinter import filedialog
-import hashlib
+"""Qt Hash Tools — generate and verify MD5/SHA hashes."""
 
-try:
-    import pyperclip
-except ImportError:
-    pyperclip = None
+from __future__ import annotations
 
-from core import theme
+from PySide6.QtWidgets import (
+    QApplication,
+    QComboBox,
+    QFileDialog,
+    QFormLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPlainTextEdit,
+    QPushButton,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
+)
+
+from modules.Hash_Tools.hash_core import hash_bytes, hash_file, verify_file
 
 
-def _btn(parent, text, cmd, **kw):
-    return ctk.CTkButton(parent, text=text, command=cmd, **kw)
-
-
-class HashToolsPage(ctk.CTkFrame):
-
+class HashToolsPage(QWidget):
     def __init__(self, parent, manager):
-        super().__init__(parent, fg_color=theme.BG)
+        super().__init__(parent)
         self.manager = manager
-        self.selected_file = None
-        self._build_ui()
+        self._gen_path = ""
+        self._verify_path = ""
 
-    # ── UI ────────────────────────────────────────────────────
+        root = QVBoxLayout(self)
+        title = QLabel("Hash Tools")
+        title.setObjectName("AccentTitle")
+        root.addWidget(title)
 
-    def _build_ui(self):
-        # Header
-        header = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=10)
-        header.pack(fill="x", padx=12, pady=(12, 6))
+        tabs = QTabWidget()
+        root.addWidget(tabs, 1)
+        tabs.addTab(self._build_generate(), "Generate")
+        tabs.addTab(self._build_verify(), "Verify")
 
-        ctk.CTkLabel(
-            header, text="🔐  Hash Tools",
-            font=("Segoe UI", 22, "bold"), text_color=theme.TEXT
-        ).pack(side="left", padx=10, pady=10)
+    def _build_generate(self):
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.addWidget(QLabel("Text"))
+        self.text = QPlainTextEdit()
+        self.text.setPlaceholderText("Paste text to hash…")
+        self.text.setMaximumHeight(110)
+        lay.addWidget(self.text)
 
-        # Tabs
-        self.tabs = ctk.CTkTabview(self, fg_color=theme.PANEL, corner_radius=10)
-        self.tabs.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        row = QHBoxLayout()
+        gen = QPushButton("Generate from text")
+        gen.setObjectName("Primary")
+        gen.clicked.connect(self._from_text)
+        clear = QPushButton("Clear")
+        clear.clicked.connect(self._clear)
+        row.addWidget(gen)
+        row.addWidget(clear)
+        row.addStretch(1)
+        lay.addLayout(row)
 
-        self.tabs.add("Generate")
-        self.tabs.add("Verify")
+        self.hash_edits = {}
+        form = QFormLayout()
+        for name in ("MD5", "SHA1", "SHA256", "SHA512"):
+            edit = QLineEdit()
+            edit.setReadOnly(True)
+            copy = QPushButton("Copy")
+            copy.clicked.connect(lambda _=False, e=edit: self._copy(e.text()))
+            cell = QWidget()
+            hl = QHBoxLayout(cell)
+            hl.setContentsMargins(0, 0, 0, 0)
+            hl.addWidget(edit, 1)
+            hl.addWidget(copy)
+            form.addRow(name, cell)
+            self.hash_edits[name] = edit
+        lay.addLayout(form)
 
-        self._build_generate_tab()
-        self._build_verify_tab()
+        self.file_label = QLabel("No file selected")
+        self.file_label.setObjectName("Muted")
+        browse = QPushButton("Browse file")
+        browse.clicked.connect(self._pick_gen_file)
+        from_file = QPushButton("Generate from file")
+        from_file.setObjectName("Primary")
+        from_file.clicked.connect(self._from_file)
+        file_row = QHBoxLayout()
+        file_row.addWidget(self.file_label, 1)
+        file_row.addWidget(browse)
+        file_row.addWidget(from_file)
+        lay.addLayout(file_row)
+        lay.addStretch(1)
+        return page
 
-    # ── Generate Tab ──────────────────────────────────────────
+    def _build_verify(self):
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        self.verify_label = QLabel("No file selected")
+        self.verify_label.setObjectName("Muted")
+        browse = QPushButton("Browse file")
+        browse.clicked.connect(self._pick_verify_file)
+        row = QHBoxLayout()
+        row.addWidget(self.verify_label, 1)
+        row.addWidget(browse)
+        lay.addLayout(row)
 
-    def _build_generate_tab(self):
-        tab = self.tabs.tab("Generate")
+        self.algo = QComboBox()
+        self.algo.addItems(["MD5", "SHA1", "SHA256", "SHA512"])
+        self.expected = QLineEdit()
+        self.expected.setPlaceholderText("Paste expected hash…")
+        form = QFormLayout()
+        form.addRow("Algorithm", self.algo)
+        form.addRow("Expected", self.expected)
+        lay.addLayout(form)
 
-        # Text input section
-        ctk.CTkLabel(tab, text="theme.TEXT INPUT",
-                     font=("Segoe UI", 10, "bold"), text_color=theme.MUTED
-                     ).pack(anchor="w", padx=14, pady=(14, 4))
+        verify = QPushButton("Verify hash")
+        verify.setObjectName("Primary")
+        verify.clicked.connect(self._verify)
+        self.verify_result = QLabel("")
+        lay.addWidget(verify)
+        lay.addWidget(self.verify_result)
+        lay.addStretch(1)
+        return page
 
-        self.text_input = ctk.CTkTextbox(
-            tab, height=100, fg_color=theme.PANEL_2, corner_radius=8,
-            text_color=theme.TEXT, border_width=0)
-        self.text_input.pack(fill="x", padx=14)
+    def _set_hashes(self, hashes: dict):
+        for name, edit in self.hash_edits.items():
+            edit.setText(hashes.get(name, ""))
 
-        text_btns = ctk.CTkFrame(tab, fg_color="transparent")
-        text_btns.pack(fill="x", padx=14, pady=(8, 0))
+    def _from_text(self):
+        data = self.text.toPlainText().strip().encode()
+        self._set_hashes(hash_bytes(data))
 
-        _btn(text_btns, "Generate from Text", self.generate_text_hashes,
-             **theme.primary_button_kwargs()).pack(side="left", padx=(0, 8))
-        _btn(text_btns, "🗑  Clear All", self.clear_hashes,
-             **theme.danger_button_kwargs()).pack(side="left")
-
-        # Hash output boxes
-        ctk.CTkLabel(tab, text="HASH OUTPUT",
-                     font=("Segoe UI", 10, "bold"), text_color=theme.MUTED
-                     ).pack(anchor="w", padx=14, pady=(16, 4))
-
-        self.md5_var    = ctk.StringVar()
-        self.sha1_var   = ctk.StringVar()
-        self.sha256_var = ctk.StringVar()
-        self.sha512_var = ctk.StringVar()
-
-        for label, var in [
-            ("MD5",    self.md5_var),
-            ("SHA-1",  self.sha1_var),
-            ("SHA-256", self.sha256_var),
-            ("SHA-512", self.sha512_var),
-        ]:
-            self._make_hash_row(tab, label, var)
-
-        # File hashing section
-        ctk.CTkLabel(tab, text="FILE INPUT",
-                     font=("Segoe UI", 10, "bold"), text_color=theme.MUTED
-                     ).pack(anchor="w", padx=14, pady=(16, 4))
-
-        file_row = ctk.CTkFrame(tab, fg_color=theme.PANEL_2, corner_radius=8)
-        file_row.pack(fill="x", padx=14, pady=(0, 4))
-
-        self.file_label = ctk.CTkLabel(
-            file_row, text="No file selected", text_color=theme.MUTED, anchor="w")
-        self.file_label.pack(side="left", fill="x", expand=True, padx=12, pady=10)
-
-        _btn(file_row, "Browse", self.select_file,
-             width=80, **theme.secondary_button_kwargs()).pack(side="right", padx=8, pady=8)
-
-        _btn(tab, "Generate from File", self.generate_file_hashes,
-             **theme.primary_button_kwargs()).pack(anchor="w", padx=14, pady=(6, 14))
-
-    # ── Verify Tab ────────────────────────────────────────────
-
-    def _build_verify_tab(self):
-        tab = self.tabs.tab("Verify")
-
-        ctk.CTkLabel(tab, text="FILE",
-                     font=("Segoe UI", 10, "bold"), text_color=theme.MUTED
-                     ).pack(anchor="w", padx=14, pady=(14, 4))
-
-        file_row = ctk.CTkFrame(tab, fg_color=theme.PANEL_2, corner_radius=8)
-        file_row.pack(fill="x", padx=14)
-
-        self.verify_file_label = ctk.CTkLabel(
-            file_row, text="No file selected", text_color=theme.MUTED, anchor="w")
-        self.verify_file_label.pack(side="left", fill="x", expand=True, padx=12, pady=10)
-
-        _btn(file_row, "Browse", self.select_verify_file,
-             width=80, **theme.secondary_button_kwargs()).pack(side="right", padx=8, pady=8)
-
-        ctk.CTkLabel(tab, text="ALGORITHM",
-                     font=("Segoe UI", 10, "bold"), text_color=theme.MUTED
-                     ).pack(anchor="w", padx=14, pady=(14, 4))
-
-        self.algorithm = ctk.CTkOptionMenu(
-            tab, values=["MD5", "SHA1", "SHA256", "SHA512"],
-            fg_color=theme.PANEL_2, button_color=theme.ACCENT,
-            button_hover_color="#2f7fd6", text_color=theme.TEXT,
-            corner_radius=8)
-        self.algorithm.pack(fill="x", padx=14)
-
-        ctk.CTkLabel(tab, text="EXPECTED HASH",
-                     font=("Segoe UI", 10, "bold"), text_color=theme.MUTED
-                     ).pack(anchor="w", padx=14, pady=(14, 4))
-
-        self.expected_hash = ctk.CTkEntry(
-            tab, placeholder_text="Paste expected hash here…",
-            fg_color=theme.PANEL_2, border_width=0, corner_radius=8,
-            text_color=theme.TEXT, height=36)
-        self.expected_hash.pack(fill="x", padx=14)
-
-        _btn(tab, "Verify Hash", self.verify_hash,
-             **theme.primary_button_kwargs()).pack(anchor="w", padx=14, pady=(12, 8))
-
-        self.verify_result = ctk.CTkLabel(tab, text="", font=("Segoe UI", 13, "bold"))
-        self.verify_result.pack(anchor="w", padx=14)
-
-    # ── Hash Row ──────────────────────────────────────────────
-
-    def _make_hash_row(self, parent, label, variable):
-        row = ctk.CTkFrame(parent, fg_color=theme.PANEL_2, corner_radius=8)
-        row.pack(fill="x", padx=14, pady=3)
-
-        ctk.CTkLabel(row, text=label, width=68,
-                     font=("Segoe UI", 11, "bold"), text_color=theme.MUTED
-                     ).pack(side="left", padx=10, pady=8)
-
-        ctk.CTkEntry(row, textvariable=variable, fg_color=theme.BG,
-                     border_width=0, text_color=theme.TEXT, corner_radius=6
-                     ).pack(side="left", fill="x", expand=True, padx=(0, 6), pady=6)
-
-        _btn(row, "Copy", lambda v=variable: self._copy(v.get()),
-             width=64, height=28, corner_radius=6,
-             fg_color=theme.PANEL, hover_color=theme.ACCENT, text_color=theme.MUTED
-             ).pack(side="right", padx=6, pady=6)
-
-    # ── Hashing Logic ─────────────────────────────────────────
-
-    def generate_text_hashes(self):
-        data = self.text_input.get("1.0", "end").strip().encode()
-        self._set_hashes(data)
-
-    def select_file(self):
-        path = filedialog.askopenfilename()
-        if path:
-            self.selected_file = path
-            self.file_label.configure(text=path, text_color=theme.TEXT)
-
-    def generate_file_hashes(self):
-        if not self.selected_file:
+    def _from_file(self):
+        if not self._gen_path:
             return
-        with open(self.selected_file, "rb") as f:
-            data = f.read()
-        self._set_hashes(data)
+        self._set_hashes(hash_file(self._gen_path))
 
-    def _set_hashes(self, data):
-        self.md5_var.set(hashlib.md5(data).hexdigest())
-        self.sha1_var.set(hashlib.sha1(data).hexdigest())
-        self.sha256_var.set(hashlib.sha256(data).hexdigest())
-        self.sha512_var.set(hashlib.sha512(data).hexdigest())
-
-    # ── Verify ────────────────────────────────────────────────
-
-    def select_verify_file(self):
-        path = filedialog.askopenfilename()
+    def _pick_gen_file(self):
+        path, _ = QFileDialog.getOpenFileName(self, "File to hash")
         if path:
-            self.selected_file = path
-            self.verify_file_label.configure(text=path, text_color=theme.TEXT)
+            self._gen_path = path
+            self.file_label.setText(path)
+            self.file_label.setObjectName("")
 
-    def verify_hash(self):
-        if not self.selected_file:
+    def _pick_verify_file(self):
+        path, _ = QFileDialog.getOpenFileName(self, "File to verify")
+        if path:
+            self._verify_path = path
+            self.verify_label.setText(path)
+            self.verify_label.setObjectName("")
+
+    def _verify(self):
+        if not self._verify_path:
             return
-
-        algo_map = {
-            "MD5":    hashlib.md5,
-            "SHA1":   hashlib.sha1,
-            "SHA256": hashlib.sha256,
-            "SHA512": hashlib.sha512,
-        }
-        with open(self.selected_file, "rb") as f:
-            data = f.read()
-
-        actual   = algo_map[self.algorithm.get()](data).hexdigest()
-        expected = self.expected_hash.get().strip().lower()
-
-        if actual.lower() == expected:
-            self.verify_result.configure(text="✅  Match", text_color="#2ecc71")
+        ok, actual = verify_file(self._verify_path, self.algo.currentText(), self.expected.text())
+        if ok:
+            self.verify_result.setText("Match")
+            self.verify_result.setObjectName("Success")
         else:
-            self.verify_result.configure(text="❌  Mismatch", text_color="#e74c3c")
+            self.verify_result.setText(f"Mismatch — actual {actual}")
+            self.verify_result.setObjectName("Danger")
+        self.verify_result.style().unpolish(self.verify_result)
+        self.verify_result.style().polish(self.verify_result)
 
-    # ── Copy / Clear ──────────────────────────────────────────
+    def _clear(self):
+        self.text.clear()
+        self._set_hashes({})
+        self._gen_path = ""
+        self.file_label.setText("No file selected")
+        self.file_label.setObjectName("Muted")
 
-    def _copy(self, value):
-        if pyperclip and value:
-            pyperclip.copy(value)
-
-    def clear_hashes(self):
-        self.text_input.delete("1.0", "end")
-        for var in (self.md5_var, self.sha1_var, self.sha256_var, self.sha512_var):
-            var.set("")
-        self.selected_file = None
-        self.file_label.configure(text="No file selected", text_color=theme.MUTED)
-        self.verify_file_label.configure(text="No file selected", text_color=theme.MUTED)
-        self.expected_hash.delete(0, "end")
-        self.verify_result.configure(text="")
+    def _copy(self, value: str):
+        if value:
+            QApplication.clipboard().setText(value)

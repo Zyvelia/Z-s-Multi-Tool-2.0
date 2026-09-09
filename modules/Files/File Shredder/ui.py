@@ -1,229 +1,180 @@
-"""
-Folder Shredder — UI.
-
-Follows the shared ZsMultiTool module convention: exposes a CTkFrame
-subclass that the plugin manager instantiates and packs into
-`manager.container`. Palette matches the rest of the app.
-"""
+"""Qt File Shredder — overwrite then delete files and folders."""
 
 from __future__ import annotations
 
-import tkinter as tk
+import importlib
 from pathlib import Path
-from tkinter import filedialog
 
-import customtkinter as ctk
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import (
+    QComboBox,
+    QFileDialog,
+    QFrame,
+    QHBoxLayout,
+    QInputDialog,
+    QLabel,
+    QPlainTextEdit,
+    QProgressBar,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
-from .shredder import PassPattern, ProgressEvent, ShredderWorker, collect_targets
-from core import theme
-
-OK_COLOR = "#3ddc84"
+_shred = importlib.import_module("modules.Files.File Shredder.shredder")
+PassPattern = _shred.PassPattern
+ShredderWorker = _shred.ShredderWorker
+collect_targets = _shred.collect_targets
 
 POLL_MS = 60
 
 
-class FolderShredderModule(ctk.CTkFrame):
-    """Secure-delete module. `manager` is the plugin manager / root App
-    instance (manager.container is the root, per the shared convention)."""
-
-    def __init__(self, master, manager=None, **kwargs):
-        super().__init__(master, fg_color=theme.BG, **kwargs)
+class FolderShredderModule(QWidget):
+    def __init__(self, parent, manager):
+        super().__init__(parent)
         self.manager = manager
-
         self._targets: list[Path] = []
-        self._worker: ShredderWorker | None = None
-        self._total_items = 0
+        self._worker = None
+        self._poll = QTimer(self)
+        self._poll.setInterval(POLL_MS)
+        self._poll.timeout.connect(self._poll_worker)
 
-        self._build_layout()
-
-    # ------------------------------------------------------------------ UI
-
-    def _build_layout(self) -> None:
-        self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(2, weight=1)
-
-        header = ctk.CTkLabel(
-            self, text="Folder Shredder",
-            font=ctk.CTkFont(size=20, weight="bold"),
-            text_color="white",
+        root = QVBoxLayout(self)
+        title = QLabel("Folder Shredder")
+        title.setObjectName("AccentTitle")
+        root.addWidget(title)
+        sub = QLabel(
+            "Overwrites files before deleting them, then removes the folder. "
+            "This cannot be undone. On SSDs, overwrite passes are mostly cosmetic."
         )
-        header.grid(row=0, column=0, sticky="w", padx=16, pady=(16, 4))
+        sub.setObjectName("Muted")
+        sub.setWordWrap(True)
+        root.addWidget(sub)
 
-        subtitle = ctk.CTkLabel(
-            self,
-            text=(
-                "Overwrites files before deleting them, then removes the "
-                "folder. This cannot be undone."
-            ),
-            font=ctk.CTkFont(size=12),
-            text_color=theme.MUTED,
-        )
-        subtitle.grid(row=1, column=0, sticky="w", padx=16, pady=(0, 12))
+        panel = QFrame()
+        panel.setObjectName("Panel")
+        pl = QVBoxLayout(panel)
+        btn_row = QHBoxLayout()
+        add_files = QPushButton("Add Files")
+        add_files.clicked.connect(self._add_files)
+        add_folder = QPushButton("Add Folder")
+        add_folder.clicked.connect(self._add_folder)
+        clear = QPushButton("Clear Queue")
+        clear.clicked.connect(self._clear_queue)
+        self.pattern = QComboBox()
+        for p in PassPattern:
+            self.pattern.addItem(p.value, p)
+        btn_row.addWidget(add_files)
+        btn_row.addWidget(add_folder)
+        btn_row.addWidget(clear)
+        btn_row.addStretch(1)
+        btn_row.addWidget(self.pattern)
+        pl.addLayout(btn_row)
+        self.queue_box = QPlainTextEdit()
+        self.queue_box.setReadOnly(True)
+        pl.addWidget(self.queue_box, 1)
+        root.addWidget(panel, 1)
 
-        # ---- controls row ----
-        controls = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=10)
-        controls.grid(row=2, column=0, sticky="nsew", padx=16, pady=(0, 8))
-        controls.grid_columnconfigure(0, weight=1)
-        controls.grid_rowconfigure(1, weight=1)
+        action = QHBoxLayout()
+        self.shred_btn = QPushButton("Shred Queue")
+        self.shred_btn.setObjectName("Danger")
+        self.shred_btn.clicked.connect(self._confirm_and_shred)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        action.addWidget(self.shred_btn)
+        action.addWidget(self.progress, 1)
+        root.addLayout(action)
 
-        btn_row = ctk.CTkFrame(controls, fg_color="transparent")
-        btn_row.grid(row=0, column=0, sticky="ew", padx=12, pady=12)
+        self.status = QLabel("")
+        self.status.setObjectName("Muted")
+        root.addWidget(self.status)
 
-        ctk.CTkButton(
-            btn_row, text="Add Files", width=110,
-            fg_color=theme.PANEL_2, hover_color=theme.ACCENT,
-            command=self._add_files,
-        ).pack(side="left", padx=(0, 8))
+        log_title = QLabel("Log")
+        log_title.setObjectName("CardTitle")
+        root.addWidget(log_title)
+        self.log_box = QPlainTextEdit()
+        self.log_box.setReadOnly(True)
+        self.log_box.setMaximumHeight(160)
+        root.addWidget(self.log_box)
+        self._refresh_queue_view()
 
-        ctk.CTkButton(
-            btn_row, text="Add Folder", width=110,
-            fg_color=theme.PANEL_2, hover_color=theme.ACCENT,
-            command=self._add_folder,
-        ).pack(side="left", padx=(0, 8))
-
-        ctk.CTkButton(
-            btn_row, text="Clear Queue", width=110,
-            fg_color=theme.PANEL_2, hover_color=theme.DANGER,
-            command=self._clear_queue,
-        ).pack(side="left")
-
-        self.pattern_var = tk.StringVar(value=PassPattern.ZERO.value)
-        pattern_menu = ctk.CTkOptionMenu(
-            btn_row,
-            values=[p.value for p in PassPattern],
-            variable=self.pattern_var,
-            fg_color=theme.PANEL_2, button_color=theme.ACCENT, button_hover_color=theme.ACCENT,
-            width=200,
-        )
-        pattern_menu.pack(side="right")
-
-        # ---- queue list ----
-        self.queue_box = ctk.CTkTextbox(
-            controls, fg_color=theme.PANEL_2, text_color="white",
-            wrap="none", state="disabled",
-        )
-        self.queue_box.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 12))
-
-        # ---- shred bar ----
-        action_row = ctk.CTkFrame(self, fg_color="transparent")
-        action_row.grid(row=3, column=0, sticky="ew", padx=16, pady=(0, 8))
-        action_row.grid_columnconfigure(1, weight=1)
-
-        self.shred_btn = ctk.CTkButton(
-            action_row, text="Shred Queue", fg_color=theme.DANGER, hover_color="#e04545",
-            command=self._confirm_and_shred,
-        )
-        self.shred_btn.grid(row=0, column=0, sticky="w")
-
-        self.progress = ctk.CTkProgressBar(action_row, progress_color=theme.ACCENT)
-        self.progress.set(0)
-        self.progress.grid(row=0, column=1, sticky="ew", padx=(12, 0))
-
-        self.status_label = ctk.CTkLabel(self, text="", text_color=theme.MUTED, anchor="w")
-        self.status_label.grid(row=4, column=0, sticky="ew", padx=16, pady=(0, 8))
-
-        # ---- log ----
-        log_header = ctk.CTkLabel(self, text="Log", text_color="white", font=ctk.CTkFont(weight="bold"))
-        log_header.grid(row=5, column=0, sticky="w", padx=16, pady=(4, 4))
-
-        self.log_box = ctk.CTkTextbox(
-            self, fg_color=theme.PANEL, text_color=theme.MUTED, height=140, state="disabled",
-        )
-        self.log_box.grid(row=6, column=0, sticky="ew", padx=16, pady=(0, 16))
-
-    # ------------------------------------------------------------- actions
-
-    def _add_files(self) -> None:
-        paths = filedialog.askopenfilenames(title="Select files to shred")
+    def _add_files(self):
+        paths, _ = QFileDialog.getOpenFileNames(self, "Select files to shred")
         self._targets.extend(Path(p) for p in paths)
         self._refresh_queue_view()
 
-    def _add_folder(self) -> None:
-        path = filedialog.askdirectory(title="Select a folder to shred")
+    def _add_folder(self):
+        path = QFileDialog.getExistingDirectory(self, "Select a folder to shred")
         if path:
             self._targets.append(Path(path))
         self._refresh_queue_view()
 
-    def _clear_queue(self) -> None:
+    def _clear_queue(self):
         self._targets.clear()
         self._refresh_queue_view()
 
-    def _refresh_queue_view(self) -> None:
-        self.queue_box.configure(state="normal")
-        self.queue_box.delete("1.0", "end")
+    def _refresh_queue_view(self):
         if not self._targets:
-            self.queue_box.insert("end", "  (queue is empty — add files or a folder above)\n")
+            self.queue_box.setPlainText("  (queue is empty — add files or a folder above)")
+            return
+        lines = []
         for p in self._targets:
             kind = "DIR " if p.is_dir() else "FILE"
-            self.queue_box.insert("end", f"  [{kind}] {p}\n")
-        self.queue_box.configure(state="disabled")
+            lines.append(f"  [{kind}] {p}")
+        self.queue_box.setPlainText("\n".join(lines))
 
-    def _log(self, text: str, color: str = theme.MUTED) -> None:
-        self.log_box.configure(state="normal")
-        self.log_box.insert("end", text + "\n")
-        self.log_box.configure(state="disabled")
-        self.log_box.see("end")
+    def _log(self, text: str):
+        self.log_box.appendPlainText(text)
 
-    # ------------------------------------------------------- confirmation
-
-    def _confirm_and_shred(self) -> None:
+    def _confirm_and_shred(self):
         if not self._targets:
-            self.status_label.configure(text="Queue is empty — nothing to shred.")
+            self.status.setText("Queue is empty — nothing to shred.")
             return
         if self._worker is not None and self._worker.is_alive():
             return
-
         count = len(self._targets)
-        dialog = ctk.CTkInputDialog(
-            text=(
-                f"This will permanently destroy {count} item(s). "
-                f"This cannot be undone.\n\nType {count} to confirm:"
-            ),
-            title="Confirm Shred",
+        answer, ok = QInputDialog.getText(
+            self,
+            "Confirm Shred",
+            f"This will permanently destroy {count} item(s). This cannot be undone.\n\nType {count} to confirm:",
         )
-        answer = dialog.get_input()
-        if answer is None:
+        if not ok:
             return
         try:
-            confirmed_count = int(answer.strip())
+            confirmed = int(answer.strip())
         except ValueError:
-            confirmed_count = -1
-        if confirmed_count != count:
-            self.status_label.configure(text="Confirmation didn't match — nothing was shredded.")
+            confirmed = -1
+        if confirmed != count:
+            self.status.setText("Confirmation didn't match — nothing was shredded.")
             return
-
         self._start_shred()
 
-    # ------------------------------------------------------------- worker
-
-    def _start_shred(self) -> None:
-        pattern = next(p for p in PassPattern if p.value == self.pattern_var.get())
+    def _start_shred(self):
+        pattern = self.pattern.currentData()
         items = collect_targets(self._targets)
-        self._total_items = len(items)
-
-        self.shred_btn.configure(state="disabled")
-        self.progress.set(0)
-        self.status_label.configure(text=f"Shredding {self._total_items} item(s)…")
-        self._log(f"--- starting shred of {self._total_items} item(s), pattern: {pattern.value} ---")
-
+        self.shred_btn.setEnabled(False)
+        self.progress.setValue(0)
+        self.status.setText(f"Shredding {len(items)} item(s)…")
+        self._log(f"--- starting shred of {len(items)} item(s), pattern: {pattern.value} ---")
         self._worker = ShredderWorker(items, pattern)
         self._worker.start()
-        self.after(POLL_MS, self._poll_worker)
+        self._poll.start()
 
-    def _poll_worker(self) -> None:
+    def _poll_worker(self):
         if self._worker is None:
+            self._poll.stop()
             return
         try:
             while True:
-                event: ProgressEvent = self._worker.events.get_nowait()
+                event = self._worker.events.get_nowait()
                 self._handle_event(event)
         except Exception:
-            pass  # queue.Empty — nothing more this tick
+            pass
+        if self._worker is not None and self._worker.is_alive():
+            return
+        self._poll.stop()
 
-        if self._worker.is_alive():
-            self.after(POLL_MS, self._poll_worker)
-
-    def _handle_event(self, event: ProgressEvent) -> None:
+    def _handle_event(self, event):
         if event.kind == "item_start":
             return
         if event.kind == "item_done":
@@ -231,21 +182,24 @@ class FolderShredderModule(ctk.CTkFrame):
             if r and r.ok:
                 self._log(f"shredded: {r.path}")
             elif r:
-                self._log(f"SKIPPED ({r.error}): {r.path}", color=theme.DANGER)
+                self._log(f"SKIPPED ({r.error}): {r.path}")
             if event.total_count:
-                self.progress.set(event.done_count / event.total_count)
-                self.status_label.configure(
-                    text=f"{event.done_count}/{event.total_count} processed"
-                )
+                self.progress.setValue(int(100 * event.done_count / event.total_count))
+                self.status.setText(f"{event.done_count}/{event.total_count} processed")
         elif event.kind == "overall_done":
             self._log(f"--- {event.message} ---")
-            self.status_label.configure(text=event.message)
-            self.shred_btn.configure(state="normal")
+            self.status.setText(event.message)
+            self.shred_btn.setEnabled(True)
             self._targets.clear()
             self._refresh_queue_view()
             self._worker = None
+            self._poll.stop()
         elif event.kind == "fatal_error":
-            self._log(f"FATAL: {event.message}", color=theme.DANGER)
-            self.status_label.configure(text="Error — see log")
-            self.shred_btn.configure(state="normal")
+            self._log(f"FATAL: {event.message}")
+            self.status.setText("Error — see log")
+            self.status.setObjectName("Danger")
+            self.status.style().unpolish(self.status)
+            self.status.style().polish(self.status)
+            self.shred_btn.setEnabled(True)
             self._worker = None
+            self._poll.stop()

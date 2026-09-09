@@ -7,7 +7,10 @@ from __future__ import annotations
 import hashlib
 import mimetypes
 import os
+import shutil
 import stat
+import string
+import sys
 import time
 from pathlib import Path
 from typing import Optional
@@ -142,3 +145,123 @@ def safe_read_text(path: str | Path, max_bytes: int = 10 * 1024 * 1024) -> tuple
 
 def clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
+
+
+# ── drive / volume enumeration ────────────────────────────
+
+def _usage(path: str | Path) -> dict:
+    """Return {'total', 'used', 'free'} for a mount point, zeroed on failure."""
+    try:
+        total, used, free = shutil.disk_usage(str(path))
+        return {"total": total, "used": used, "free": free}
+    except OSError:
+        return {"total": 0, "used": 0, "free": 0}
+
+
+def _drive_type_windows(root: str) -> str:
+    """Classify a Windows drive root ('C:\\\\') via GetDriveTypeW."""
+    import ctypes
+    kinds = {
+        0: "unknown", 1: "unknown", 2: "removable",
+        3: "fixed", 4: "network", 5: "cdrom", 6: "ramdisk",
+    }
+    try:
+        code = ctypes.windll.kernel32.GetDriveTypeW(ctypes.c_wchar_p(root))
+        return kinds.get(code, "unknown")
+    except Exception:
+        return "unknown"
+
+
+def _volume_label_windows(root: str) -> str:
+    import ctypes
+    try:
+        buf = ctypes.create_unicode_buffer(261)
+        ok = ctypes.windll.kernel32.GetVolumeInformationW(
+            ctypes.c_wchar_p(root), buf, ctypes.sizeof(buf),
+            None, None, None, None, 0,
+        )
+        return buf.value if ok else ""
+    except Exception:
+        return ""
+
+
+def list_drives() -> list[dict]:
+    """
+    Enumerate storage volumes attached to this machine — internal SSD/HDD
+    partitions, removable drives, mounted network shares, and optical media.
+
+    Returns a list of dicts, each with:
+        path  — root path to browse (e.g. 'D:\\\\' or '/media/user/Backup')
+        label — human-readable display name
+        kind  — 'fixed' | 'removable' | 'network' | 'cdrom' | 'ramdisk' | 'unknown'
+        total, used, free — bytes (0 if the volume couldn't be queried,
+                              e.g. an empty CD/DVD drive)
+    """
+    drives: list[dict] = []
+
+    if sys.platform.startswith("win"):
+        try:
+            import ctypes
+            bitmask = ctypes.windll.kernel32.GetLogicalDrives()
+        except Exception:
+            bitmask = 0
+
+        for i, letter in enumerate(string.ascii_uppercase):
+            if not (bitmask >> i) & 1:
+                continue
+            root = f"{letter}:\\"
+            kind = _drive_type_windows(root)
+            label_raw = _volume_label_windows(root)
+            default_names = {
+                "removable": "Removable Disk",
+                "network":   "Network Drive",
+                "cdrom":     "CD/DVD Drive",
+                "ramdisk":   "RAM Disk",
+                "fixed":     "Local Disk",
+                "unknown":   "Drive",
+            }
+            label = f"{label_raw or default_names.get(kind, 'Drive')} ({letter}:)"
+            drives.append({"path": root, "label": label, "kind": kind,
+                            **_usage(root)})
+        return drives
+
+    if sys.platform == "darwin":
+        drives.append({"path": "/", "label": "Macintosh HD",
+                        "kind": "fixed", **_usage("/")})
+        vol_dir = Path("/Volumes")
+        if vol_dir.is_dir():
+            try:
+                entries = sorted(vol_dir.iterdir(), key=lambda p: p.name.lower())
+            except OSError:
+                entries = []
+            for entry in entries:
+                try:
+                    if entry.resolve() == Path("/"):
+                        continue
+                except OSError:
+                    continue
+                drives.append({"path": str(entry), "label": entry.name,
+                                "kind": "removable", **_usage(entry)})
+        return drives
+
+    # Linux and other POSIX systems
+    drives.append({"path": "/", "label": "Root (/)",
+                    "kind": "fixed", **_usage("/")})
+    seen = {"/"}
+    candidates = ["/media", "/mnt", f"/run/media/{os.environ.get('USER', '')}"]
+    for base in candidates:
+        base_p = Path(base)
+        if not base_p.is_dir():
+            continue
+        try:
+            entries = sorted(base_p.iterdir(), key=lambda p: p.name.lower())
+        except OSError:
+            continue
+        for entry in entries:
+            rp = str(entry)
+            if rp in seen or not entry.is_dir():
+                continue
+            seen.add(rp)
+            drives.append({"path": rp, "label": entry.name,
+                            "kind": "removable", **_usage(entry)})
+    return drives

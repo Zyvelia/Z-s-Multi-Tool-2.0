@@ -45,7 +45,12 @@ APP_HTTPS_PORTS = {
     "soundboard": 8447,
     "notes": 8448,
     "send": 8449,
+    "social": 8450,
     "arcade": 8451,
+    "messages": 8452,
+    "gsm": 8453,
+    "chat": 8454,
+    "trust": 8455,
 }
 HUB_HTTPS_PORT = 443
 

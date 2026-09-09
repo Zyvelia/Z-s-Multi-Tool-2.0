@@ -8,7 +8,7 @@
 # release has no wheel for the recipient's Python version).
 
 cryptography>=48.0.0
-customtkinter>=6.0.0
+PySide6>=6.6.0
 mutagen>=1.47.0
 numpy>=2.5.1
 openai>=3.1.0
@@ -25,7 +25,6 @@ requests>=2.34.2
 scapy>=2.7.0
 sounddevice>=0.5.5
 soundfile>=0.14.0
-tkinterdnd2>=0.6.2
 watchdog>=6.0.0
 yt-dlp>=2026.6.9
 
@@ -53,6 +52,10 @@ pywebview>=5.0; sys_platform == "win32"
 
 # Optional: FIDO2 USB security keys for Secure Vault unlock (YubiKey, etc.).
 fido2>=1.1.2
+
+# SSH / Serial module (in-app terminal + COM console).
+paramiko>=3.5.0
+pyserial>=3.5
 
 # ---
 #

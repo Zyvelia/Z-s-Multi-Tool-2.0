@@ -57,6 +57,26 @@ ICON_ERROR      = "✖"
 ICON_WARN       = "⚠"
 ICON_INFO       = "ℹ"
 
+# Drives / volumes
+ICON_DRIVE_FIXED     = "💽"
+ICON_DRIVE_REMOVABLE = "🔌"
+ICON_DRIVE_NETWORK   = "🌐"
+ICON_DRIVE_CDROM     = "📀"
+ICON_DRIVE_RAMDISK   = "⚡"
+ICON_DRIVE_UNKNOWN   = "💾"
+
+
+def drive_icon(kind: str) -> str:
+    """Return the appropriate icon for a drive 'kind' from list_drives()."""
+    mapping = {
+        "fixed":     ICON_DRIVE_FIXED,
+        "removable": ICON_DRIVE_REMOVABLE,
+        "network":   ICON_DRIVE_NETWORK,
+        "cdrom":     ICON_DRIVE_CDROM,
+        "ramdisk":   ICON_DRIVE_RAMDISK,
+    }
+    return mapping.get(kind, ICON_DRIVE_UNKNOWN)
+
 
 def file_icon(ext: str) -> str:
     """Return the appropriate icon for a given file extension."""

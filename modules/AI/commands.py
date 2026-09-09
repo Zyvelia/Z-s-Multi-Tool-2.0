@@ -16,10 +16,16 @@ HELP_TEXT = """Available commands:
   /clear             Clear the terminal output (keeps conversation history)
   /new               Start a new session (clears output AND conversation history)
   /build <prompt>    Ask the AI to design and generate a complete multi-file project
-  /models            List models available from the current provider
+  /agent [on|off]    Toggle the in-app agent (tools: servers, notes, messages, stats)
+  /source [hosted|local]  Use the API provider or a local model (Ollama / llama.cpp)
+  /models            List models available from the current provider or local server
   /test              Test the connection to the configured provider/key/model
   /output            Open the output folder in File Explorer (see Output panel above)
   /openlast          Open the most recently built project's folder in File Explorer
+
+With Agent on, the model can start/stop servers, wait until they are ready,
+take backups, go Hub live/offline, queue YouTube downloads, write notes,
+send Messages, and read clipboard / system stats.
 
 Anything else you type is sent directly to the AI as a chat message.
 """

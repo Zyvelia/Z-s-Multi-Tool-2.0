@@ -1,15 +1,11 @@
-from .page import AIChatModule
-
-
 def register(plugin_manager):
     plugin_manager.register({
         "name": "AI Chat",
         "category": "AI",
         "desc": (
-            "Chat with a hosted AI model or a local one (Ollama/llama.cpp), "
-            "run slash-commands, generate multi-file projects with /build, "
-            "and save/reuse prompts - all in one tabbed module."
+            "One chat for a hosted API or a local Ollama / llama.cpp model. Agent mode can run app actions "
+            "(game servers, notes, messages, stats). /build generates projects."
         ),
         "icon": "🤖",
-        "page_class": AIChatModule,
+        "qt_page": "modules.AI.ui:AIChatModule",
     })

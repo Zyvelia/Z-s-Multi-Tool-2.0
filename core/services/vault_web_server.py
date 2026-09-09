@@ -25,6 +25,8 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
 
+from core.services import device_trust
+
 IDLE_TIMEOUT_SECONDS = 20 * 60   # session expires after 20 min of inactivity
 MAX_FAILED_ATTEMPTS = 5
 LOCKOUT_SECONDS = 60
@@ -136,7 +138,7 @@ class _Handler(BaseHTTPRequestHandler):
         origin = self.headers.get("Origin")
         self.send_header("Access-Control-Allow-Origin", origin if origin else "*")
         self.send_header("Access-Control-Allow-Credentials", "true")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Device-Id, X-Device-Ts, X-Device-Sig")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Vary", "Origin")
 
@@ -187,6 +189,8 @@ class _Handler(BaseHTTPRequestHandler):
     # -------------------------------------------------
 
     def do_GET(self):
+        if not device_trust.allow_handler(self):
+            return
         if self.path in ("/", "/index.html"):
             self._send_html(200, _PAGE_SHELL)
         elif self.path == "/api/session":
@@ -205,6 +209,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(404, {"error": "not found"})
 
     def do_POST(self):
+        if not device_trust.allow_handler(self):
+            return
         if self.path == "/api/login":
             self._handle_login()
         elif self.path == "/api/logout":

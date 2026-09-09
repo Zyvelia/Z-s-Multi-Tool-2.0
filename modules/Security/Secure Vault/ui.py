@@ -1,1223 +1,838 @@
-import customtkinter as ctk
-import datetime
-import tkinter as tk
+"""Qt Secure Vault — lock screen + password / authenticator dashboard."""
+
+from __future__ import annotations
+
+import importlib
+import importlib.util
+import threading
+import time
 import webbrowser
-from tkinter import filedialog, messagebox
+from pathlib import Path
 
-try:
-    import pyperclip
-except ImportError:
-    pyperclip = None
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtWidgets import (
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFileDialog,
+    QFormLayout,
+    QFrame,
+    QHBoxLayout,
+    QInputDialog,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QScrollArea,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
-from core import theme
+from core.qt.module_shell import find_qt_module_shell
+from core.qt.remote_common import VaultRemoteSettings
 from core.services.auth_service import AuthService
-from core.services import totp_service as totp_mod
-from .authenticator_tab import AuthenticatorTab
-from .audit_tab import SecurityAuditTab
-from .emergency_kit import export_emergency_kit
-from .generator import PasswordGenerator, MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH
+from core.services.totp_service import generate_code
 
+_emergency = importlib.import_module("modules.Security.Secure Vault.emergency_kit")
+export_emergency_kit = _emergency.export_emergency_kit
 
+_hibp_path = Path(__file__).resolve().parents[3] / "modules" / "Security" / "Breach Checker" / "hibp_api.py"
+_spec = importlib.util.spec_from_file_location("vault_hibp_api", _hibp_path)
+_hibp = importlib.util.module_from_spec(_spec)
+assert _spec.loader is not None
+_spec.loader.exec_module(_hibp)
+check_password = _hibp.check_password
+HIBPError = _hibp.HIBPError
 
+PasswordGenerator = importlib.import_module(
+    "modules.Security.Secure Vault.generator"
+).PasswordGenerator
 
-
-STRENGTH_COLORS = [theme.DANGER, "#e0803f", "#e0c53f", "#8bd15a", theme.SUCCESS]
-
+MIN_PASSWORD_LENGTH = 8
+STRENGTH_COLORS = ["#b33939", "#e0803f", "#e0c53f", "#8bd15a", "#2ecc71"]
 DEFAULT_CATEGORIES = ["General", "Email", "Gaming", "Work", "Banking", "Social", "Alt Accounts"]
 
 
-class PasswordVaultPage(ctk.CTkFrame):
-
+class VaultLockScreen(QWidget):
     def __init__(self, parent, manager):
         super().__init__(parent)
+        self.manager = manager
+        self.auth = manager.container.auth_service
+        self.alert = manager.container.alert_service
+        self.hw = manager.container.hardware_key_service
+        lay = QVBoxLayout(self)
+        lay.addStretch(1)
+        card = QFrame()
+        card.setObjectName("Card")
+        card.setMaximumWidth(440)
+        cl = QVBoxLayout(card)
+        cl.setContentsMargins(32, 28, 32, 28)
+        eyebrow = QLabel("END-TO-END ENCRYPTED")
+        eyebrow.setObjectName("CardCat")
+        eyebrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title = QLabel("Security Vault")
+        title.setObjectName("AccentTitle")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        first = not self.auth.is_initialized()
+        hint = QLabel(
+            "Choose a master password to protect your vault."
+            if first else
+            "Enter your master password to continue."
+        )
+        hint.setObjectName("Muted")
+        hint.setWordWrap(True)
+        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        cl.addWidget(eyebrow)
+        cl.addWidget(title)
+        cl.addWidget(hint)
 
+        self.password = QLineEdit()
+        self.password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.password.setPlaceholderText("Master password")
+        self.password.returnPressed.connect(self._submit)
+        cl.addWidget(self.password)
+
+        self.strength = QProgressBar()
+        self.strength.setRange(0, 4)
+        self.strength.setValue(0)
+        self.strength_label = QLabel(" ")
+        self.strength_label.setObjectName("Muted")
+        if first:
+            self.password.textChanged.connect(self._update_strength)
+            cl.addWidget(self.strength)
+            cl.addWidget(self.strength_label)
+            self.confirm = QLineEdit()
+            self.confirm.setEchoMode(QLineEdit.EchoMode.Password)
+            self.confirm.setPlaceholderText("Confirm password")
+            self.confirm.returnPressed.connect(self._submit)
+            cl.addWidget(self.confirm)
+            note = QLabel(
+                f"Minimum {MIN_PASSWORD_LENGTH} characters. This password can't be recovered if you forget it."
+            )
+            note.setObjectName("Muted")
+            note.setWordWrap(True)
+            cl.addWidget(note)
+            create = QPushButton("Create Vault")
+            create.setObjectName("Primary")
+            create.clicked.connect(self.create_master)
+            cl.addWidget(create)
+        else:
+            self.confirm = None
+            unlock = QPushButton("Unlock Vault")
+            unlock.setObjectName("Primary")
+            unlock.clicked.connect(self.unlock)
+            cl.addWidget(unlock)
+            self.hw_btn = QPushButton("Unlock with security key")
+            self.hw_btn.clicked.connect(self.unlock_hw)
+            self.hw_btn.setEnabled(self.hw.is_enabled())
+            cl.addWidget(self.hw_btn)
+
+        self.error = QLabel("")
+        self.error.setObjectName("Error")
+        self.error.setWordWrap(True)
+        self.error.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        cl.addWidget(self.error)
+        foot = QLabel(f"PBKDF2-HMAC-SHA256 · {self.auth.PBKDF2_ITERATIONS:,} rounds")
+        foot.setObjectName("Muted")
+        foot.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        cl.addWidget(foot)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(card)
+        row.addStretch(1)
+        lay.addLayout(row)
+        lay.addStretch(1)
+        self.password.setFocus()
+
+    @staticmethod
+    def build_qt_module_settings(parent, manager):
+        return _VaultSettings(parent, manager)
+
+    def _update_strength(self, text):
+        score, label = AuthService.password_strength(text)
+        self.strength.setValue(score)
+        self.strength_label.setText(label if text else " ")
+
+    def _submit(self):
+        if self.auth.is_initialized():
+            self.unlock()
+        else:
+            self.create_master()
+
+    def create_master(self):
+        self.error.setText("")
+        password = self.password.text()
+        confirm = self.confirm.text() if self.confirm is not None else ""
+        if len(password) < MIN_PASSWORD_LENGTH:
+            self.error.setText(f"Password must be at least {MIN_PASSWORD_LENGTH} characters.")
+            return
+        if password != confirm:
+            self.error.setText("Passwords do not match.")
+            return
+        try:
+            self.auth.create_master_password(password)
+        except Exception as e:
+            self.error.setText(f"Couldn't create vault: {e}")
+            return
+        self.open_vault()
+
+    def unlock(self):
+        if self.auth.verify_master_password(self.password.text()):
+            self.alert.local_unlock_attempt(True)
+            self.open_vault()
+        else:
+            self.alert.local_unlock_attempt(False)
+            self.error.setText("Incorrect password.")
+            self.password.clear()
+            self.password.setFocus()
+
+    def unlock_hw(self):
+        self.error.setText("")
+        try:
+            if self.hw.verify_and_unlock():
+                self.alert.local_unlock_attempt(True)
+                self.open_vault()
+            else:
+                self.alert.local_unlock_attempt(False)
+                self.error.setText("Security key verification failed.")
+        except Exception as exc:
+            self.alert.local_unlock_attempt(False)
+            self.error.setText(str(exc))
+
+    def open_vault(self):
+        shell = find_qt_module_shell(self)
+        if shell is not None:
+            shell.open_vault_dashboard(VaultDashboard)
+
+
+class VaultDashboard(QWidget):
+    def __init__(self, parent, manager):
+        super().__init__(parent)
         self.manager = manager
         self.vault = manager.container.vault_service
         self.totp = manager.container.totp_service
         self.auth = manager.container.auth_service
-        self.hw = manager.container.hardware_key_service
+        self.show_favorites = False
+        self._overlay = None
 
-        self.visible_passwords = set()
-        self._lock_overlay_visible = False
-        self._breach_cache: dict[str, int] = {}
-        self._card_totp_labels: dict[str, tuple[ctk.CTkLabel, str]] = {}
-        self._totp_tick_job = None
-        self.audit_tab = None
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 8, 12, 12)
+        header = QHBoxLayout()
+        title = QLabel("Security Vault")
+        title.setObjectName("AccentTitle")
+        header.addWidget(title)
+        header.addStretch(1)
+        fav = QPushButton("Favorites")
+        fav.setCheckable(True)
+        fav.toggled.connect(self._toggle_fav)
+        add = QPushButton("Add entry")
+        add.setObjectName("Primary")
+        add.clicked.connect(lambda: self._edit_entry(None))
+        export_btn = QPushButton("Export")
+        export_btn.clicked.connect(self._export)
+        import_btn = QPushButton("Import")
+        import_btn.clicked.connect(self._import)
+        kit = QPushButton("Emergency kit")
+        kit.clicked.connect(self._export_kit)
+        header.addWidget(fav)
+        header.addWidget(add)
+        header.addWidget(export_btn)
+        header.addWidget(import_btn)
+        header.addWidget(kit)
+        root.addLayout(header)
 
-        self.configure(fg_color=theme.BG)
+        self.tabs = QTabWidget()
+        self.pass_host = QWidget()
+        self.pass_lay = QVBoxLayout(self.pass_host)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Search…")
+        self.search.textChanged.connect(self.render)
+        self.cat = QComboBox()
+        self.cat.addItem("All")
+        self.cat.currentTextChanged.connect(self.render)
+        filt = QHBoxLayout()
+        filt.addWidget(self.search, 1)
+        filt.addWidget(self.cat)
+        self.pass_lay.addLayout(filt)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        self.list_host = QWidget()
+        self.list_lay = QVBoxLayout(self.list_host)
+        scroll.setWidget(self.list_host)
+        self.pass_lay.addWidget(scroll, 1)
+        self.tabs.addTab(self.pass_host, "Passwords")
 
-        self.grid_rowconfigure(1, weight=1)
-        self.grid_columnconfigure(0, weight=1)
+        self.auth_host = QWidget()
+        al = QVBoxLayout(self.auth_host)
+        add_t = QPushButton("Add authenticator")
+        add_t.clicked.connect(self._add_totp)
+        al.addWidget(add_t, alignment=Qt.AlignmentFlag.AlignLeft)
+        self.totp_list = QVBoxLayout()
+        al.addLayout(self.totp_list)
+        al.addStretch(1)
+        self.tabs.addTab(self.auth_host, "Authenticator")
 
-        # Generator option state lives on the page (not the modal) so your
-        # settings persist between "Add Entry" opens.
-        self.upper_var = ctk.BooleanVar(value=True)
-        self.lower_var = ctk.BooleanVar(value=True)
-        self.number_var = ctk.BooleanVar(value=True)
-        self.symbol_var = ctk.BooleanVar(value=True)
-        self.exclude_ambiguous_var = ctk.BooleanVar(value=False)
-        self.gen_length_var = ctk.IntVar(value=MAX_PASSWORD_LENGTH)
+        self.audit_host = QWidget()
+        audit_lay = QVBoxLayout(self.audit_host)
+        score_row = QHBoxLayout()
+        self.audit_score = QLabel("Score: —")
+        self.audit_score.setObjectName("AccentTitle")
+        self.audit_summary = QLabel("")
+        self.audit_summary.setObjectName("Muted")
+        self.audit_summary.setWordWrap(True)
+        scan = QPushButton("Scan breaches")
+        scan.clicked.connect(self._start_breach_scan)
+        refresh_audit = QPushButton("Refresh")
+        refresh_audit.clicked.connect(self._render_audit)
+        score_row.addWidget(self.audit_score)
+        score_row.addWidget(self.audit_summary, 1)
+        score_row.addWidget(scan)
+        score_row.addWidget(refresh_audit)
+        audit_lay.addLayout(score_row)
+        self.audit_status = QLabel("")
+        self.audit_status.setObjectName("Muted")
+        audit_lay.addWidget(self.audit_status)
+        audit_scroll = QScrollArea()
+        audit_scroll.setWidgetResizable(True)
+        self.audit_list = QWidget()
+        self.audit_list_lay = QVBoxLayout(self.audit_list)
+        audit_scroll.setWidget(self.audit_list)
+        audit_lay.addWidget(audit_scroll, 1)
+        self.tabs.addTab(self.audit_host, "Audit")
+        self._breach_cache = {}
+        self._scanning = False
+        root.addWidget(self.tabs, 1)
 
-        self.show_favorites_only = False
-
-        self.build_ui()
+        self._lock_timer = QTimer(self)
+        self._lock_timer.setInterval(15000)
+        self._lock_timer.timeout.connect(self._auto_lock)
+        self._lock_timer.start()
+        self._totp_timer = QTimer(self)
+        self._totp_timer.setInterval(1000)
+        self._totp_timer.timeout.connect(self._tick_totp)
+        self._totp_timer.start()
         self.render()
 
-        # Idle-based auto-lock: the master password shouldn't stay "good"
-        # forever just because the window is sitting open. This ticks
-        # while the vault tab is the one on screen and pops the lock
-        # overlay if AuthService's inactivity timeout has elapsed.
-        self.after(15000, self._auto_lock_tick)
-
-    def _vault_is_foreground(self):
-        current = self.manager.current
-        if current is self:
-            return True
-        if getattr(current, "_inner", None) is self:
-            return True
-        return False
-
-    def _auto_lock_tick(self):
-        try:
-            if self._vault_is_foreground() and not self._lock_overlay_visible:
-                if self.auth.is_locked():
-                    self._show_lock_overlay()
-        except Exception:
-            pass
-        self.after(15000, self._auto_lock_tick)
+    @staticmethod
+    def build_qt_module_settings(parent, manager):
+        return _VaultSettings(parent, manager)
 
     def on_show(self):
-        """
-        Called by PageManager.show_page() whenever this page is navigated
-        to, and by the tray icon on window restore (see core/tray.py) —
-        both are moments where the vault could have gone stale (idle
-        timeout, or minimized-to-tray while unlocked) without anything
-        else re-checking auth state in between.
-        """
         if self.auth.is_locked():
-            self._show_lock_overlay()
+            self._show_overlay()
         else:
-            self._hide_lock_overlay()
+            self._hide_overlay()
             self.render()
 
-    def _touch(self, _event=None):
-        """Bound (globally, via bind_all) so the idle timer only counts
-        actual inactivity — but only touches while the vault tab is the
-        one actually on screen, so clicking around in some other tool
-        doesn't quietly keep the vault's lock timer from ever firing."""
-        if self._vault_is_foreground():
-            self.auth.touch()
+    def on_hide(self):
+        self._lock_timer.stop()
+        self._totp_timer.stop()
 
-    # =====================================================
-    # UI
-    # =====================================================
+    def _toggle_fav(self, on):
+        self.show_favorites = bool(on)
+        self.render()
 
-    def build_ui(self):
+    def _vault_foreground(self):
+        current = getattr(self.manager, "current", None)
+        return current is self or getattr(current, "_inner", None) is self
 
-        # ---------------- HEADER ----------------
+    def _auto_lock(self):
+        if self._vault_foreground() and self._overlay is None and self.auth.is_locked():
+            self._show_overlay()
 
-        header = ctk.CTkFrame(self, fg_color=theme.PANEL, corner_radius=theme.RADIUS)
-        header.grid(row=0, column=0, sticky="ew", padx=15, pady=15)
-
-        header.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(
-            header,
-            text="🔐 Security Vault",
-            font=theme.font(24, "bold"),
-            text_color=theme.TEXT
-        ).grid(row=0, column=0, sticky="w", padx=(15, 10), pady=12)
-
-        actions = ctk.CTkFrame(header, fg_color="transparent")
-        actions.grid(row=0, column=1, sticky="e", padx=(0, 12), pady=12)
-
-        self.favorites_toggle_button = ctk.CTkButton(
-            actions, text="⭐ Favorites", command=self.toggle_favorites_filter,
-            width=110, height=34, **theme.secondary_button_style()
-        )
-        self.favorites_toggle_button.pack(side="left", padx=(0, 6))
-
-        ctk.CTkButton(
-            actions, text="📤", width=38, height=34, command=self.export_vault,
-            **theme.secondary_button_style()
-        ).pack(side="left", padx=(0, 6))
-
-        ctk.CTkButton(
-            actions, text="📥", width=38, height=34, command=self.import_vault,
-            **theme.secondary_button_style()
-        ).pack(side="left", padx=(0, 6))
-
-        ctk.CTkButton(
-            actions, text="🆘 Kit", width=70, height=34, command=self.export_emergency_kit_dialog,
-            **theme.secondary_button_style()
-        ).pack(side="left", padx=(0, 6))
-
-        ctk.CTkButton(
-            actions, text="🔑 Master Password", command=self.open_change_password_dialog,
-            width=150, height=34, **theme.secondary_button_style()
-        ).pack(side="left", padx=(0, 6))
-
-        ctk.CTkButton(
-            actions, text="➕ Add Entry", command=self.open_add_entry_dialog,
-            width=130, height=34, **theme.primary_button_style()
-        ).pack(side="left")
-
-        # ---------------- TABS ----------------
-
-        self.tabview = ctk.CTkTabview(
-            self,
-            fg_color=theme.BG,
-            segmented_button_fg_color=theme.PANEL,
-            segmented_button_selected_color=theme.ACCENT,
-            segmented_button_selected_hover_color=theme.ACCENT,
-        )
-        self.tabview.grid(row=1, column=0, sticky="nsew", padx=15, pady=(0, 15))
-
-        passwords_tab = self.tabview.add("🔐 Passwords")
-        authenticator_tab = self.tabview.add("🔑 Authenticator")
-        audit_tab_frame = self.tabview.add("🛡 Audit")
-
-        passwords_tab.grid_rowconfigure(2, weight=1)
-        passwords_tab.grid_columnconfigure(0, weight=1)
-
-        authenticator_tab.grid_rowconfigure(0, weight=1)
-        authenticator_tab.grid_columnconfigure(0, weight=1)
-
-        audit_tab_frame.grid_rowconfigure(0, weight=1)
-        audit_tab_frame.grid_columnconfigure(0, weight=1)
-
-        AuthenticatorTab(authenticator_tab, self.manager).grid(row=0, column=0, sticky="nsew")
-        self.audit_tab = SecurityAuditTab(audit_tab_frame, self)
-        self.audit_tab.grid(row=0, column=0, sticky="nsew")
-
-        # ---------------- STATS ----------------
-
-        stats_frame = ctk.CTkFrame(passwords_tab, fg_color="transparent")
-        stats_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-        for i in range(5):
-            stats_frame.grid_columnconfigure(i, weight=1)
-
-        self.stats_total_label = self._stat_pill(stats_frame, "Passwords", "0", 0)
-        self.stats_favorites_label = self._stat_pill(stats_frame, "Favorites", "0", 1)
-        self.stats_categories_label = self._stat_pill(stats_frame, "Categories", "0", 2)
-        self.stats_sites_label = self._stat_pill(stats_frame, "Sites", "0", 3)
-        self.security_label = self._stat_pill(stats_frame, "Security Score", "100/100", 4)
-
-        # ---------------- SEARCH / FILTER ----------------
-
-        search_frame = ctk.CTkFrame(passwords_tab, fg_color=theme.PANEL, corner_radius=theme.RADIUS)
-        search_frame.grid(row=1, column=0, sticky="ew", pady=(0, 10))
-        search_frame.grid_columnconfigure(0, weight=1)
-
-        self.search = ctk.CTkEntry(
-            search_frame, placeholder_text="🔍 Search site or username…",
-            height=36, fg_color=theme.PANEL_2, border_color=theme.BORDER, corner_radius=theme.RADIUS_SM
-        )
-        self.search.grid(row=0, column=0, sticky="ew", padx=(12, 6), pady=10)
-        self.search.bind("<KeyRelease>", lambda e: self.render())
-
-        self.filter_category = ctk.CTkOptionMenu(
-            search_frame, values=["All"] + self._all_categories(), command=lambda x: self.render(),
-            width=140, height=36, fg_color=theme.PANEL_2, button_color=theme.PANEL_2,
-            button_hover_color=theme.PANEL_HOVER, corner_radius=theme.RADIUS_SM
-        )
-        self.filter_category.set("All")
-        self.filter_category.grid(row=0, column=1, padx=(6, 12), pady=10)
-
-        # ---------------- PASSWORD LIST ----------------
-
-        self.cards = ctk.CTkScrollableFrame(passwords_tab, fg_color=theme.PANEL, corner_radius=theme.RADIUS)
-        self.cards.grid(row=2, column=0, sticky="nsew")
-
-        # Any click/key inside the vault counts as activity, resetting
-        # the idle-lock clock. bind_all with add="+" so we don't clobber
-        # CTk's own internal bindings on these widget classes.
-        #
-        # NOTE: newer CustomTkinter versions override bind_all() on all
-        # their widgets to just raise AttributeError("'bind_all' is not
-        # allowed..."), so self.bind_all(...) blows up here. We still
-        # want the real Tk-level bind_all behavior (global, app-wide),
-        # so call tkinter.Misc's original implementation directly,
-        # bypassing CTk's override.
-        tk.Misc.bind_all(self, "<Button-1>", self._touch, add="+")
-        tk.Misc.bind_all(self, "<Key>", self._touch, add="+")
-
-        # ---------------- LOCK OVERLAY ----------------
-        # Covers the whole page (header + tabs) when the vault is locked
-        # (idle timeout, or restored from tray after being minimized —
-        # see core/tray.py). Sits on top via grid in the same cells as
-        # everything above, then lift()'d above it.
-
-        self.lock_overlay = ctk.CTkFrame(self, fg_color=theme.BG)
-        self.lock_overlay.grid_rowconfigure(0, weight=1)
-        self.lock_overlay.grid_columnconfigure(0, weight=1)
-
-        overlay_card = ctk.CTkFrame(
-            self.lock_overlay, fg_color=theme.PANEL, corner_radius=theme.RADIUS,
-            border_width=1, border_color=theme.BORDER
-        )
-        overlay_card.grid(row=0, column=0)
-
-        inner = ctk.CTkFrame(overlay_card, fg_color="transparent")
-        inner.pack(padx=40, pady=32)
-
-        ctk.CTkLabel(inner, text="🔒", font=theme.font(30)).pack(pady=(0, 8))
-        ctk.CTkLabel(
-            inner, text="Vault Locked", font=theme.font(19, "bold"), text_color=theme.TEXT
-        ).pack()
-        ctk.CTkLabel(
-            inner, text="Re-enter your master password to continue.",
-            font=theme.font(12), text_color=theme.MUTED
-        ).pack(pady=(4, 18))
-
-        ctk.CTkLabel(
-            inner,
-            text="Or use your registered security key if enabled in Settings.",
-            font=theme.font(11),
-            text_color=theme.FAINT,
-            wraplength=280,
-        ).pack(pady=(0, 10))
-
-        self.relock_entry = ctk.CTkEntry(
-            inner, show="•", height=38, width=280,
-            fg_color=theme.PANEL_2, border_color=theme.BORDER, corner_radius=theme.RADIUS_SM,
-            placeholder_text="Master password"
-        )
-        self.relock_entry.pack(pady=(0, 10))
-
-        self.relock_error = ctk.CTkLabel(inner, text="", font=theme.font(11), text_color=theme.ERROR)
-        self.relock_error.pack()
-
-        def do_unlock():
-            password = self.relock_entry.get()
-            if self.auth.verify_master_password(password):
-                self.relock_entry.delete(0, "end")
-                self.relock_error.configure(text="")
-                self._hide_lock_overlay()
-                self.render()
-            else:
-                self.relock_error.configure(text="Incorrect password.")
-                self.relock_entry.delete(0, "end")
-                self.relock_entry.focus_set()
-
-        def do_hw_unlock():
-            self.relock_error.configure(text="")
-            try:
-                if self.hw.verify_and_unlock():
-                    self.relock_entry.delete(0, "end")
-                    self._hide_lock_overlay()
-                    self.render()
-                else:
-                    self.relock_error.configure(text="Security key verification failed.")
-            except Exception as exc:
-                self.relock_error.configure(text=str(exc))
-
-        self.relock_entry.bind("<Return>", lambda e: do_unlock())
-
-        ctk.CTkButton(
-            inner, text="Unlock", height=38, width=280,
-            command=do_unlock, **theme.primary_button_style()
-        ).pack(pady=(6, 0))
-
-        self._relock_hw_btn = ctk.CTkButton(
-            inner, text="Unlock with security key", height=36, width=280,
-            command=do_hw_unlock, **theme.secondary_button_style(),
-        )
-        self._relock_hw_btn.pack(pady=(8, 0))
-        self._update_relock_hw_button()
-
-    def _update_relock_hw_button(self):
-        if not hasattr(self, "_relock_hw_btn"):
+    def _show_overlay(self):
+        if self._overlay is not None:
             return
-        state = "normal" if self.hw.is_enabled() else "disabled"
-        self._relock_hw_btn.configure(state=state)
+        self._overlay = QFrame(self)
+        self._overlay.setObjectName("Card")
+        self._overlay.setGeometry(self.rect())
+        lay = QVBoxLayout(self._overlay)
+        lay.addStretch(1)
+        box = QVBoxLayout()
+        lab = QLabel("Vault locked")
+        lab.setObjectName("AccentTitle")
+        lab.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._overlay_pw = QLineEdit()
+        self._overlay_pw.setEchoMode(QLineEdit.EchoMode.Password)
+        self._overlay_pw.setPlaceholderText("Master password")
+        self._overlay_pw.returnPressed.connect(self._overlay_unlock)
+        btn = QPushButton("Unlock")
+        btn.setObjectName("Primary")
+        btn.clicked.connect(self._overlay_unlock)
+        box.addWidget(lab)
+        box.addWidget(self._overlay_pw)
+        box.addWidget(btn)
+        wrap = QWidget()
+        wrap.setMaximumWidth(360)
+        wrap.setLayout(box)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(wrap)
+        row.addStretch(1)
+        lay.addLayout(row)
+        lay.addStretch(1)
+        self._overlay.show()
+        self._overlay.raise_()
 
-    def _show_lock_overlay(self):
-        if self._lock_overlay_visible:
-            return
-        self._lock_overlay_visible = True
-        # Nothing sensitive should stay "revealed" behind the overlay.
-        self.visible_passwords = set()
-        self.lock_overlay.grid(row=0, column=0, rowspan=2, sticky="nsew")
-        self.lock_overlay.lift()
-        self._update_relock_hw_button()
-        self.relock_entry.focus_set()
+    def _hide_overlay(self):
+        if self._overlay is not None:
+            self._overlay.deleteLater()
+            self._overlay = None
 
-    def _hide_lock_overlay(self):
-        self._lock_overlay_visible = False
-        self.lock_overlay.grid_remove()
+    def _overlay_unlock(self):
+        if self.auth.verify_master_password(self._overlay_pw.text()):
+            self._hide_overlay()
+            self.render()
+        else:
+            self._overlay_pw.clear()
 
-    def _all_categories(self):
-        """Default categories plus any custom ones already used in the
-        vault (e.g. a typed-in 'Alt Accounts'), deduped and sorted."""
-        return sorted(set(DEFAULT_CATEGORIES) | set(self.vault.get_categories()))
+    def render(self):
+        while self.list_lay.count():
+            item = self.list_lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        cats = set(DEFAULT_CATEGORIES)
+        entries = self.vault.get_entries()
+        for e in entries:
+            cats.add(e.get("category") or "General")
+        current = self.cat.currentText()
+        self.cat.blockSignals(True)
+        self.cat.clear()
+        self.cat.addItem("All")
+        for c in sorted(cats):
+            self.cat.addItem(c)
+        idx = self.cat.findText(current)
+        self.cat.setCurrentIndex(idx if idx >= 0 else 0)
+        self.cat.blockSignals(False)
 
-    def _refresh_category_filter(self):
-        """Keep the filter dropdown in sync after entries are added/edited/
-        imported, without losing the currently selected filter."""
-        current = self.filter_category.get()
-        values = ["All"] + self._all_categories()
-        self.filter_category.configure(values=values)
-        self.filter_category.set(current if current in values else "All")
-
-    def _stat_pill(self, parent, label, value, col):
-        pill = ctk.CTkFrame(parent, fg_color=theme.PANEL, corner_radius=theme.RADIUS)
-        pill.grid(row=0, column=col, sticky="ew", padx=(0 if col == 0 else 5, 0))
-
-        value_label = ctk.CTkLabel(pill, text=value, font=theme.font(19, "bold"), text_color=theme.TEXT)
-        value_label.pack(anchor="w", padx=14, pady=(10, 0))
-        ctk.CTkLabel(pill, text=label, font=theme.font(11), text_color=theme.MUTED).pack(anchor="w", padx=14, pady=(0, 10))
-
-        return value_label
-
-    # =====================================================
-    # STRENGTH
-    # =====================================================
-
-    def get_strength(self, password):
-        return PasswordGenerator.get_strength(password)
-
-    def _strength_color(self, strength):
-        return {
-            "Weak": theme.ERROR,
-            "Medium": "#e0803f",
-            "Strong": "#f1c40f",
-            "Very Strong": theme.SUCCESS,
-        }.get(strength, theme.MUTED)
-
-    def _generate_password(self) -> str:
-        return PasswordGenerator.generate(
-            length=self.gen_length_var.get(),
-            uppercase=self.upper_var.get(),
-            lowercase=self.lower_var.get(),
-            numbers=self.number_var.get(),
-            symbols=self.symbol_var.get(),
-            exclude_ambiguous=self.exclude_ambiguous_var.get(),
-        )
-
-    def _copy_to_clipboard(self, widget, text: str, on_done=None) -> bool:
-        if not text:
-            return False
-        try:
-            if pyperclip:
-                pyperclip.copy(text)
-            else:
-                widget.clipboard_clear()
-                widget.clipboard_append(text)
-            if on_done:
-                on_done()
-            return True
-        except Exception:
-            return False
-
-    def set_breach_cache(self, cache: dict[str, int]) -> None:
-        self._breach_cache = dict(cache)
-
-    def _totp_link_options(self) -> tuple[list[str], dict[str, str]]:
-        """Returns (labels for combobox, label -> totp entry id)."""
-        mapping = {"— None —": ""}
-        for entry in self.totp.get_entries():
-            label = entry["name"]
-            if entry.get("issuer"):
-                label = f"{label} ({entry['issuer']})"
-            mapping[label] = entry["id"]
-        return list(mapping.keys()), mapping
-
-    def _selected_totp_id(self, combo: ctk.CTkComboBox, mapping: dict[str, str]) -> str:
-        return mapping.get(combo.get(), "")
-
-    def _open_url(self, url: str) -> None:
-        url = (url or "").strip()
-        if not url:
-            return
-        if not url.startswith(("http://", "https://")):
-            url = "https://" + url
-        webbrowser.open(url)
-
-    def _security_badges(self, entry_id: str) -> list[tuple[str, str]]:
-        badges = []
-        if entry_id in self.vault.get_weak_entry_ids():
-            badges.append(("Weak", theme.ERROR))
-        if entry_id in self.vault.get_reused_entry_ids():
-            badges.append(("Reused", "#f1c40f"))
-        breach_count = self._breach_cache.get(entry_id, 0)
-        if breach_count > 0:
-            badges.append(("Breached", theme.DANGER))
-        return badges
-
-    def _schedule_totp_card_tick(self) -> None:
-        if self._totp_tick_job is not None:
-            try:
-                self.after_cancel(self._totp_tick_job)
-            except Exception:
-                pass
-        if self._card_totp_labels:
-            self._totp_tick_job = self.after(1000, self._totp_card_tick)
-
-    def _totp_card_tick(self) -> None:
-        self._totp_tick_job = None
-        for _eid, (lbl, secret) in list(self._card_totp_labels.items()):
-            if not lbl.winfo_exists():
+        q = (self.search.text() or "").lower()
+        cat = self.cat.currentText()
+        shown = 0
+        for e in entries:
+            if self.show_favorites and not e.get("favorite"):
                 continue
-            code = totp_mod.generate_code(secret)
-            rem = totp_mod.seconds_remaining()
-            lbl.configure(text=f"2FA {code} · {rem}s")
-        self._schedule_totp_card_tick()
+            if cat != "All" and (e.get("category") or "General") != cat:
+                continue
+            blob = f"{e.get('site','')} {e.get('username','')} {e.get('url','')}".lower()
+            if q and q not in blob:
+                continue
+            self.list_lay.addWidget(self._card(e))
+            shown += 1
+        if not shown:
+            empty = QLabel("No entries yet.")
+            empty.setObjectName("Muted")
+            self.list_lay.addWidget(empty)
+        self.list_lay.addStretch(1)
+        self._render_totp()
+        self._render_audit()
 
-    def open_add_entry_dialog(self):
-        dialog = ctk.CTkToplevel(self)
-        dialog.title("Add Entry")
-        dialog.geometry("480x680")
-        dialog.minsize(440, 520)
-        dialog.resizable(True, True)
-        dialog.transient(self.master)
-        dialog.configure(fg_color=theme.PANEL)
-        dialog.grid_columnconfigure(0, weight=1)
-        dialog.grid_rowconfigure(0, weight=1)
-        dialog.grab_set()
+    def _card(self, entry):
+        frame = QFrame()
+        frame.setObjectName("Card")
+        lay = QVBoxLayout(frame)
+        top = QHBoxLayout()
+        site = QLabel(entry.get("site") or "Untitled")
+        site.setObjectName("CardTitle")
+        cat = QLabel(entry.get("category") or "General")
+        cat.setObjectName("CardCat")
+        top.addWidget(site, 1)
+        top.addWidget(cat)
+        lay.addLayout(top)
+        user = QLabel(entry.get("username") or "")
+        user.setObjectName("Muted")
+        lay.addWidget(user)
+        pw = QLineEdit(entry.get("password") or "")
+        pw.setEchoMode(QLineEdit.EchoMode.Password)
+        pw.setReadOnly(True)
+        row = QHBoxLayout()
+        row.addWidget(pw, 1)
+        star = QPushButton("★" if entry.get("favorite") else "☆")
+        star.setFixedWidth(36)
+        star.clicked.connect(lambda e=entry: self._toggle_favorite(e))
+        row.addWidget(star)
+        show = QPushButton("Show")
+        show.clicked.connect(lambda: pw.setEchoMode(
+            QLineEdit.EchoMode.Normal if pw.echoMode() == QLineEdit.EchoMode.Password
+            else QLineEdit.EchoMode.Password
+        ))
+        copy = QPushButton("Copy")
+        copy.clicked.connect(lambda: self._copy(entry.get("password") or ""))
+        edit = QPushButton("Edit")
+        edit.clicked.connect(lambda e=entry: self._edit_entry(e))
+        delete = QPushButton("Delete")
+        delete.setObjectName("Danger")
+        delete.clicked.connect(lambda e=entry: self._delete(e))
+        row.addWidget(show)
+        row.addWidget(copy)
+        row.addWidget(edit)
+        row.addWidget(delete)
+        lay.addLayout(row)
+        url = entry.get("url") or ""
+        if url:
+            open_url = QPushButton("Open URL")
+            open_url.clicked.connect(lambda u=url: webbrowser.open(u))
+            lay.addWidget(open_url, alignment=Qt.AlignmentFlag.AlignLeft)
+        return frame
 
-        body = ctk.CTkScrollableFrame(
-            dialog, fg_color=theme.PANEL,
-            scrollbar_button_color=theme.PANEL_2,
-            scrollbar_button_hover_color=theme.PANEL_HOVER,
-        )
-        body.grid(row=0, column=0, sticky="nsew")
-        body.grid_columnconfigure(0, weight=1)
-
-        footer = ctk.CTkFrame(dialog, fg_color=theme.PANEL)
-        footer.grid(row=1, column=0, sticky="ew", padx=24, pady=(4, 16))
-        footer.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(
-            body, text="➕ Add New Entry", font=theme.font(19, "bold"), text_color=theme.TEXT
-        ).pack(pady=(20, 16), padx=24, anchor="w")
-
-        def field_label(text):
-            ctk.CTkLabel(body, text=text, anchor="w", font=theme.font(12), text_color=theme.MUTED).pack(
-                fill="x", padx=24, pady=(0, 3)
-            )
-
-        field_label("Website / Service")
-        site_entry = ctk.CTkEntry(
-            body, placeholder_text="e.g. github.com", height=38,
-            fg_color=theme.PANEL_2, border_color=theme.BORDER, corner_radius=theme.RADIUS_SM
-        )
-        site_entry.pack(fill="x", padx=24, pady=(0, 12))
-
-        field_label("Username")
-        user_entry = ctk.CTkEntry(
-            body, height=38, fg_color=theme.PANEL_2, border_color=theme.BORDER, corner_radius=theme.RADIUS_SM
-        )
-        user_entry.pack(fill="x", padx=24, pady=(0, 12))
-
-        field_label("Category")
-        category_menu = ctk.CTkComboBox(
-            body, values=self._all_categories(), height=38, fg_color=theme.PANEL_2,
-            border_color=theme.BORDER, button_color=theme.PANEL_2, button_hover_color=theme.PANEL_HOVER,
-            corner_radius=theme.RADIUS_SM
-        )
-        category_menu.set("General")
-        category_menu.pack(fill="x", padx=24, pady=(0, 12))
-
-        field_label("Website URL (optional)")
-        url_entry = ctk.CTkEntry(
-            body, placeholder_text="https://github.com", height=38,
-            fg_color=theme.PANEL_2, border_color=theme.BORDER, corner_radius=theme.RADIUS_SM,
-        )
-        url_entry.pack(fill="x", padx=24, pady=(0, 12))
-
-        field_label("Notes (optional)")
-        notes_box = ctk.CTkTextbox(
-            body, height=64, font=theme.font(12),
-            fg_color=theme.PANEL_2, border_color=theme.BORDER, corner_radius=theme.RADIUS_SM,
-        )
-        notes_box.pack(fill="x", padx=24, pady=(0, 12))
-
-        field_label("Link authenticator (2FA)")
-        totp_labels, totp_map = self._totp_link_options()
-        totp_menu = ctk.CTkComboBox(
-            body, values=totp_labels, height=38, fg_color=theme.PANEL_2,
-            border_color=theme.BORDER, button_color=theme.PANEL_2, button_hover_color=theme.PANEL_HOVER,
-            corner_radius=theme.RADIUS_SM,
-        )
-        totp_menu.set(totp_labels[0] if totp_labels else "— None —")
-        totp_menu.pack(fill="x", padx=24, pady=(0, 16))
-
-        # ---------------- Password ----------------
-
-        field_label("Password")
-        pass_row = ctk.CTkFrame(body, fg_color="transparent")
-        pass_row.pack(fill="x", padx=24, pady=(0, 4))
-        pass_row.grid_columnconfigure(0, weight=1)
-
-        pass_entry = ctk.CTkEntry(
-            pass_row, height=38, font=theme.mono(13),
-            fg_color=theme.PANEL_2, border_color=theme.BORDER, corner_radius=theme.RADIUS_SM
-        )
-        pass_entry.grid(row=0, column=0, sticky="ew")
-
-        strength_label = ctk.CTkLabel(body, text="Strength: —", font=theme.font(11), text_color=theme.MUTED)
-        strength_label.pack(anchor="w", padx=24, pady=(4, 4))
-
-        strength_bar = ctk.CTkProgressBar(
-            body, height=4, corner_radius=2, fg_color=theme.BORDER, progress_color=theme.MUTED,
-        )
-        strength_bar.pack(fill="x", padx=24, pady=(0, 12))
-        strength_bar.set(0)
-
-        def update_strength(_e=None):
-            pwd = pass_entry.get()
-            s = self.get_strength(pwd)
-            strength_label.configure(text=f"Strength: {s}", text_color=self._strength_color(s))
-            strength_bar.set(PasswordGenerator.strength_score(pwd) / 100)
-            strength_bar.configure(progress_color=self._strength_color(s))
-
-        pass_entry.bind("<KeyRelease>", update_strength)
-
-        # ---------------- Generator ----------------
-
-        gen_panel = ctk.CTkFrame(body, fg_color=theme.PANEL_2, corner_radius=theme.RADIUS)
-        gen_panel.pack(fill="x", padx=24, pady=(0, 20))
-
-        gen_header = ctk.CTkFrame(gen_panel, fg_color="transparent")
-        gen_header.pack(fill="x", padx=18, pady=(16, 8))
-        gen_header.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(
-            gen_header, text="🎲 Password Generator", font=theme.font(15, "bold"), text_color=theme.TEXT,
-        ).grid(row=0, column=0, sticky="w")
-
-        gen_status = ctk.CTkLabel(gen_header, text="", font=theme.font(10), text_color=theme.SUCCESS)
-        gen_status.grid(row=0, column=1, sticky="e")
-
-        length_row = ctk.CTkFrame(gen_panel, fg_color="transparent")
-        length_row.pack(fill="x", padx=18, pady=(0, 6))
-        length_row.grid_columnconfigure(2, weight=1)
-
-        ctk.CTkLabel(length_row, text="Length", font=theme.font(12), text_color=theme.MUTED).grid(
-            row=0, column=0, sticky="w", padx=(0, 10),
-        )
-
-        length_entry = ctk.CTkEntry(
-            length_row, width=56, height=30, justify="center", font=theme.mono(12),
-            fg_color=theme.PANEL, border_color=theme.BORDER, corner_radius=theme.RADIUS_SM,
-        )
-        length_entry.insert(0, str(self.gen_length_var.get()))
-        length_entry.grid(row=0, column=1, sticky="w")
-
-        def sync_length_from_slider(value):
-            length = int(float(value))
-            self.gen_length_var.set(length)
-            length_entry.delete(0, "end")
-            length_entry.insert(0, str(length))
-
-        def sync_length_from_entry(_event=None):
-            try:
-                length = int(length_entry.get().strip())
-            except ValueError:
-                return
-            length = max(MIN_PASSWORD_LENGTH, min(MAX_PASSWORD_LENGTH, length))
-            self.gen_length_var.set(length)
-            length_slider.set(length)
-            length_entry.delete(0, "end")
-            length_entry.insert(0, str(length))
-
-        length_slider = ctk.CTkSlider(
-            length_row, from_=MIN_PASSWORD_LENGTH, to=MAX_PASSWORD_LENGTH, height=18,
-            progress_color=theme.ACCENT, button_color=theme.ACCENT, button_hover_color=theme.ACCENT_HOVER,
-            command=sync_length_from_slider,
-        )
-        length_slider.set(self.gen_length_var.get())
-        length_slider.grid(row=0, column=2, sticky="ew", padx=(12, 0))
-
-        length_entry.bind("<FocusOut>", sync_length_from_entry)
-        length_entry.bind("<Return>", sync_length_from_entry)
-
-        checks = ctk.CTkFrame(gen_panel, fg_color="transparent")
-        checks.pack(fill="x", padx=18, pady=(8, 4))
-        checks.grid_columnconfigure((0, 1), weight=1)
-
-        ctk.CTkCheckBox(checks, text="Uppercase (A-Z)", variable=self.upper_var,
-                         font=theme.font(12), checkbox_width=20, checkbox_height=20).grid(
-            row=0, column=0, sticky="w", pady=4)
-        ctk.CTkCheckBox(checks, text="Lowercase (a-z)", variable=self.lower_var,
-                         font=theme.font(12), checkbox_width=20, checkbox_height=20).grid(
-            row=0, column=1, sticky="w", pady=4)
-        ctk.CTkCheckBox(checks, text="Numbers (0-9)", variable=self.number_var,
-                         font=theme.font(12), checkbox_width=20, checkbox_height=20).grid(
-            row=1, column=0, sticky="w", pady=4)
-        ctk.CTkCheckBox(checks, text="Symbols (!@#$)", variable=self.symbol_var,
-                         font=theme.font(12), checkbox_width=20, checkbox_height=20).grid(
-            row=1, column=1, sticky="w", pady=4)
-        ctk.CTkCheckBox(
-            checks, text="Exclude ambiguous (0/O, 1/l/I)", variable=self.exclude_ambiguous_var,
-            font=theme.font(12), checkbox_width=20, checkbox_height=20,
-        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 2))
-
-        def flash_gen_status(message: str, color=theme.SUCCESS):
-            gen_status.configure(text=message, text_color=color)
-            dialog.after(1600, lambda: gen_status.configure(text=""))
-
-        def do_generate():
-            if not any((
-                self.upper_var.get(),
-                self.lower_var.get(),
-                self.number_var.get(),
-                self.symbol_var.get(),
-            )):
-                flash_gen_status("Pick at least one character type.", theme.ERROR)
-                return
-
-            password = self._generate_password()
-            if not password:
-                flash_gen_status("Could not generate — check options.", theme.ERROR)
-                return
-
-            pass_entry.delete(0, "end")
-            pass_entry.insert(0, password)
-            update_strength()
-            flash_gen_status("Generated")
-
-        def copy_password():
-            if self._copy_to_clipboard(dialog, pass_entry.get(), lambda: flash_gen_status("Copied")):
-                return
-            flash_gen_status("Copy failed.", theme.ERROR)
-
-        btn_row = ctk.CTkFrame(gen_panel, fg_color="transparent")
-        btn_row.pack(fill="x", padx=18, pady=(8, 16))
-        btn_row.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkButton(
-            btn_row, text="🎲 Generate", height=40, font=theme.font(13, "bold"),
-            fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER, text_color="#0b0d10",
-            corner_radius=theme.RADIUS_SM, command=do_generate,
-        ).grid(row=0, column=0, sticky="ew", padx=(0, 6))
-
-        ctk.CTkButton(
-            btn_row, text="Copy", height=40, width=88, font=theme.font(13, "bold"),
-            fg_color=theme.PANEL, hover_color=theme.PANEL_HOVER, text_color=theme.TEXT,
-            border_width=1, border_color=theme.BORDER, corner_radius=theme.RADIUS_SM,
-            command=copy_password,
-        ).grid(row=0, column=1, sticky="e")
-
-        # ---------------- Save (pinned footer) ----------------
-
-        status_label = ctk.CTkLabel(footer, text="", font=theme.font(11), text_color=theme.ERROR)
-        status_label.pack(fill="x", pady=(0, 8))
-
-        def submit():
-            site = site_entry.get().strip()
-            user = user_entry.get().strip()
-            password = pass_entry.get().strip()
-            category = category_menu.get().strip() or "General"
-            url = url_entry.get().strip()
-            notes = notes_box.get("1.0", "end").strip()
-            totp_link_id = self._selected_totp_id(totp_menu, totp_map)
-
-            if not site or not password:
-                status_label.configure(text="Site and password are required.")
-                return
-
-            self.vault.add_entry(
-                site, user, password, category,
-                url=url, notes=notes, totp_link_id=totp_link_id,
-            )
-            dialog.destroy()
-            self._refresh_category_filter()
-            self.render()
-
-        site_entry.bind("<Return>", lambda e: user_entry.focus_set())
-        user_entry.bind("<Return>", lambda e: pass_entry.focus_set())
-        pass_entry.bind("<Return>", lambda e: submit())
-
-        ctk.CTkButton(
-            footer, text="➕ Save Entry", height=42, font=theme.font(14, "bold"),
-            command=submit, **{k: v for k, v in theme.primary_button_style().items() if k != "font"}
-        ).pack(fill="x")
-
-        site_entry.focus_set()
-
-    # =====================================================
-    # DELETE
-    # =====================================================
-
-    def delete_entry(self, entry_id):
-        self.vault.delete_entry(entry_id)
-        if entry_id in self.visible_passwords:
-            self.visible_passwords.remove(entry_id)
+    def _toggle_favorite(self, entry):
+        self.vault.toggle_favorite(entry["id"])
         self.render()
 
-    # =====================================================
-    # TOGGLE FAVORITE
-    # =====================================================
-    def toggle_favorites_filter(self):
-        self.show_favorites_only = not self.show_favorites_only
-        if self.show_favorites_only:
-            self.favorites_toggle_button.configure(fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER, text_color="#0b0d10")
-        else:
-            self.favorites_toggle_button.configure(fg_color=theme.PANEL_2, hover_color=theme.PANEL_HOVER, text_color=theme.TEXT)
-        self.render()
-
-    def toggle_favorite(self, entry_id):
-        self.vault.toggle_favorite(entry_id)
-        self.render()
-
-    def toggle_password_visibility(self, entry_id):
-        if entry_id in self.visible_passwords:
-            self.visible_passwords.remove(entry_id)
-        else:
-            self.visible_passwords.add(entry_id)
-        self.render()
-
-    # =====================================================
-    # OPEN EDIT DIALOG
-    # =====================================================
-    def open_edit_dialog(self, entry):
-        dialog = ctk.CTkToplevel(self)
-        dialog.title("Edit Entry")
-        dialog.geometry("480x640")
-        dialog.minsize(440, 520)
-        dialog.resizable(True, True)
-        dialog.transient(self.master)
-        dialog.configure(fg_color=theme.PANEL)
-        dialog.grid_columnconfigure(0, weight=1)
-        dialog.grid_rowconfigure(0, weight=1)
-        dialog.grab_set()
-
-        entry_id = entry["id"]
-
-        body = ctk.CTkScrollableFrame(
-            dialog, fg_color=theme.PANEL,
-            scrollbar_button_color=theme.PANEL_2,
-            scrollbar_button_hover_color=theme.PANEL_HOVER,
+    def _export(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export vault", "vault_backup.enc",
+            "Encrypted vault (*.enc);;JSON (*.json)",
         )
-        body.grid(row=0, column=0, sticky="nsew")
+        if not path:
+            return
+        try:
+            if path.lower().endswith(".json"):
+                self.vault.export_json(path)
+            else:
+                self.vault.export_encrypted(path)
+            QMessageBox.information(self, "Export", f"Saved to {path}")
+        except Exception as exc:
+            QMessageBox.warning(self, "Export failed", str(exc))
 
-        footer = ctk.CTkFrame(dialog, fg_color=theme.PANEL)
-        footer.grid(row=1, column=0, sticky="ew", padx=24, pady=(4, 16))
-
-        ctk.CTkLabel(body, text="✏ Edit Entry", font=theme.font(18, "bold"), text_color=theme.TEXT).pack(
-            pady=(20, 16), padx=24, anchor="w"
+    def _import(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import vault", "",
+            "Vault backup (*.enc *.json);;Encrypted vault (*.enc);;JSON (*.json)",
         )
-
-        def field_label(text):
-            ctk.CTkLabel(body, text=text, anchor="w", font=theme.font(12), text_color=theme.MUTED).pack(
-                fill="x", padx=24, pady=(0, 3)
-            )
-
-        field_label("Site")
-        edit_site_entry = ctk.CTkEntry(body, height=38, fg_color=theme.PANEL_2, border_color=theme.BORDER, corner_radius=theme.RADIUS_SM)
-        edit_site_entry.insert(0, entry["site"])
-        edit_site_entry.pack(fill="x", padx=24, pady=(0, 12))
-
-        field_label("Username")
-        edit_user_entry = ctk.CTkEntry(body, height=38, fg_color=theme.PANEL_2, border_color=theme.BORDER, corner_radius=theme.RADIUS_SM)
-        edit_user_entry.insert(0, entry["username"])
-        edit_user_entry.pack(fill="x", padx=24, pady=(0, 12))
-
-        field_label("Website URL")
-        edit_url_entry = ctk.CTkEntry(body, height=38, fg_color=theme.PANEL_2, border_color=theme.BORDER, corner_radius=theme.RADIUS_SM)
-        edit_url_entry.insert(0, entry.get("url", ""))
-        edit_url_entry.pack(fill="x", padx=24, pady=(0, 12))
-
-        field_label("Notes")
-        edit_notes_box = ctk.CTkTextbox(
-            body, height=72, font=theme.font(12),
-            fg_color=theme.PANEL_2, border_color=theme.BORDER, corner_radius=theme.RADIUS_SM,
-        )
-        edit_notes_box.pack(fill="x", padx=24, pady=(0, 12))
-        if entry.get("notes"):
-            edit_notes_box.insert("1.0", entry["notes"])
-
-        field_label("Link authenticator (2FA)")
-        totp_labels, totp_map = self._totp_link_options()
-        edit_totp_menu = ctk.CTkComboBox(
-            body, values=totp_labels, height=38, fg_color=theme.PANEL_2,
-            border_color=theme.BORDER, button_color=theme.PANEL_2, button_hover_color=theme.PANEL_HOVER,
-            corner_radius=theme.RADIUS_SM,
-        )
-        current_totp = entry.get("totp_link_id", "")
-        current_label = next((lbl for lbl, tid in totp_map.items() if tid == current_totp), totp_labels[0])
-        edit_totp_menu.set(current_label)
-        edit_totp_menu.pack(fill="x", padx=24, pady=(0, 12))
-
-        field_label("Password")
-        edit_pass_entry = ctk.CTkEntry(body, height=38, font=theme.mono(13), fg_color=theme.PANEL_2, border_color=theme.BORDER, corner_radius=theme.RADIUS_SM)
-        edit_pass_entry.insert(0, entry["password"])
-        edit_pass_entry.pack(fill="x", padx=24, pady=(0, 12))
-
-        field_label("Category")
-        edit_category_menu = ctk.CTkComboBox(
-            body, values=self._all_categories(), height=38, fg_color=theme.PANEL_2,
-            border_color=theme.BORDER, button_color=theme.PANEL_2, button_hover_color=theme.PANEL_HOVER,
-            corner_radius=theme.RADIUS_SM
-        )
-        edit_category_menu.set(entry["category"])
-        edit_category_menu.pack(fill="x", padx=24, pady=(0, 20))
-
-        def save_edited_entry():
-            new_site = edit_site_entry.get().strip()
-            new_user = edit_user_entry.get().strip()
-            new_password = edit_pass_entry.get().strip()
-            new_category = edit_category_menu.get().strip() or "General"
-            new_url = edit_url_entry.get().strip()
-            new_notes = edit_notes_box.get("1.0", "end").strip()
-            new_totp = self._selected_totp_id(edit_totp_menu, totp_map)
-
-            if not new_site or not new_password:
-                return
-
-            self.vault.update_entry(
-                entry_id, new_site, new_user, new_password, new_category,
-                url=new_url, notes=new_notes, totp_link_id=new_totp,
-            )
-            dialog.destroy()
-            self._refresh_category_filter()
-            self.render()
-            if self.audit_tab:
-                self.audit_tab.refresh()
-
-        ctk.CTkButton(
-            footer, text="Save Changes", height=42, font=theme.font(14, "bold"),
-            command=save_edited_entry, **{k: v for k, v in theme.primary_button_style().items() if k != "font"}
-        ).pack(fill="x")
-
-    # =====================================================
-    # CHANGE MASTER PASSWORD
-    # =====================================================
-
-    def open_change_password_dialog(self):
-
-        auth = self.manager.container.auth_service
-
-        dialog = ctk.CTkToplevel(self)
-        dialog.title("Change Master Password")
-        dialog.geometry("380x420")
-        dialog.transient(self.master)
-        dialog.configure(fg_color=theme.PANEL)
-        dialog.grab_set()  # modal — this touches vault security, don't let it get lost behind other windows
-
-        ctk.CTkLabel(
-            dialog,
-            text="🔑 Change Master Password",
-            font=theme.font(17, "bold"),
-            text_color=theme.TEXT
-        ).pack(pady=(20, 4))
-
-        ctk.CTkLabel(
-            dialog,
-            text="You'll need your current password to confirm.",
-            font=theme.font(11),
-            text_color=theme.MUTED,
-            wraplength=300
-        ).pack(pady=(0, 16))
-
-        def labeled_entry(text):
-            ctk.CTkLabel(
-                dialog, text=text, anchor="w", font=theme.font(12), text_color=theme.MUTED
-            ).pack(fill="x", padx=24, pady=(4, 2))
-            e = ctk.CTkEntry(
-                dialog, show="•", height=36,
-                fg_color=theme.PANEL_2, border_color=theme.BORDER, corner_radius=theme.RADIUS_SM
-            )
-            e.pack(fill="x", padx=24)
-            return e
-
-        current_entry = labeled_entry("Current password")
-        new_entry = labeled_entry("New password")
-
-        strength_bar = ctk.CTkProgressBar(
-            dialog, height=4, corner_radius=2,
-            progress_color=STRENGTH_COLORS[0], fg_color=theme.BORDER
-        )
-        strength_bar.pack(fill="x", padx=24, pady=(6, 0))
-        strength_bar.set(0)
-
-        strength_label = ctk.CTkLabel(dialog, text=" ", font=theme.font(11), text_color=theme.FAINT)
-        strength_label.pack(anchor="e", padx=24)
-
-        def update_strength(_event=None):
-            score, label = AuthService.password_strength(new_entry.get())
-            strength_bar.configure(progress_color=STRENGTH_COLORS[max(score - 1, 0)])
-            strength_bar.set(score / 4)
-            strength_label.configure(text=label if new_entry.get() else " ")
-
-        new_entry.bind("<KeyRelease>", update_strength)
-
-        confirm_entry = labeled_entry("Confirm new password")
-
-        status_label = ctk.CTkLabel(dialog, text="", font=theme.font(11), text_color=theme.ERROR, wraplength=300)
-        status_label.pack(pady=(10, 0))
-
-        def submit():
-            current = current_entry.get()
-            new = new_entry.get()
-            confirm = confirm_entry.get()
-
-            if len(new) < 8:
-                status_label.configure(text_color=theme.ERROR, text="New password must be at least 8 characters.")
-                return
-
-            if new != confirm:
-                status_label.configure(text_color=theme.ERROR, text="New passwords do not match.")
-                return
-
-            if new == current:
-                status_label.configure(text_color=theme.ERROR, text="New password must be different from the current one.")
-                return
-
-            if not auth.change_master_password(current, new):
-                status_label.configure(text_color=theme.ERROR, text="Current password is incorrect.")
-                current_entry.delete(0, "end")
-                return
-
-            status_label.configure(text_color=theme.SUCCESS, text="Master password changed.")
-            dialog.after(700, dialog.destroy)
-
-        current_entry.bind("<Return>", lambda e: new_entry.focus_set())
-        new_entry.bind("<Return>", lambda e: confirm_entry.focus_set())
-        confirm_entry.bind("<Return>", lambda e: submit())
-
-        ctk.CTkButton(
-            dialog,
-            text="Change Password",
-            height=38,
-            fg_color=theme.ACCENT,
-            hover_color=theme.ACCENT_HOVER,
-            text_color="#0b0d10",
-            font=theme.font(13, "bold"),
-            command=submit
-        ).pack(fill="x", padx=24, pady=(18, 0))
-
-        current_entry.focus_set()
-
-    # =====================================================
-    # IMPORT / EXPORT
-    # =====================================================
-
-    def export_vault(self):
-        path = filedialog.asksaveasfilename(
-            defaultextension=".json",
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
-        )
-        if path:
-            self.vault.export_json(path)
-
-    def import_vault(self):
-        path = filedialog.askopenfilename(
-            filetypes=[
-                ("Vault backup", "*.json;*.enc"),
-                ("JSON files", "*.json"),
-                ("Encrypted vault", "*.enc"),
-                ("All files", "*.*"),
-            ]
-        )
-        if path:
+        if not path:
+            return
+        try:
             if path.lower().endswith(".enc"):
                 self.vault.import_encrypted(path)
             else:
                 self.vault.import_json(path)
-            self._refresh_category_filter()
             self.render()
+            QMessageBox.information(self, "Import", "Imported.")
+        except Exception as exc:
+            QMessageBox.warning(self, "Import failed", str(exc))
 
-    def export_emergency_kit_dialog(self):
-        folder = filedialog.askdirectory(title="Choose folder for Emergency Kit")
+    def _export_kit(self):
+        folder = QFileDialog.getExistingDirectory(self, "Choose folder for Emergency Kit")
         if not folder:
             return
         try:
             export_emergency_kit(folder, self.vault, self.totp)
-            messagebox.showinfo(
-                "Emergency Kit exported",
+            QMessageBox.information(
+                self, "Emergency Kit",
                 f"Saved to:\n{folder}\n\nKeep README.txt and the .enc files offline and safe.",
             )
         except Exception as exc:
-            messagebox.showerror("Export failed", str(exc))
+            QMessageBox.warning(self, "Export failed", str(exc))
 
-    # =====================================================
-    # COPY
-    # =====================================================
+    def _clear_layout(self, layout):
+        while layout.count():
+            item = layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
 
-    def copy_password(self, password):
-        if pyperclip:
-            pyperclip.copy(password)
-
-    def copy_username(self, username):
-        if pyperclip:
-            pyperclip.copy(username)
-
-    # =====================================================
-    # RENDER
-    # =====================================================
-
-    def render(self):
-
-        for widget in self.cards.winfo_children():
-            widget.destroy()
-
-        self._card_totp_labels.clear()
-        if self._totp_tick_job is not None:
-            try:
-                self.after_cancel(self._totp_tick_job)
-            except Exception:
-                pass
-            self._totp_tick_job = None
-
-        all_entries_from_vault = self.vault.get_entries()
-
-        # Stats
-        stats = self.vault.stats()
-        self.stats_total_label.configure(text=str(stats["total"]))
-        self.stats_favorites_label.configure(text=str(stats["favorites"]))
-        self.stats_categories_label.configure(text=str(stats["categories"]))
-        self.stats_sites_label.configure(text=str(stats["sites"]))
-
-        security = self.vault.security_score()
-        score = security["score"]
-
-        color = theme.SUCCESS
-        if score < 80:
-            color = "#f1c40f"
-        if score < 60:
-            color = theme.ERROR
-
-        self.security_label.configure(text=f"{score}/100", text_color=color)
-
-        entries_to_render = all_entries_from_vault
-
-        search_query = self.search.get().lower().strip()
-        if search_query:
-            entries_to_render = [
-                e for e in entries_to_render
-                if search_query in e["site"].lower() or
-                   search_query in e["username"].lower() or
-                   search_query in e["category"].lower()
-            ]
-
-        selected_category = self.filter_category.get()
-        if selected_category != "All":
-            entries_to_render = [e for e in entries_to_render if e["category"] == selected_category]
-
-        if self.show_favorites_only:
-            entries_to_render = [e for e in entries_to_render if e.get("favorite", False)]
-
-        entries_to_render.sort(key=lambda x: x.get("updated", ""), reverse=True)
-
-        if not entries_to_render:
-            ctk.CTkLabel(
-                self.cards,
-                text="No entries yet — click ➕ Add Entry to save your first login."
-                if not all_entries_from_vault else "No entries match your search/filter.",
-                font=theme.font(13), text_color=theme.MUTED
-            ).pack(pady=30)
-
-        for item in entries_to_render:
-            self._render_card(item)
-
-        self._schedule_totp_card_tick()
-        if self.audit_tab:
-            self.audit_tab.refresh()
-
-    def _render_card(self, item):
-        card = ctk.CTkFrame(self.cards, fg_color=theme.PANEL_2, corner_radius=theme.RADIUS, border_width=1, border_color=theme.BORDER)
-        card.pack(fill="x", padx=6, pady=6)
-
-        body = ctk.CTkFrame(card, fg_color="transparent")
-        body.pack(fill="x", padx=14, pady=(12, 4))
-
-        initial = (item["site"][:1] or "?").upper()
-        ctk.CTkLabel(
-            body, text=initial, width=42, height=42, corner_radius=21,
-            fg_color=theme.hash_color(item["site"] or item["id"]),
-            text_color="#0b0d10", font=theme.font(16, "bold")
-        ).pack(side="left", padx=(0, 12))
-
-        info = ctk.CTkFrame(body, fg_color="transparent")
-        info.pack(side="left", fill="x", expand=True)
-
-        title_row = ctk.CTkFrame(info, fg_color="transparent")
-        title_row.pack(fill="x", anchor="w")
-
-        ctk.CTkLabel(title_row, text=item["site"], font=theme.font(16, "bold"), text_color=theme.TEXT).pack(side="left")
-
-        ctk.CTkLabel(
-            title_row, text=f"  {item['category']}  ", font=theme.font(10, "bold"),
-            text_color=theme.ACCENT, fg_color=theme.ACCENT_GLOW, corner_radius=theme.RADIUS_SM
-        ).pack(side="left", padx=(8, 0))
-
-        for badge_text, badge_color in self._security_badges(item["id"]):
-            ctk.CTkLabel(
-                title_row, text=f" {badge_text} ", font=theme.font(9, "bold"),
-                text_color="#0b0d10", fg_color=badge_color, corner_radius=6,
-            ).pack(side="left", padx=(6, 0))
-
-        if item.get("favorite", False):
-            ctk.CTkLabel(title_row, text="⭐", font=theme.font(11)).pack(side="left", padx=(6, 0))
-
-        ctk.CTkLabel(info, text=item["username"] or "—", font=theme.font(12), text_color=theme.MUTED).pack(
-            anchor="w", pady=(3, 0)
+    def _render_audit(self):
+        self._clear_layout(self.audit_list_lay)
+        audit = self.vault.audit_summary()
+        score = audit["score"]
+        self.audit_score.setText(f"Score: {score}/100")
+        breached = sum(1 for c in self._breach_cache.values() if c > 0)
+        extra = f" · {breached} found in breaches" if self._breach_cache else ""
+        self.audit_summary.setText(
+            f"{audit['total']} passwords · {audit['weak_count']} weak · "
+            f"{audit['reused_count']} reused{extra}"
         )
+        issues = []
+        entries = {e["id"]: e for e in self.vault.get_entries()}
+        tagged = {}
+        for eid in audit["weak_ids"]:
+            entry = entries.get(eid)
+            if entry:
+                tagged[eid] = (entry, ["Weak password"])
+        for eid in audit["reused_ids"]:
+            entry = entries.get(eid)
+            if not entry:
+                continue
+            if eid in tagged:
+                tagged[eid][1].append("Password reused elsewhere")
+            else:
+                tagged[eid] = (entry, ["Password reused elsewhere"])
+        for eid, count in self._breach_cache.items():
+            if count <= 0:
+                continue
+            entry = entries.get(eid)
+            if not entry:
+                continue
+            tag = f"In {count:,} breaches"
+            if eid in tagged:
+                tagged[eid][1].append(tag)
+            else:
+                tagged[eid] = (entry, [tag])
+        issues = list(tagged.values())
+        if not issues:
+            empty = QLabel("No issues found — your vault looks healthy.")
+            empty.setObjectName("Muted")
+            self.audit_list_lay.addWidget(empty)
+        for entry, tags in issues:
+            row = QFrame()
+            row.setObjectName("Card")
+            rl = QHBoxLayout(row)
+            left = QVBoxLayout()
+            site = QLabel(entry.get("site") or "Untitled")
+            site.setObjectName("CardTitle")
+            user = QLabel(entry.get("username") or "—")
+            user.setObjectName("Muted")
+            tag_lab = QLabel(" · ".join(tags))
+            tag_lab.setObjectName("Error")
+            left.addWidget(site)
+            left.addWidget(user)
+            left.addWidget(tag_lab)
+            fix = QPushButton("Fix")
+            fix.setObjectName("Primary")
+            fix.clicked.connect(lambda _=False, e=entry: self._edit_entry(e))
+            rl.addLayout(left, 1)
+            rl.addWidget(fix)
+            self.audit_list_lay.addWidget(row)
+        self.audit_list_lay.addStretch(1)
 
-        is_visible = item["id"] in self.visible_passwords
-        password_text = item["password"] if is_visible else "•" * 14
-        ctk.CTkLabel(
-            info, text=password_text, font=theme.mono(12), text_color=theme.TEXT if is_visible else theme.FAINT
-        ).pack(anchor="w", pady=(3, 0))
+    def _start_breach_scan(self):
+        if self._scanning:
+            return
+        self._scanning = True
+        self.audit_status.setText("Scanning passwords against Have I Been Pwned…")
 
-        totp_id = item.get("totp_link_id", "")
-        if totp_id:
-            totp_entry = self.totp.get_entry(totp_id)
-            if totp_entry:
-                code = totp_mod.generate_code(totp_entry["secret"])
-                rem = totp_mod.seconds_remaining()
-                totp_lbl = ctk.CTkLabel(
-                    info, text=f"2FA {code} · {rem}s", font=theme.mono(12, "bold"), text_color=theme.ACCENT,
-                )
-                totp_lbl.pack(anchor="w", pady=(3, 0))
-                self._card_totp_labels[item["id"]] = (totp_lbl, totp_entry["secret"])
+        def worker():
+            entries = self.vault.get_entries()
+            total = len(entries)
+            for i, entry in enumerate(entries):
+                try:
+                    self._breach_cache[entry["id"]] = check_password(entry["password"])
+                except HIBPError as exc:
+                    QTimer.singleShot(0, lambda msg=str(exc): self.audit_status.setText(msg))
+                    break
+                except Exception:
+                    self._breach_cache[entry["id"]] = 0
+                if i < total - 1:
+                    time.sleep(0.25)
+                QTimer.singleShot(0, lambda n=i + 1, t=total: self.audit_status.setText(f"Scanning… {n}/{t}"))
+            QTimer.singleShot(0, self._scan_finished)
 
-        if item.get("notes"):
-            preview = item["notes"].replace("\n", " ")
-            if len(preview) > 80:
-                preview = preview[:77] + "…"
-            ctk.CTkLabel(
-                info, text=f"📝 {preview}", font=theme.font(10), text_color=theme.FAINT, anchor="w",
-            ).pack(anchor="w", pady=(3, 0))
+        threading.Thread(target=worker, daemon=True).start()
 
-        updated_date_str = item["updated"]
-        if isinstance(updated_date_str, datetime.datetime):
-            updated_date_str = updated_date_str.strftime("%Y-%m-%d")
-        ctk.CTkLabel(body, text=f"Updated {updated_date_str[:10]}", font=theme.font(10), text_color=theme.FAINT).pack(
-            side="right", anchor="n"
+    def _scan_finished(self):
+        self._scanning = False
+        breached = sum(1 for c in self._breach_cache.values() if c > 0)
+        self.audit_status.setText(f"Scan complete — {breached} password(s) found in known breaches.")
+        self._render_audit()
+
+    def _copy(self, text):
+        from PySide6.QtWidgets import QApplication
+        QApplication.clipboard().setText(text)
+        self.auth.touch()
+
+    def _delete(self, entry):
+        if QMessageBox.question(self, "Delete", f"Delete {entry.get('site')}?") != QMessageBox.StandardButton.Yes:
+            return
+        self.vault.delete_entry(entry["id"])
+        self.render()
+
+    def _edit_entry(self, entry):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Vault entry")
+        form = QFormLayout(dlg)
+        site = QLineEdit((entry or {}).get("site") or "")
+        user = QLineEdit((entry or {}).get("username") or "")
+        pw = QLineEdit((entry or {}).get("password") or "")
+        url = QLineEdit((entry or {}).get("url") or "")
+        notes = QLineEdit((entry or {}).get("notes") or "")
+        cat = QComboBox()
+        cat.setEditable(True)
+        cat.addItems(DEFAULT_CATEGORIES)
+        cat.setCurrentText((entry or {}).get("category") or "General")
+        gen = QPushButton("Generate")
+        gen.clicked.connect(lambda: pw.setText(PasswordGenerator.generate()))
+        pw_row = QHBoxLayout()
+        pw_row.addWidget(pw, 1)
+        pw_row.addWidget(gen)
+        form.addRow("Site", site)
+        form.addRow("Username", user)
+        form.addRow("Password", pw_row)
+        form.addRow("Category", cat)
+        form.addRow("URL", url)
+        form.addRow("Notes", notes)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        form.addRow(buttons)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        args = dict(
+            site=site.text(), username=user.text(), password=pw.text(),
+            category=cat.currentText(), url=url.text(), notes=notes.text(),
         )
+        if entry:
+            self.vault.update_entry(entry["id"], **args)
+        else:
+            self.vault.add_entry(**args)
+        self.auth.touch()
+        self.render()
 
-        # ---------------- action buttons ----------------
+    def _add_totp(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Add authenticator")
+        form = QFormLayout(dlg)
+        name = QLineEdit()
+        secret = QLineEdit()
+        issuer = QLineEdit()
+        form.addRow("Name", name)
+        form.addRow("Secret", secret)
+        form.addRow("Issuer", issuer)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        form.addRow(buttons)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            self.totp.add_entry(name.text(), secret.text(), issuer.text())
+        except Exception as e:
+            QMessageBox.warning(self, "Authenticator", str(e))
+        self._render_totp()
 
-        buttons = ctk.CTkFrame(card, fg_color="transparent")
-        buttons.pack(fill="x", padx=14, pady=(6, 12))
+    def _render_totp(self):
+        while self.totp_list.count():
+            item = self.totp_list.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        for e in self.totp.get_entries():
+            row = QFrame()
+            row.setObjectName("Panel")
+            rl = QHBoxLayout(row)
+            left = QVBoxLayout()
+            title = QLabel(e.get("name") or "Account")
+            title.setObjectName("CardTitle")
+            issuer = QLabel(e.get("issuer") or "")
+            issuer.setObjectName("Muted")
+            left.addWidget(title)
+            left.addWidget(issuer)
+            code = QLabel("")
+            code.setObjectName("AccentTitle")
+            code.setProperty("secret", e.get("secret") or "")
+            delete = QPushButton("Delete")
+            delete.setObjectName("Danger")
+            delete.clicked.connect(lambda _=False, i=e.get("id"): self._del_totp(i))
+            rl.addLayout(left, 1)
+            rl.addWidget(code)
+            rl.addWidget(delete)
+            self.totp_list.addWidget(row)
+        self._tick_totp()
 
-        def icon_btn(parent, text, cmd, width=38, style=None, **overrides):
-            kw = dict(style or theme.secondary_button_style())
-            kw.update(overrides)
-            return ctk.CTkButton(parent, text=text, width=width, height=32, command=cmd, **kw)
+    def _del_totp(self, entry_id):
+        self.totp.delete_entry(entry_id)
+        self._render_totp()
 
-        is_fav = item.get("favorite", False)
-        icon_btn(
-            buttons, "⭐" if is_fav else "☆", lambda eid=item["id"]: self.toggle_favorite(eid),
-            style=theme.primary_button_style() if is_fav else theme.secondary_button_style()
-        ).pack(side="left", padx=(0, 4))
+    def _tick_totp(self):
+        for i in range(self.totp_list.count()):
+            w = self.totp_list.itemAt(i).widget()
+            if w is None:
+                continue
+            for lab in w.findChildren(QLabel):
+                secret = lab.property("secret")
+                if secret:
+                    try:
+                        lab.setText(generate_code(secret))
+                    except Exception:
+                        lab.setText("------")
 
-        icon_btn(
-            buttons, "🙈" if is_visible else "👁", lambda eid=item["id"]: self.toggle_password_visibility(eid)
-        ).pack(side="left", padx=4)
 
-        icon_btn(buttons, "📋", lambda p=item["password"]: self.copy_password(p), width=44).pack(side="left", padx=4)
-        icon_btn(buttons, "👤📋", lambda u=item["username"]: self.copy_username(u), width=50).pack(side="left", padx=4)
-        if item.get("url"):
-            icon_btn(
-                buttons, "🌐", lambda u=item["url"]: self._open_url(u), width=44,
-            ).pack(side="left", padx=4)
-        icon_btn(buttons, "✏", lambda e=item: self.open_edit_dialog(e), width=44).pack(side="left", padx=4)
-        icon_btn(
-            buttons, "🗑", lambda eid=item["id"]: self.delete_entry(eid), width=44,
-            style=theme.danger_button_style()
-        ).pack(side="right")
+class _VaultSettings(QWidget):
+    def __init__(self, parent, manager):
+        super().__init__(parent)
+        self.manager = manager
+        tabs = QTabWidget()
+        tabs.addTab(VaultRemoteSettings(tabs, manager), "Remote access")
+        tabs.addTab(_HardwareKeySettings(tabs, manager), "Security key")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(tabs)
+
+
+class _HardwareKeySettings(QWidget):
+    def __init__(self, parent, manager):
+        super().__init__(parent)
+        self.auth = manager.container.auth_service
+        self.hw = manager.container.hardware_key_service
+        lay = QVBoxLayout(self)
+        title = QLabel("Security key (optional)")
+        title.setObjectName("CardTitle")
+        hint = QLabel(
+            "Use a FIDO2 USB key (YubiKey, etc.) to unlock the vault instead of typing your master password."
+        )
+        hint.setObjectName("Muted")
+        hint.setWordWrap(True)
+        self.status = QLabel("")
+        self.status.setWordWrap(True)
+        row = QHBoxLayout()
+        register = QPushButton("Register security key")
+        register.setObjectName("Primary")
+        register.clicked.connect(self._register)
+        self.remove_btn = QPushButton("Remove")
+        self.remove_btn.clicked.connect(self._remove)
+        row.addWidget(register)
+        row.addWidget(self.remove_btn)
+        row.addStretch(1)
+        lay.addWidget(title)
+        lay.addWidget(hint)
+        lay.addWidget(self.status)
+        lay.addLayout(row)
+        lay.addStretch(1)
+        self._refresh()
+
+    def _refresh(self):
+        self.status.setText(self.hw.status_message())
+        self.remove_btn.setEnabled(self.hw.is_enabled())
+
+    def _confirm_master(self):
+        if not self.auth.is_initialized():
+            QMessageBox.warning(self, "Secure Vault", "Create a master password first.")
+            return False
+        pwd, ok = QInputDialog.getText(
+            self, "Confirm master password",
+            "Enter your master password to change security key settings:",
+            QLineEdit.EchoMode.Password,
+        )
+        if not ok:
+            return False
+        if not self.auth.verify_master_password(pwd):
+            QMessageBox.warning(self, "Secure Vault", "Incorrect master password.")
+            return False
+        return True
+
+    def _register(self):
+        if not self._confirm_master():
+            return
+        try:
+            self.hw.register_key()
+            QMessageBox.information(
+                self, "Security key registered",
+                "Your key is registered. Use “Unlock with security key” on the vault lock screen.",
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Registration failed", str(exc))
+        self._refresh()
+
+    def _remove(self):
+        if not self._confirm_master():
+            return
+        if QMessageBox.question(
+            self, "Remove security key",
+            "Remove registered key unlock? You will need your master password to unlock.",
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        self.hw.disable()
+        self._refresh()

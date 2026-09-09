@@ -1,256 +1,231 @@
-"""
-Driver/Update Checker — UI.
-
-Follows the shared ZsMultiTool module convention: exposes a CTkFrame
-subclass the plugin manager instantiates into `manager.container`.
-
-Each tab's scan runs on a plain background thread (a single blocking
-call rather than a stream of progress events, so the lighter-weight
-threading.Thread + self.after(0, ...) callback pattern is used here
-instead of the queue-polling worker convention from File Shredder /
-Duplicate File Finder).
-"""
+"""Qt Driver/Update Checker — installed drivers, WU drivers, winget."""
 
 from __future__ import annotations
 
 import threading
-import tkinter as tk
 
-import customtkinter as ctk
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QScrollArea,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
-from .backend import (
+from modules.System.driver_checker.backend import (
     WIN32COM_AVAILABLE,
-    DriverInfo,
-    SoftwareUpdateInfo,
-    UpdateInfo,
     check_driver_updates,
     check_software_updates,
     list_installed_drivers,
 )
-from core import theme as t
 
 
-class DriverCheckerModule(ctk.CTkFrame):
+def _clear(layout):
+    while layout.count():
+        item = layout.takeAt(0)
+        w = item.widget()
+        if w is not None:
+            w.deleteLater()
 
-    def __init__(self, master, manager=None, **kwargs):
-        super().__init__(master, fg_color=t.BG, **kwargs)
+
+class DriverCheckerModule(QWidget):
+    def __init__(self, parent, manager):
+        super().__init__(parent)
         self.manager = manager
+        self._drivers = []
 
-        self._drivers: list[DriverInfo] = []
-        self.driver_search_var = tk.StringVar()
-        self.driver_search_var.trace_add("write", lambda *_: self._render_driver_rows())
-
-        self._build_layout()
-
-    # ------------------------------------------------------------------ UI
-
-    def _build_layout(self) -> None:
-        self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(2, weight=1)
-
-        header = ctk.CTkLabel(
-            self, text="🔧  Driver / Update Checker",
-            font=t.font(20, "bold"), text_color=t.TEXT,
+        root = QVBoxLayout(self)
+        title = QLabel("Driver / Update Checker")
+        title.setObjectName("AccentTitle")
+        root.addWidget(title)
+        sub = QLabel(
+            "Installed drivers, pending driver updates via Windows Update, "
+            "and pending app/package updates via winget — three separate checks."
         )
-        header.grid(row=0, column=0, sticky="w", padx=16, pady=(16, 4))
+        sub.setObjectName("Muted")
+        sub.setWordWrap(True)
+        root.addWidget(sub)
 
-        subtitle = ctk.CTkLabel(
-            self,
-            text=(
-                "Installed drivers, pending driver updates via Windows Update, "
-                "and pending app/package updates via winget — three separate "
-                "checks, each run on demand."
-            ),
-            font=t.font(12), text_color=t.MUTED, anchor="w", justify="left",
-            wraplength=760,
+        tabs = QTabWidget()
+        root.addWidget(tabs, 1)
+        tabs.addTab(self._build_drivers_tab(), "Installed Drivers")
+        tabs.addTab(self._build_driver_updates_tab(), "Driver Updates")
+        tabs.addTab(self._build_software_updates_tab(), "Software Updates")
+
+    def _header_row(self, label, command):
+        row = QHBoxLayout()
+        btn = QPushButton(label)
+        btn.setObjectName("Primary")
+        btn.clicked.connect(command)
+        status = QLabel("")
+        status.setObjectName("Muted")
+        row.addWidget(btn)
+        row.addWidget(status, 1)
+        return row, btn, status
+
+    def _scroll_host(self):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        host = QWidget()
+        lay = QVBoxLayout(host)
+        scroll.setWidget(host)
+        return scroll, lay
+
+    def _build_drivers_tab(self):
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        row, self.drivers_btn, self.drivers_status = self._header_row(
+            "Scan Installed Drivers", self._start_driver_scan
         )
-        subtitle.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 12))
+        lay.addLayout(row)
+        self.driver_search = QLineEdit()
+        self.driver_search.setPlaceholderText("Filter by device name…")
+        self.driver_search.textChanged.connect(self._render_driver_rows)
+        lay.addWidget(self.driver_search)
+        scroll, self.drivers_lay = self._scroll_host()
+        lay.addWidget(scroll, 1)
+        return page
 
-        self.tabview = ctk.CTkTabview(
-            self, fg_color=t.PANEL,
-            segmented_button_fg_color=t.PANEL_2,
-            segmented_button_selected_color=t.ACCENT,
-            segmented_button_selected_hover_color=t.ACCENT_HOVER,
-            text_color=t.TEXT,
-        )
-        self.tabview.grid(row=2, column=0, sticky="nsew", padx=16, pady=(0, 16))
-
-        self.tabview.add("Installed Drivers")
-        self.tabview.add("Driver Updates")
-        self.tabview.add("Software Updates")
-
-        self._build_drivers_tab(self.tabview.tab("Installed Drivers"))
-        self._build_driver_updates_tab(self.tabview.tab("Driver Updates"))
-        self._build_software_updates_tab(self.tabview.tab("Software Updates"))
-
-    # ---------------------------------------------------------- shared bits
-
-    def _tab_header_row(self, parent, scan_label: str, scan_command) -> tuple[ctk.CTkButton, ctk.CTkLabel]:
-        row = ctk.CTkFrame(parent, fg_color="transparent")
-        row.pack(fill="x", padx=4, pady=(4, 8))
-        btn = ctk.CTkButton(row, text=scan_label, **t.primary_button_style(), command=scan_command)
-        btn.pack(side="left")
-        status = ctk.CTkLabel(row, text="", text_color=t.MUTED, font=t.font(12))
-        status.pack(side="left", padx=(12, 0))
-        return btn, status
-
-    def _scroll_area(self, parent) -> ctk.CTkScrollableFrame:
-        area = ctk.CTkScrollableFrame(parent, fg_color=t.PANEL_2, corner_radius=t.RADIUS_SM)
-        area.pack(fill="both", expand=True, padx=4, pady=(0, 4))
-        area.grid_columnconfigure(0, weight=1)
-        return area
-
-    # -------------------------------------------------------- installed drivers
-
-    def _build_drivers_tab(self, parent) -> None:
-        parent.grid_columnconfigure(0, weight=1)
-        parent.grid_rowconfigure(2, weight=1)
-
-        self.drivers_btn, self.drivers_status = self._tab_header_row(
-            parent, "Scan Installed Drivers", self._start_driver_scan,
-        )
-
-        search = ctk.CTkEntry(
-            parent, placeholder_text="Filter by device name…",
-            textvariable=self.driver_search_var,
-            fg_color=t.PANEL_2, border_color=t.BORDER, text_color=t.TEXT,
-        )
-        search.pack(fill="x", padx=4, pady=(0, 8))
-
-        self.drivers_area = self._scroll_area(parent)
-
-    def _start_driver_scan(self) -> None:
-        self.drivers_btn.configure(state="disabled")
-        self.drivers_status.configure(text="Querying installed drivers…")
+    def _start_driver_scan(self):
+        self.drivers_btn.setEnabled(False)
+        self.drivers_status.setText("Querying installed drivers…")
 
         def work():
             drivers, error = list_installed_drivers()
-            self.after(0, lambda: self._finish_driver_scan(drivers, error))
+            QTimer.singleShot(0, lambda: self._finish_driver_scan(drivers, error))
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _finish_driver_scan(self, drivers: list[DriverInfo], error: str) -> None:
-        self.drivers_btn.configure(state="normal")
+    def _finish_driver_scan(self, drivers, error):
+        self.drivers_btn.setEnabled(True)
         self._drivers = drivers
-        if error:
-            self.drivers_status.configure(text=error)
-        else:
-            self.drivers_status.configure(text=f"{len(drivers)} driver(s) found.")
+        self.drivers_status.setText(error or f"{len(drivers)} driver(s) found.")
         self._render_driver_rows()
 
-    def _render_driver_rows(self) -> None:
-        for child in self.drivers_area.winfo_children():
-            child.destroy()
-
-        query = self.driver_search_var.get().strip().lower()
+    def _render_driver_rows(self):
+        _clear(self.drivers_lay)
+        query = self.driver_search.text().strip().lower()
         visible = [d for d in self._drivers if query in d.device_name.lower()] if query else self._drivers
-
         if not visible:
-            ctk.CTkLabel(
-                self.drivers_area,
-                text="  No drivers to show — run a scan above." if not self._drivers else "  No matches.",
-                text_color=t.MUTED, font=t.font(12),
-            ).grid(row=0, column=0, sticky="w", pady=8)
+            empty = QLabel("No drivers to show — run a scan above." if not self._drivers else "No matches.")
+            empty.setObjectName("Muted")
+            self.drivers_lay.addWidget(empty)
+            self.drivers_lay.addStretch(1)
             return
+        for d in visible:
+            row = QFrame()
+            row.setObjectName("Panel")
+            rl = QVBoxLayout(row)
+            name = QLabel(d.device_name)
+            name.setObjectName("CardTitle")
+            detail = QLabel(
+                f"{d.manufacturer or 'Unknown manufacturer'} · v{d.version or '?'} · "
+                f"{d.date or 'no date'} · {d.device_class or 'Unclassified'}"
+            )
+            detail.setObjectName("Muted")
+            rl.addWidget(name)
+            rl.addWidget(detail)
+            self.drivers_lay.addWidget(row)
+        self.drivers_lay.addStretch(1)
 
-        for i, d in enumerate(visible):
-            row = ctk.CTkFrame(self.drivers_area, fg_color=t.PANEL, corner_radius=t.RADIUS_SM)
-            row.grid(row=i, column=0, sticky="ew", pady=3, padx=2)
-            row.grid_columnconfigure(0, weight=1)
-
-            ctk.CTkLabel(row, text=d.device_name, font=t.font(13, "bold"), text_color=t.TEXT, anchor="w"
-                         ).grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 0))
-            detail = f"{d.manufacturer or 'Unknown manufacturer'} · v{d.version or '?'} · {d.date or 'no date'} · {d.device_class or 'Unclassified'}"
-            ctk.CTkLabel(row, text=detail, font=t.font(11), text_color=t.MUTED, anchor="w"
-                         ).grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 8))
-
-    # -------------------------------------------------------- driver updates
-
-    def _build_driver_updates_tab(self, parent) -> None:
-        parent.grid_columnconfigure(0, weight=1)
-        parent.grid_rowconfigure(1, weight=1)
-
-        self.driver_upd_btn, self.driver_upd_status = self._tab_header_row(
-            parent, "Check Windows Update for Drivers", self._start_driver_update_check,
+    def _build_driver_updates_tab(self):
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        row, self.driver_upd_btn, self.driver_upd_status = self._header_row(
+            "Check Windows Update for Drivers", self._start_driver_update_check
         )
+        lay.addLayout(row)
         if not WIN32COM_AVAILABLE:
-            self.driver_upd_btn.configure(state="disabled")
-            self.driver_upd_status.configure(text="Requires pywin32 (not installed on this machine).")
+            self.driver_upd_btn.setEnabled(False)
+            self.driver_upd_status.setText("Requires pywin32 (not installed on this machine).")
+        scroll, self.driver_upd_lay = self._scroll_host()
+        lay.addWidget(scroll, 1)
+        return page
 
-        self.driver_upd_area = self._scroll_area(parent)
-
-    def _start_driver_update_check(self) -> None:
-        self.driver_upd_btn.configure(state="disabled")
-        self.driver_upd_status.configure(text="Checking Windows Update — this can take a minute…")
+    def _start_driver_update_check(self):
+        self.driver_upd_btn.setEnabled(False)
+        self.driver_upd_status.setText("Checking Windows Update — this can take a minute…")
 
         def work():
             updates, error = check_driver_updates()
-            self.after(0, lambda: self._finish_driver_update_check(updates, error))
+            QTimer.singleShot(0, lambda: self._finish_driver_update_check(updates, error))
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _finish_driver_update_check(self, updates: list[UpdateInfo], error: str) -> None:
-        self.driver_upd_btn.configure(state="normal")
-        for child in self.driver_upd_area.winfo_children():
-            child.destroy()
-
+    def _finish_driver_update_check(self, updates, error):
+        self.driver_upd_btn.setEnabled(True)
+        _clear(self.driver_upd_lay)
         if error:
-            self.driver_upd_status.configure(text=error)
+            self.driver_upd_status.setText(error)
+            self.driver_upd_lay.addStretch(1)
             return
-        self.driver_upd_status.configure(
-            text=f"{len(updates)} pending driver update(s)." if updates else "No pending driver updates."
+        self.driver_upd_status.setText(
+            f"{len(updates)} pending driver update(s)." if updates else "No pending driver updates."
         )
-        for i, u in enumerate(updates):
-            row = ctk.CTkFrame(self.driver_upd_area, fg_color=t.PANEL, corner_radius=t.RADIUS_SM)
-            row.grid(row=i, column=0, sticky="ew", pady=3, padx=2)
-            row.grid_columnconfigure(0, weight=1)
-            ctk.CTkLabel(row, text=u.title, font=t.font(13, "bold"), text_color=t.TEXT, anchor="w"
-                         ).grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 0))
+        for u in updates:
+            row = QFrame()
+            row.setObjectName("Panel")
+            rl = QVBoxLayout(row)
+            name = QLabel(u.title)
+            name.setObjectName("CardTitle")
             desc = (u.description[:180] + "…") if len(u.description) > 180 else u.description
             if u.kb_articles:
                 desc = f"{u.kb_articles} — {desc}" if desc else u.kb_articles
-            ctk.CTkLabel(row, text=desc or "(no description)", font=t.font(11), text_color=t.MUTED,
-                         anchor="w", wraplength=680, justify="left"
-                         ).grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 8))
+            detail = QLabel(desc or "(no description)")
+            detail.setObjectName("Muted")
+            detail.setWordWrap(True)
+            rl.addWidget(name)
+            rl.addWidget(detail)
+            self.driver_upd_lay.addWidget(row)
+        self.driver_upd_lay.addStretch(1)
 
-    # -------------------------------------------------------- software updates
-
-    def _build_software_updates_tab(self, parent) -> None:
-        parent.grid_columnconfigure(0, weight=1)
-        parent.grid_rowconfigure(1, weight=1)
-
-        self.sw_upd_btn, self.sw_upd_status = self._tab_header_row(
-            parent, "Check winget for Updates", self._start_software_update_check,
+    def _build_software_updates_tab(self):
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        row, self.sw_upd_btn, self.sw_upd_status = self._header_row(
+            "Check winget for Updates", self._start_software_update_check
         )
-        self.sw_upd_area = self._scroll_area(parent)
+        lay.addLayout(row)
+        scroll, self.sw_upd_lay = self._scroll_host()
+        lay.addWidget(scroll, 1)
+        return page
 
-    def _start_software_update_check(self) -> None:
-        self.sw_upd_btn.configure(state="disabled")
-        self.sw_upd_status.configure(text="Checking installed packages against winget…")
+    def _start_software_update_check(self):
+        self.sw_upd_btn.setEnabled(False)
+        self.sw_upd_status.setText("Checking installed packages against winget…")
 
         def work():
             updates, error = check_software_updates()
-            self.after(0, lambda: self._finish_software_update_check(updates, error))
+            QTimer.singleShot(0, lambda: self._finish_software_update_check(updates, error))
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _finish_software_update_check(self, updates: list[SoftwareUpdateInfo], error: str) -> None:
-        self.sw_upd_btn.configure(state="normal")
-        for child in self.sw_upd_area.winfo_children():
-            child.destroy()
-
+    def _finish_software_update_check(self, updates, error):
+        self.sw_upd_btn.setEnabled(True)
+        _clear(self.sw_upd_lay)
         if error:
-            self.sw_upd_status.configure(text=error)
+            self.sw_upd_status.setText(error)
+            self.sw_upd_lay.addStretch(1)
             return
-        self.sw_upd_status.configure(
-            text=f"{len(updates)} update(s) available." if updates else "Everything is up to date."
+        self.sw_upd_status.setText(
+            f"{len(updates)} update(s) available." if updates else "Everything is up to date."
         )
-        for i, u in enumerate(updates):
-            row = ctk.CTkFrame(self.sw_upd_area, fg_color=t.PANEL, corner_radius=t.RADIUS_SM)
-            row.grid(row=i, column=0, sticky="ew", pady=3, padx=2)
-            row.grid_columnconfigure(0, weight=1)
-            ctk.CTkLabel(row, text=f"{u.name}  ({u.id})", font=t.font(13, "bold"), text_color=t.TEXT, anchor="w"
-                         ).grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 0))
-            detail = f"{u.current_version or '?'} → {u.available_version or '?'} · {u.source or 'unknown source'}"
-            ctk.CTkLabel(row, text=detail, font=t.font(11), text_color=t.MUTED, anchor="w"
-                         ).grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 8))
+        for u in updates:
+            row = QFrame()
+            row.setObjectName("Panel")
+            rl = QVBoxLayout(row)
+            name = QLabel(f"{u.name}  ({u.id})")
+            name.setObjectName("CardTitle")
+            detail = QLabel(
+                f"{u.current_version or '?'} → {u.available_version or '?'} · {u.source or 'unknown source'}"
+            )
+            detail.setObjectName("Muted")
+            rl.addWidget(name)
+            rl.addWidget(detail)
+            self.sw_upd_lay.addWidget(row)
+        self.sw_upd_lay.addStretch(1)

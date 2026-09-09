@@ -31,7 +31,7 @@ then import it locally instead of the shared theme:
 
     from .style import theme as t
     ...
-    ctk.CTkButton(parent, text="Backup", **t.primary_button_style())
+    use t.ACCENT / t.PANEL from this module.
 
 `t` behaves exactly like `core.theme` (same attributes, same
 `font()`/`primary_button_style()`/etc. methods) except the colors
@@ -41,7 +41,6 @@ TEXT/...) is inherited from the shared theme, so the module still
 looks like part of the same app.
 """
 
-import customtkinter as ctk
 import hashlib
 
 # =====================================================
@@ -154,56 +153,14 @@ class Theme:
 
     # ---- fonts ----
 
-    def font(self, size: int, weight: str = "normal") -> ctk.CTkFont:
-        """Themed proportional font (falls back to the system default on
-        platforms without Segoe UI installed)."""
-        return ctk.CTkFont(family=self.FONT_FAMILY, size=size, weight=weight)
+    def font(self, size: int, weight: str = "normal"):
+        return (self.FONT_FAMILY, size, weight)
 
-    def mono(self, size: int, weight: str = "normal") -> ctk.CTkFont:
-        """Themed monospace font, for logs / hashes / stats readouts."""
-        return ctk.CTkFont(family=self.MONO_FAMILY, size=size, weight=weight)
-
-    # ---- widget style presets ----
-
-    def primary_button_style(self) -> dict:
-        return dict(
-            fg_color=self.ACCENT,
-            hover_color=self.ACCENT_HOVER,
-            text_color="#0b0d10",
-            corner_radius=self.RADIUS_SM,
-            font=self.font(13, "bold"),
-        )
-
-    def secondary_button_style(self) -> dict:
-        return dict(
-            fg_color=self.PANEL_2,
-            hover_color=self.PANEL_HOVER,
-            text_color=self.TEXT,
-            corner_radius=self.RADIUS_SM,
-            font=self.font(13),
-        )
-
-    def danger_button_style(self) -> dict:
-        return dict(
-            fg_color=self.DANGER_BG,
-            hover_color=self.DANGER_HOVER,
-            text_color=self.DANGER,
-            corner_radius=self.RADIUS_SM,
-            font=self.font(13, "bold"),
-        )
-
-    def panel_style(self) -> dict:
-        return dict(
-            fg_color=self.PANEL,
-            corner_radius=self.RADIUS,
-        )
-
-    # ---- misc ----
+    def mono(self, size: int, weight: str = "normal"):
+        return (self.MONO_FAMILY, size, weight)
 
     def apply_appearance(self):
-        """Call once, before any widgets are created (in App.__init__)."""
-        ctk.set_appearance_mode("dark")
-        ctk.set_default_color_theme("blue")
+        return None
 
     def hash_color(self, key: str) -> str:
         """Deterministic accent color for a given string (e.g. a tool or
@@ -239,28 +196,12 @@ def restore_default_theme() -> None:
     apply_theme_tokens(_BASELINE)
 
 
-def font(size: int, weight: str = "normal") -> ctk.CTkFont:
+def font(size: int, weight: str = "normal"):
     return _default.font(size, weight)
 
 
-def mono(size: int, weight: str = "normal") -> ctk.CTkFont:
+def mono(size: int, weight: str = "normal"):
     return _default.mono(size, weight)
-
-
-def primary_button_style() -> dict:
-    return _default.primary_button_style()
-
-
-def secondary_button_style() -> dict:
-    return _default.secondary_button_style()
-
-
-def danger_button_style() -> dict:
-    return _default.danger_button_style()
-
-
-def panel_style() -> dict:
-    return _default.panel_style()
 
 
 def apply_appearance():
@@ -269,27 +210,6 @@ def apply_appearance():
 
 def hash_color(key: str) -> str:
     return _default.hash_color(key)
-
-
-def secondary_button_kwargs(**overrides) -> dict:
-    kw = secondary_button_style()
-    kw.setdefault("height", 34)
-    kw.update(overrides)
-    return kw
-
-
-def primary_button_kwargs(**overrides) -> dict:
-    kw = primary_button_style()
-    kw.setdefault("height", 34)
-    kw.update(overrides)
-    return kw
-
-
-def danger_button_kwargs(**overrides) -> dict:
-    kw = danger_button_style()
-    kw.setdefault("height", 34)
-    kw.update(overrides)
-    return kw
 
 
 def make_module_theme(**overrides) -> Theme:
