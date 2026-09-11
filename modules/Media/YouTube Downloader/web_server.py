@@ -351,6 +351,14 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 class YTWebServer:
+    # One YouTube transfer at a time, with a small randomized gap between
+    # jobs. This applies to both manual downloads and watched-channel backfills.
+    _download_gate = threading.Lock()
+    _download_gate_state_lock = threading.Lock()
+    _last_download_start = 0.0
+    _download_gap_min = 4.0
+    _download_gap_max = 8.0
+
     """Loopback HTTP server that queues yt-dlp downloads for the browser
     extension. Independent of any open UI page — safe to auto-start."""
 
@@ -518,6 +526,32 @@ class YTWebServer:
             job_copy = dict(job)
         self._notify(job_copy)
 
+    @classmethod
+    def _wait_for_download_slot(cls):
+        """Serialize YouTube downloads and add a randomized inter-job delay."""
+        cls._download_gate.acquire()
+        try:
+            now = time.time()
+            with cls._download_gate_state_lock:
+                target = cls._last_download_start + __import__("random").uniform(
+                    cls._download_gap_min, cls._download_gap_max
+                )
+            wait = max(0.0, target - now)
+            if wait:
+                time.sleep(wait)
+            with cls._download_gate_state_lock:
+                cls._last_download_start = time.time()
+        except Exception:
+            cls._download_gate.release()
+            raise
+
+    @classmethod
+    def _release_download_slot(cls):
+        try:
+            cls._download_gate.release()
+        except RuntimeError:
+            pass
+
     def _run_job(self, job_id):
         with self._jobs_lock:
             job = self._jobs.get(job_id)
@@ -592,6 +626,26 @@ class YTWebServer:
         else:
             outtmpl = os.path.join(dest_dir, "%(title)s.%(ext)s")
 
+        # For playlist jobs, skip anything already sitting in the library —
+        # matched by the hidden video-ID tag embedded at download time
+        # (metadata_tag.py), the same check the channel watcher uses. This
+        # is what lets you re-queue a playlist you've partially downloaded
+        # before and only get the videos you don't already have.
+        skipped_already_have = 0
+        if dl_type == "playlist":
+            try:
+                disk_ids = library.ids_on_disk(output_dir)
+            except Exception:
+                disk_ids = set()
+
+            def _skip_already_downloaded(info, *, incomplete=False):
+                nonlocal skipped_already_have
+                vid = info.get("id")
+                if vid and vid in disk_ids:
+                    skipped_already_have += 1
+                    return "already in your library — skipping"
+                return None
+
         # Let the installed yt-dlp choose YouTube player clients. Hard-coding
         # old clients (android/ios/tv/mweb) can break when YouTube changes its
         # challenge or PO-token requirements.
@@ -618,10 +672,15 @@ class YTWebServer:
             "windowsfilenames": True,
             "retries": 10,
             "fragment_retries": 10,
+            # Small randomized pause between individual HTTP requests.
+            "sleep_interval_requests": 1,
+            "max_sleep_interval_requests": 3,
             "ignoreerrors": dl_type == "playlist",
             "progress_hooks": [progress_hook],
             "postprocessor_hooks": [postprocessor_hook],
         }
+        if dl_type == "playlist":
+            opts["match_filter"] = _skip_already_downloaded
         # YouTube currently requires a JavaScript runtime for its challenge
         # solving. Prefer Deno, then Node, and pass the *actual executable
         # path* to yt-dlp's Python API. PATH lookup can differ between a
@@ -785,12 +844,15 @@ class YTWebServer:
                         "size": os.path.getsize(p),
                         "video_id": r.get("id"),
                     })
+                done_message = "Download complete"
+                if skipped_already_have:
+                    done_message += f" — {len(files)} new, {skipped_already_have} already in your library"
                 self._update_job(
                     job_id,
                     status="done",
                     percent=1.0,
                     finished_at=time.time(),
-                    message="Download complete",
+                    message=done_message,
                     files=files,
                 )
         except Exception as e:
