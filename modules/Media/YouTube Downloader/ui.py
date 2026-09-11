@@ -15,7 +15,7 @@ import os
 import time
 import threading
 
-from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtCore import Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QComboBox,
@@ -138,10 +138,23 @@ def _time_ago(ts):
 
 
 class YTDownloaderPage(QWidget):
+    # Worker threads (yt-dlp/channel watcher) must never touch Qt widgets
+    # directly. Emitting these signals safely queues the work onto the Qt
+    # GUI thread. This is especially important in frozen/PyInstaller builds,
+    # where direct cross-thread widget access can terminate the process.
+    _job_update_signal = Signal(object)
+    _channel_update_signal = Signal(object)
+
     def __init__(self, parent, manager):
         super().__init__(parent)
         self.manager = manager
         self.web = _ensure_server(manager)
+
+        # Connect signals while this QWidget is still on the GUI thread.
+        # Calls to emit() from downloader/background threads are then queued
+        # safely to this object's GUI-thread affinity.
+        self._job_update_signal.connect(self._on_job)
+        self._channel_update_signal.connect(self._on_channel_update)
         s = read_settings()
 
         root = QVBoxLayout(self)
@@ -157,14 +170,14 @@ class YTDownloaderPage(QWidget):
         root.addWidget(tabs, 1)
         self.tabs = tabs
 
-        self.web.on_job_update = self._on_job
+        self.web.on_job_update = lambda job: self._job_update_signal.emit(dict(job))
         self._tick = QTimer(self)
         self._tick.setInterval(800)
         self._tick.timeout.connect(self._refresh_jobs)
         self._tick.start()
         self._refresh_jobs()
 
-        self.web.channel_watcher.on_update = self._on_channel_update
+        self.web.channel_watcher.on_update = lambda channel: self._channel_update_signal.emit(dict(channel))
         self._channel_tick = QTimer(self)
         self._channel_tick.setInterval(3000)
         self._channel_tick.timeout.connect(self._refresh_channels)
@@ -331,7 +344,7 @@ class YTDownloaderPage(QWidget):
             self._last_logged_status[job_id] = status
             self._last_logged_message[job_id] = message
 
-        QTimer.singleShot(0, self._refresh_jobs)
+        self._refresh_jobs()
 
     def _refresh_jobs(self):
         current = self.jobs.currentRow()
@@ -496,7 +509,9 @@ class YTDownloaderPage(QWidget):
         self._refresh_channels()
 
     def _on_channel_update(self, _channel):
-        QTimer.singleShot(0, self._refresh_channels)
+        # This slot runs on the GUI thread because _channel_update_signal is
+        # connected to a QWidget-owned Signal.
+        self._refresh_channels()
 
     def _refresh_channels(self):
         if not hasattr(self, "channel_list"):
