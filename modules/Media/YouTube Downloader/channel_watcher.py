@@ -212,6 +212,38 @@ class ChannelWatcher:
 
     # ---- checking ----------------------------------------------------
 
+    def _resolve_subdir(self, name):
+        """Pick the folder a watched channel's downloads should land in.
+
+        If a folder already exists in the output dir with this channel's
+        name (any case/spacing you already used when you made it), reuse
+        that folder as-is instead of creating a separate "Watched - <name>"
+        one. Only falls back to the "Watched - <name>" naming when no
+        matching folder exists yet.
+        """
+        fallback = _sanitize("Watched - " + name)
+        if not self._get_output_dir:
+            return fallback
+        try:
+            output_dir = self._get_output_dir()
+        except Exception:
+            return fallback
+        if not output_dir or not os.path.isdir(output_dir):
+            return fallback
+
+        target = _sanitize(name).strip().lower()
+        if not target:
+            return fallback
+        try:
+            for entry in os.listdir(output_dir):
+                if entry.strip().lower() != target:
+                    continue
+                if os.path.isdir(os.path.join(output_dir, entry)):
+                    return entry
+        except OSError:
+            pass
+        return fallback
+
     def check_due(self):
         now = time.time()
         due = []
@@ -222,6 +254,68 @@ class ChannelWatcher:
                     due.append(c["id"])
         for cid in due:
             self._check_one(cid)
+
+    def download_missing_all(self, channel_id=None):
+        """Queue every upload from one watched channel, or every watched
+        channel when channel_id is None, that is not already on disk.
+
+        Existing files are detected from their embedded YouTube video IDs.
+        The web-server queue serializes the actual downloads and applies
+        pacing, so a large backfill does not create simultaneous downloads.
+        """
+        channels = []
+        if channel_id:
+            c = self.get_channel(channel_id)
+            if c:
+                channels = [c]
+        else:
+            with self._lock:
+                channels = [dict(c) for c in self._channels]
+
+        if not channels:
+            return {"ok": False, "queued": 0, "error": "No watched channels."}
+
+        try:
+            disk_ids = set()
+            if self._get_output_dir:
+                disk_ids = library.ids_on_disk(self._get_output_dir())
+        except Exception:
+            disk_ids = set()
+
+        queued = 0
+        missing_by_channel = {}
+        for channel in channels:
+            try:
+                entries = self._fetch_entries(channel["url"], limit=None)
+                missing = [e for e in entries if e["id"] not in disk_ids]
+                # Oldest first so the resulting folder is naturally chronological.
+                missing.reverse()
+                subdir = self._resolve_subdir(channel.get("name") or channel["url"])
+                for e in missing:
+                    self._queue_fn(
+                        e["url"],
+                        channel.get("format", "mp4"),
+                        channel.get("type", "video"),
+                        channel.get("quality", "192"),
+                        subdir,
+                    )
+                    disk_ids.add(e["id"])
+                    queued += 1
+                missing_by_channel[channel["id"]] = len(missing)
+
+                with self._lock:
+                    for c in self._channels:
+                        if c["id"] == channel["id"]:
+                            c["known_ids"] = list(set(c.get("known_ids", [])) | {e["id"] for e in entries})[-MAX_KNOWN_IDS:]
+                            c["last_checked"] = time.time()
+                            c["last_error"] = ""
+                            c["seeded"] = True
+                            break
+                    self._save()
+            except Exception as e:
+                missing_by_channel[channel["id"]] = f"error: {e}"
+
+        return {"ok": True, "queued": queued, "channels": missing_by_channel}
 
     def check_now(self, channel_id):
         if self.get_channel(channel_id) is None:
@@ -239,7 +333,7 @@ class ChannelWatcher:
             "quiet": True,
             "no_warnings": True,
             "extract_flat": "in_playlist",
-            "playlistend": limit,
+            **({"playlistend": limit} if limit else {}),
             "skip_download": True,
         }
         with youtube_dl.YoutubeDL(opts) as ydl:
@@ -274,7 +368,7 @@ class ChannelWatcher:
             new_entries = [e for e in entries if e["id"] not in known]
             to_download = new_entries[:INITIAL_BACKFILL] if not channel.get("seeded") else new_entries
 
-            subdir = _sanitize("Watched - " + (channel.get("name") or channel["url"]))
+            subdir = self._resolve_subdir(channel.get("name") or channel["url"])
             for e in reversed(to_download):  # oldest-of-the-new first
                 try:
                     self._queue_fn(e["url"], channel.get("format", "mp4"),

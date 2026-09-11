@@ -349,7 +349,7 @@ class YTDownloaderPage(QWidget):
     def _refresh_jobs(self):
         current = self.jobs.currentRow()
         self.jobs.clear()
-        for job in self.web.list_jobs():
+        for job in reversed(self.web.list_jobs()):
             status = job.get("status", "?")
             # yt-dlp represents completion as 1.0 internally. The UI should
             # display that as 100%, not 1%.
@@ -456,9 +456,13 @@ class YTDownloaderPage(QWidget):
         actions = QHBoxLayout()
         check_btn = QPushButton("Check Selected Now")
         check_btn.clicked.connect(self._check_selected_channel)
+        missing_btn = QPushButton("Download All Missing")
+        missing_btn.setObjectName("Primary")
+        missing_btn.clicked.connect(self._download_all_missing)
         remove_btn = QPushButton("Remove Selected")
         remove_btn.clicked.connect(self._remove_selected_channel)
         actions.addWidget(check_btn)
+        actions.addWidget(missing_btn)
         actions.addWidget(remove_btn)
         actions.addStretch(1)
         root.addLayout(actions)
@@ -493,6 +497,23 @@ class YTDownloaderPage(QWidget):
         if not cid:
             return
         self.web.channel_watcher.check_now(cid)
+
+    def _download_all_missing(self):
+        channels = self.web.channel_watcher.list_channels()
+        if not channels:
+            self.ch_error.setText("No watched channels yet.")
+            return
+        result = self.web.channel_watcher.download_missing_all()
+        if result.get("ok"):
+            count = result.get("queued", 0)
+            self.ch_error.setText(
+                f"Queued {count} missing video(s) from {len(channels)} watched channel(s). "
+                "Downloads run one at a time with a delay to reduce rate limiting."
+            )
+            self._refresh_jobs()
+            self._refresh_channels()
+        else:
+            self.ch_error.setText(result.get("error") or "Couldn't start the backfill.")
 
     def _remove_selected_channel(self):
         cid = self._selected_channel_id()
