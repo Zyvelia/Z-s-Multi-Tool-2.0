@@ -351,10 +351,29 @@ class RemoteHubPage(QWidget):
 
     def _refresh_status(self):
         def work():
-            status, live_apps = self.controller.get_status_sync()
+            try:
+                status, live_apps = self.controller.get_status_sync()
+            except Exception as exc:
+                status = {
+                    "installed": False,
+                    "running": False,
+                    "hostname": "",
+                }
+                live_apps = {key: False for key, _ in APPS}
+                QTimer.singleShot(
+                    0,
+                    lambda e=str(exc): self._show_status_error(e),
+                )
+                return
             QTimer.singleShot(0, lambda: self._apply_status(status, live_apps))
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _show_status_error(self, message):
+        self.hub_status.setText(f"Remote Hub status error: {message}")
+        self.hub_status.setObjectName("Danger")
+        self.hub_status.style().unpolish(self.hub_status)
+        self.hub_status.style().polish(self.hub_status)
 
     def _apply_status(self, status, live_apps):
         for key, live in live_apps.items():

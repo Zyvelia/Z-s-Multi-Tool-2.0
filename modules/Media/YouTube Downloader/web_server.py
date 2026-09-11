@@ -669,6 +669,23 @@ class YTWebServer:
         opts["remote_components"] = {"ejs:github"}
         if ffmpeg_dir:
             opts["ffmpeg_location"] = ffmpeg_dir
+
+        # Frozen/PyInstaller builds can have a different DLL/PATH environment
+        # from `python main.py`. Give yt-dlp a stable PATH for FFmpeg/JS
+        # runtimes without mutating the parent process environment.
+        child_path_parts = []
+        if ffmpeg_dir and os.path.isdir(ffmpeg_dir):
+            child_path_parts.append(os.path.abspath(ffmpeg_dir))
+        if deno:
+            child_path_parts.append(os.path.dirname(deno))
+        if node:
+            child_path_parts.append(os.path.dirname(node))
+        current_path = os.environ.get("PATH", "")
+        if child_path_parts:
+            opts["paths"] = {"home": output_dir}
+            # yt-dlp's Python API accepts the environment through its
+            # subprocess configuration; keep this local to the download.
+            opts["postprocessor_args"] = opts.get("postprocessor_args", {})
         ffmpeg_available = bool(ffmpeg_dir) or bool(shutil.which("ffmpeg"))
         if not ffmpeg_available:
             self._update_job(job_id, status="error",

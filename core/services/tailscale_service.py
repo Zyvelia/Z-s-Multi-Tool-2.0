@@ -313,17 +313,85 @@ class TailscaleService:
     def is_app_serving(self, app_key):
         """
         Best-effort check of whether this app's own HTTPS port currently
-        has a live serve entry. Same "never raise, just say no" philosophy
-        as _is_serving() — this only drives a status label, not anything
-        safety-critical.
+        has a live Tailscale Serve entry.
+
+        Tailscale's human-readable `serve status` output has changed between
+        client versions, so checking only for the literal `":8443"` (etc.)
+        is too fragile. Newer clients also provide a machine-readable JSON
+        form, which is what we prefer. We still fall back to the text output
+        so older Tailscale clients continue to work.
         """
         https_port = APP_HTTPS_PORTS.get(app_key)
         if not https_port:
             return False
+
+        port = str(https_port)
+
+        # Preferred: machine-readable Serve status.
+        ok, out = self._run(["serve", "status", "--json"])
+        if ok and out:
+            try:
+                data = json.loads(out)
+
+                # Serve's JSON schema can vary by Tailscale version. Walk the
+                # complete object and look for the configured HTTPS endpoint.
+                def has_port(value):
+                    if isinstance(value, dict):
+                        for key, item in value.items():
+                            key_text = str(key)
+                            if (
+                                key_text == port
+                                or key_text.endswith(":" + port)
+                                or key_text.endswith("/" + port)
+                                or f":{port}/" in key_text
+                            ):
+                                return True
+                            if has_port(item):
+                                return True
+                        return False
+
+                    if isinstance(value, list):
+                        return any(has_port(item) for item in value)
+
+                    if isinstance(value, str):
+                        return bool(
+                            re.search(
+                                rf"(?<!\\d):{re.escape(port)}(?:/|\\b)",
+                                value
+                            )
+                        )
+
+                    return False
+
+                if has_port(data):
+                    return True
+            except (json.JSONDecodeError, TypeError, ValueError):
+                # Fall through to the human-readable format.
+                pass
+
+        # Fallback for older/current clients where JSON is unavailable.
         ok, out = self._run(["serve", "status"])
         if not ok or not out:
             return False
-        return f":{https_port}" in out
+
+        # Match URL/endpoint forms such as:
+        #   https://host.ts.net:8443/
+        #   |-- / proxy http://127.0.0.1:8765
+        #   tcp:8443
+        return bool(
+            re.search(
+                rf"(?<!\\d):{re.escape(port)}(?:/|\\b)",
+                out
+            )
+            or re.search(
+                rf"(?<!\\d)https?://[^\\s/]+:{re.escape(port)}(?:/|\\b)",
+                out
+            )
+            or re.search(
+                rf"(?<!\\d)(?:tcp|http|https):{re.escape(port)}(?:\\b|/)",
+                out
+            )
+        )
 
     def enable_hub_page(self, html_path):
         """

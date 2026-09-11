@@ -48,7 +48,15 @@ class HubController:
     # =====================================================
 
     def _get_vault_web_server(self):
-        return self.manager.container.vault_web_server
+        existing = getattr(self.manager.container, "vault_web_server", None)
+        if existing is not None:
+            return existing
+        # Match the other services: create it lazily when Remote Hub is
+        # opened before the Vault page has ever been initialized.
+        from core.services.vault_web_server import VaultWebServer
+        server = VaultWebServer()
+        self.manager.container.vault_web_server = server
+        return server
 
     def _get_music_web_server(self):
         existing = getattr(self.manager, "music_web_server", None)
@@ -266,125 +274,39 @@ class HubController:
 
         ports = self._ports()
 
-        vault_srv = self._get_vault_web_server()
-        if not vault_srv.is_running():
-            ok, msg = vault_srv.start(ports["vault"])
-            if not ok:
-                errors.append(f"Security Vault server: {msg}")
-        if vault_srv.is_running():
-            ok, msg = self.tailscale.enable_app_serve("vault", ports["vault"])
-            if not ok:
-                errors.append(f"Security Vault Tailscale: {msg}")
+        def start_app(key, label, getter):
+            """Start one app and expose it through Tailscale.
 
-        music_srv = self._get_music_web_server()
-        if not music_srv.is_running():
-            ok, msg = music_srv.start(ports["music"])
-            if not ok:
-                errors.append(f"Music Player server: {msg}")
-        if music_srv.is_running():
-            ok, msg = self.tailscale.enable_app_serve("music", ports["music"])
-            if not ok:
-                errors.append(f"Music Player Tailscale: {msg}")
+            Remote Hub is intentionally best-effort: one optional module being
+            unavailable must not prevent the remaining apps from going live.
+            """
+            port = ports[key]
+            try:
+                server = getter()
+                if not server.is_running():
+                    ok, msg = server.start(port)
+                    if not ok:
+                        errors.append(f"{label} server: {msg}")
+                        return
+                if server.is_running():
+                    ok, msg = self.tailscale.enable_app_serve(key, port)
+                    if not ok:
+                        errors.append(f"{label} Tailscale: {msg}")
+            except Exception as exc:
+                errors.append(f"{label}: {exc}")
 
-        yt_srv = self._get_yt_web_server()
-        if not yt_srv.is_running():
-            ok, msg = yt_srv.start(ports["yt"])
-            if not ok:
-                errors.append(f"YouTube Downloader server: {msg}")
-        if yt_srv.is_running():
-            ok, msg = self.tailscale.enable_app_serve("yt", ports["yt"])
-            if not ok:
-                errors.append(f"YouTube Downloader Tailscale: {msg}")
-
-        notes_srv = self._get_notes_web_server()
-        if not notes_srv.is_running():
-            ok, msg = notes_srv.start(ports["notes"])
-            if not ok:
-                errors.append(f"Notes server: {msg}")
-        if notes_srv.is_running():
-            ok, msg = self.tailscale.enable_app_serve("notes", ports["notes"])
-            if not ok:
-                errors.append(f"Notes Tailscale: {msg}")
-
-        quick_send_srv = self._get_quick_send_web_server()
-        if not quick_send_srv.is_running():
-            ok, msg = quick_send_srv.start(ports["send"])
-            if not ok:
-                errors.append(f"Quick Send server: {msg}")
-        if quick_send_srv.is_running():
-            ok, msg = self.tailscale.enable_app_serve("send", ports["send"])
-            if not ok:
-                errors.append(f"Quick Send Tailscale: {msg}")
-
-        games_srv = self._get_games_web_server()
-        if not games_srv.is_running():
-            ok, msg = games_srv.start(ports["games"])
-            if not ok:
-                errors.append(f"Gaming Hub server: {msg}")
-        if games_srv.is_running():
-            ok, msg = self.tailscale.enable_app_serve("games", ports["games"])
-            if not ok:
-                errors.append(f"Gaming Hub Tailscale: {msg}")
-
-        soundboard_srv = self._get_soundboard_web_server()
-        if not soundboard_srv.is_running():
-            ok, msg = soundboard_srv.start(ports["soundboard"])
-            if not ok:
-                errors.append(f"Soundboard server: {msg}")
-        if soundboard_srv.is_running():
-            ok, msg = self.tailscale.enable_app_serve("soundboard", ports["soundboard"])
-            if not ok:
-                errors.append(f"Soundboard Tailscale: {msg}")
-
-        messaging_srv = self._get_messaging_web_server()
-        if not messaging_srv.is_running():
-            ok, msg = messaging_srv.start(ports["messages"])
-            if not ok:
-                errors.append(f"Messages server: {msg}")
-        if messaging_srv.is_running():
-            ok, msg = self.tailscale.enable_app_serve("messages", ports["messages"])
-            if not ok:
-                errors.append(f"Messages Tailscale: {msg}")
-
-        social_srv = self._get_social_web_server()
-        if not social_srv.is_running():
-            ok, msg = social_srv.start(ports["social"])
-            if not ok:
-                errors.append(f"Night page server: {msg}")
-        if social_srv.is_running():
-            ok, msg = self.tailscale.enable_app_serve("social", ports["social"])
-            if not ok:
-                errors.append(f"Night page Tailscale: {msg}")
-
-        gsm_srv = self._get_gsm_web_server()
-        if not gsm_srv.is_running():
-            ok, msg = gsm_srv.start(ports["gsm"])
-            if not ok:
-                errors.append(f"Game servers: {msg}")
-        if gsm_srv.is_running():
-            ok, msg = self.tailscale.enable_app_serve("gsm", ports["gsm"])
-            if not ok:
-                errors.append(f"Game servers Tailscale: {msg}")
-
-        chat_srv = self._get_chat_web_server()
-        if not chat_srv.is_running():
-            ok, msg = chat_srv.start(ports["chat"])
-            if not ok:
-                errors.append(f"AI Chat server: {msg}")
-        if chat_srv.is_running():
-            ok, msg = self.tailscale.enable_app_serve("chat", ports["chat"])
-            if not ok:
-                errors.append(f"AI Chat Tailscale: {msg}")
-
-        trust_srv = self._get_trust_web_server()
-        if not trust_srv.is_running():
-            ok, msg = trust_srv.start(ports["trust"])
-            if not ok:
-                errors.append(f"Phone pairing server: {msg}")
-        if trust_srv.is_running():
-            ok, msg = self.tailscale.enable_app_serve("trust", ports["trust"])
-            if not ok:
-                errors.append(f"Phone pairing Tailscale: {msg}")
+        start_app("vault", "Security Vault", self._get_vault_web_server)
+        start_app("music", "Music Player", self._get_music_web_server)
+        start_app("yt", "YouTube Downloader", self._get_yt_web_server)
+        start_app("notes", "Notes", self._get_notes_web_server)
+        start_app("send", "Quick Send", self._get_quick_send_web_server)
+        start_app("games", "Gaming Hub", self._get_games_web_server)
+        start_app("soundboard", "Soundboard", self._get_soundboard_web_server)
+        start_app("messages", "Messages", self._get_messaging_web_server)
+        start_app("social", "Night page", self._get_social_web_server)
+        start_app("gsm", "Game servers", self._get_gsm_web_server)
+        start_app("chat", "AI Chat", self._get_chat_web_server)
+        start_app("trust", "Phone pairing", self._get_trust_web_server)
 
         live_apps = [key for key in ("vault", "music", "yt", "notes", "games", "soundboard",
                                       "send", "messages", "social", "gsm", "chat")
@@ -398,10 +320,24 @@ class HubController:
         return None, errors
 
     def go_offline_sync(self):
-        self.tailscale.disable_hub_page()
+        errors = []
+        try:
+            self.tailscale.disable_hub_page()
+        except Exception as exc:
+            errors.append(f"Hub landing page: {exc}")
+
         for key, _ in APPS:
-            self.tailscale.disable_app_serve(key)
-        self.tailscale.disable_app_serve("trust")
+            try:
+                self.tailscale.disable_app_serve(key)
+            except Exception as exc:
+                errors.append(f"{key}: {exc}")
+
+        try:
+            self.tailscale.disable_app_serve("trust")
+        except Exception as exc:
+            errors.append(f"trust: {exc}")
+
+        return errors
 
     def get_status_sync(self):
         status = self.tailscale.get_status()
