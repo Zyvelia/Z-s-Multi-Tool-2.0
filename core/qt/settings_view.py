@@ -211,8 +211,7 @@ class SettingsView(QWidget):
         frame, lay = self._panel()
         self._title(lay, "Module Marketplace")
         hint = QLabel(
-            "Leave the URL empty to use the local publisher store on this PC. "
-            "Point it at an index.json later to pull community or hosted modules "
+            "Point this at your marketplace index.json to install modules "
             "without updating Z's Multi Tool itself."
         )
         hint.setObjectName("Muted")
@@ -223,6 +222,24 @@ class SettingsView(QWidget):
         self.marketplace_url.setText(str(self.settings.get("marketplace_url") or ""))
         self.marketplace_url.editingFinished.connect(self._save_marketplace_url)
         lay.addWidget(self.marketplace_url)
+
+        self.marketplace_only = QCheckBox("Use marketplace modules only")
+        self.marketplace_only.setChecked(bool(self.settings.get("marketplace_only")))
+        self.marketplace_only.setToolTip(
+            "When enabled, modules shipped inside the app are not loaded. "
+            "Only modules installed through the Marketplace are available."
+        )
+        self.marketplace_only.toggled.connect(self._save_marketplace_only)
+        lay.addWidget(self.marketplace_only)
+
+        marketplace_mode_hint = QLabel(
+            "Enable this after you have published the modules you want users to choose. "
+            "Changing this setting requires restarting the app."
+        )
+        marketplace_mode_hint.setObjectName("Muted")
+        marketplace_mode_hint.setWordWrap(True)
+        lay.addWidget(marketplace_mode_hint)
+
         open_market = QPushButton("Open Marketplace")
         open_market.setObjectName("Primary")
         open_market.clicked.connect(lambda: self.page_manager.show_page("marketplace"))
@@ -231,6 +248,9 @@ class SettingsView(QWidget):
 
     def _save_marketplace_url(self):
         self.settings.set("marketplace_url", self.marketplace_url.text().strip())
+
+    def _save_marketplace_only(self, enabled):
+        self.settings.set("marketplace_only", bool(enabled))
 
     def _build_tools(self):
         frame, lay = self._panel()

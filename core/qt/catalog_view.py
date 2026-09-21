@@ -98,8 +98,11 @@ class ToolCard(QFrame):
         self._accent = accent
         self.setCursor(QCursor(Qt.CursorShape.OpenHandCursor))
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
-        self.setMinimumHeight(180)
-        self.setMaximumHeight(240)
+        # Keep cards in the same grid row visually consistent.  A
+        # QGridLayout otherwise lets each card use its own natural height,
+        # which makes short descriptions (such as Notes) look much shorter
+        # than cards with long descriptions.
+        self.setFixedHeight(220)
         self.setMinimumWidth(220)
 
         root = QVBoxLayout(self)
@@ -276,14 +279,44 @@ class CatalogView(QWidget):
                 w.setParent(None)
 
         if not tools:
-            empty = QLabel(
-                "No tools match your search"
-                if (self._search or self.category != "All")
-                else "No tools installed yet"
+            if self._search or self.category != "All":
+                empty = QLabel("No tools match your search")
+                empty.setObjectName("Muted")
+                empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                self._grid.addWidget(empty, 0, 0, 1, 3)
+                return
+
+            # The catalog is empty only when there are no installed tools.
+            # Give a new/empty installation a direct path to the marketplace.
+            empty_panel = QFrame()
+            empty_panel.setObjectName("Panel")
+            empty_layout = QVBoxLayout(empty_panel)
+            empty_layout.setContentsMargins(28, 28, 28, 28)
+            empty_layout.setSpacing(10)
+
+            title = QLabel("No modules installed")
+            title.setObjectName("CardTitle")
+            title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            empty_layout.addWidget(title)
+
+            message = QLabel(
+                "You don't have any modules installed yet. "
+                "Open the Marketplace to browse and download modules."
             )
-            empty.setObjectName("Muted")
-            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._grid.addWidget(empty, 0, 0, 1, 3)
+            message.setObjectName("Muted")
+            message.setWordWrap(True)
+            message.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            empty_layout.addWidget(message)
+
+            download = QPushButton("Browse Marketplace")
+            download.setObjectName("Primary")
+            download.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            download.clicked.connect(
+                lambda: self.page_manager.show_page("marketplace")
+            )
+            empty_layout.addWidget(download, alignment=Qt.AlignmentFlag.AlignCenter)
+
+            self._grid.addWidget(empty_panel, 0, 0, 1, 3)
             return
 
         bundle = resolve_catalog_theme(self.settings.get("catalog_theme"))

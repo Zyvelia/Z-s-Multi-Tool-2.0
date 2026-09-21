@@ -69,6 +69,8 @@ def snapshot() -> dict | None:
             "id": item["id"],
             "name": item["name"],
             "args": item.get("args") or "",
+            "created": item.get("created", 0),
+            "expires": float(item.get("created", 0)) + TIMEOUT_SECONDS,
         }
 
 

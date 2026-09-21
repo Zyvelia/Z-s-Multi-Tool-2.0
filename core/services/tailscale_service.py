@@ -12,10 +12,15 @@
 # with a download link rather than crashing.
 
 import json
+import os
+import re
 import shutil
 import subprocess
 import sys
 import threading
+import socket
+import time
+import webbrowser
 
 from core import paths
 
@@ -33,7 +38,7 @@ DEFAULT_CONFIG = {
 # Each app gets its own fixed HTTPS port on this device's tailnet address,
 # instead of all three fighting over the single default (443) address via
 # `tailscale serve --bg http://127.0.0.1:<port>`. This is what lets Music
-# Player, Security Vault, and YouTube Downloader all be reachable at the
+# Player, Security Vault, and mediaDl all be reachable at the
 # same time — see enable_app_serve() below. The default port 443 is left
 # free for the Remote Hub's landing page (see hub_service.py), which is
 # what your phone actually opens first and links out from.
@@ -57,7 +62,8 @@ HUB_HTTPS_PORT = 443
 # tailscale up/down and serve calls can hang if the daemon is in a
 # weird state (e.g. waiting on a login flow) — never block the UI
 # thread forever.
-CLI_TIMEOUT = 20
+CLI_TIMEOUT = 12
+STATUS_CACHE_SECONDS = 2.0
 
 
 class TailscaleService:
@@ -67,6 +73,11 @@ class TailscaleService:
         self._timer_started_at = None
         self._timer_minutes = None
         self._on_auto_off = None  # callback set by whoever starts the timer
+        self._cli_lock = threading.RLock()
+        self._status_cache = None
+        self._status_cache_at = 0.0
+        self._serve_cache = set()
+        self._serve_cache_at = 0.0
 
     # =====================================================
     # CONFIG
@@ -94,7 +105,20 @@ class TailscaleService:
     # =====================================================
 
     def _binary(self):
-        return shutil.which("tailscale")
+        """Resolve Tailscale reliably on Windows and normal PATH installs."""
+        found = shutil.which("tailscale") or shutil.which("tailscale.exe")
+        if found:
+            return found
+        if os.name == "nt":
+            candidates = [
+                os.path.expandvars(r"%ProgramFiles%\Tailscale\tailscale.exe"),
+                os.path.expandvars(r"%ProgramFiles(x86)%\Tailscale\tailscale.exe"),
+                os.path.expandvars(r"%LocalAppData%\Tailscale\tailscale.exe"),
+            ]
+            for candidate in candidates:
+                if candidate and os.path.isfile(candidate):
+                    return candidate
+        return None
 
     def is_installed(self):
         return self._binary() is not None
@@ -134,16 +158,20 @@ class TailscaleService:
         if not binary:
             return False, "Tailscale isn't installed (or not on PATH)."
         try:
-            result = subprocess.run(
-                [binary] + args,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                **self._no_window_kwargs(),
-            )
-            if result.returncode != 0:
-                return False, (result.stderr or result.stdout or "Unknown error").strip()
-            return True, result.stdout.strip()
+            # Tailscale is a single local daemon. Serializing CLI calls avoids
+            # several Remote Hub/module pages spawning competing `tailscale`
+            # processes at the same time.
+            with self._cli_lock:
+                result = subprocess.run(
+                    [binary] + args,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    **self._no_window_kwargs(),
+                )
+                if result.returncode != 0:
+                    return False, (result.stderr or result.stdout or "Unknown error").strip()
+                return True, result.stdout.strip()
         except subprocess.TimeoutExpired:
             return False, "tailscale command timed out."
         except Exception as e:
@@ -153,54 +181,78 @@ class TailscaleService:
     # STATUS
     # =====================================================
 
-    def get_status(self):
-        """
-        Returns a dict: {installed, running, backend_state, hostname,
-        tailscale_ip, serving} — best-effort, never raises.
-        """
+    def get_status(self, force=False):
+        """Fast, shared Tailscale status query. Cached briefly to prevent module stampedes."""
+        now = time.monotonic()
+        if not force and self._status_cache is not None and now - self._status_cache_at < STATUS_CACHE_SECONDS:
+            return dict(self._status_cache)
+
+        base = {
+            "installed": False, "running": False, "backend_state": "NotInstalled",
+            "hostname": "", "tailscale_ip": "", "serving": False,
+            "error": "", "auth_url": "",
+        }
         if not self.is_installed():
-            return {
-                "installed": False, "running": False, "backend_state": "NotInstalled",
-                "hostname": "", "tailscale_ip": "", "serving": False,
-            }
+            self._status_cache = base
+            self._status_cache_at = now
+            return dict(base)
 
-        ok, out = self._run(["status", "--json"])
+        ok, out = self._run(["status", "--json"], timeout=5)
         if not ok:
-            return {
-                "installed": True, "running": False, "backend_state": "Stopped",
-                "hostname": "", "tailscale_ip": "", "serving": False,
-            }
-
+            base.update({"installed": True, "backend_state": "Unavailable", "error": out})
+            self._status_cache = base
+            self._status_cache_at = time.monotonic()
+            return dict(base)
         try:
             data = json.loads(out)
-        except Exception:
-            data = {}
+        except Exception as exc:
+            base.update({"installed": True, "backend_state": "InvalidStatus",
+                         "error": f"Invalid Tailscale status JSON: {exc}"})
+            self._status_cache = base
+            self._status_cache_at = time.monotonic()
+            return dict(base)
 
         backend_state = data.get("BackendState", "Unknown")
         self_node = data.get("Self", {}) or {}
         ips = self_node.get("TailscaleIPs") or []
-
-        # DNSName is the full MagicDNS name (e.g. "my-desktop.tailnet-name.ts.net."),
-        # which is what actually needs to go in https://.../ URLs. HostName is just
-        # the short local name and won't resolve from other tailnet devices — using
-        # it was why "open https://<hostname>/ on your phone" never worked.
         dns_name = (self_node.get("DNSName") or "").rstrip(".")
-        display_hostname = dns_name or self_node.get("HostName", "")
-
-        return {
-            "installed": True,
-            "running": backend_state == "Running",
+        base.update({
+            "installed": True, "running": backend_state == "Running",
             "backend_state": backend_state,
-            "hostname": display_hostname,
+            "hostname": dns_name or self_node.get("HostName", ""),
             "tailscale_ip": ips[0] if ips else "",
-            "serving": self._is_serving(),
-        }
+        })
+        if backend_state != "Running":
+            base["error"] = f"Tailscale backend state is {backend_state}."
+        self._status_cache = base
+        self._status_cache_at = time.monotonic()
+        return dict(base)
+
+    def _invalidate_status(self):
+        self._status_cache_at = 0.0
 
     def _is_serving(self):
-        ok, out = self._run(["serve", "status"])
+        ok, out = self._run(["serve", "status", "--json"], timeout=4)
+        if ok and out:
+            try:
+                data = json.loads(out)
+                return bool(data)
+            except Exception:
+                pass
+
+        ok, out = self._run(["serve", "status"], timeout=3)
         if not ok:
             return False
-        return bool(out) and "no serve" not in out.lower() and "not configured" not in out.lower()
+        text = (out or "").strip().lower()
+        return bool(text) and "no serve" not in text and "not configured" not in text
+
+    def _local_port_open(self, port):
+        """Fast loopback check used before configuring Tailscale Serve."""
+        try:
+            with socket.create_connection(("127.0.0.1", int(port)), timeout=1.5):
+                return True
+        except OSError:
+            return False
 
     def diagnostics(self):
         """
@@ -244,17 +296,16 @@ class TailscaleService:
 
     def connect(self, hostname=None, auth_key=None, accept_routes=True):
         """
-        Join the tailnet (`tailscale up`). Safe to call if already up.
+        Join/rejoin the tailnet.
 
-        --reset is always passed: without it, `tailscale up` refuses to
-        change any setting that differs from whatever non-default flags
-        are already active (from a previous run, another tool, or the
-        Tailscale GUI) and errors out asking you to either add --reset
-        or explicitly re-state every current non-default flag. Since
-        this app's Settings tab is meant to be the source of truth for
-        its own flags, --reset makes `up` fully apply exactly what's
-        configured here instead of diffing against prior state.
+        If Tailscale needs interactive login, the CLI output normally contains
+        a login URL. Because the desktop app launches the CLI without a
+        console, open that URL ourselves and return a useful diagnostic.
         """
+        current = self.get_status()
+        if current.get("running"):
+            return True, "Tailscale is already connected."
+
         args = ["up", "--reset"]
         if accept_routes:
             args.append("--accept-routes")
@@ -262,12 +313,47 @@ class TailscaleService:
             args += ["--hostname", hostname]
         if auth_key:
             args += ["--authkey", auth_key]
-        return self._run(args, timeout=60)
+
+        ok, msg = self._run(args, timeout=60)
+        self._invalidate_status()
+        text = (msg or "").strip()
+
+        # Tailscale may emit an auth URL even when `tailscale up` exits
+        # non-zero because login/consent is still required.
+        urls = re.findall(r"https?://[^\s<>\"]+", text)
+        auth_url = next(
+            (u.rstrip(".,)") for u in urls if "login.tailscale.com" in u),
+            "",
+        )
+        if auth_url:
+            try:
+                webbrowser.open(auth_url)
+            except Exception:
+                pass
+            return False, (
+                "Tailscale needs you to finish sign-in/approval. "
+                f"The login page was opened:\n{auth_url}"
+            )
+
+        if not ok:
+            return False, text or "Tailscale could not connect."
+
+        status = self.get_status()
+        if not status.get("running"):
+            return False, (
+                f"Tailscale command completed, but the backend is "
+                f"{status.get('backend_state') or 'not running'}."
+                + (f"\n{status.get('error')}" if status.get("error") else "")
+            )
+
+        return True, text or "Tailscale connected."
 
     def disconnect(self):
         """Leave the tailnet (`tailscale down`). Also drops any active serve."""
         self.disable_serve()
-        return self._run(["down"])
+        result = self._run(["down"])
+        self._invalidate_status()
+        return result
 
     # =====================================================
     # SERVE (HTTPS reverse proxy onto the tailnet)
@@ -285,7 +371,9 @@ class TailscaleService:
 
     def disable_serve(self):
         """Full reset — clears EVERY serve entry (all apps + the hub page). Used on disconnect."""
-        return self._run(["serve", "reset"])
+        result = self._run(["serve", "reset"], timeout=15)
+        self._serve_cache_at = 0.0
+        return result
 
     def enable_app_serve(self, app_key, local_port):
         """
@@ -299,113 +387,100 @@ class TailscaleService:
         https_port = APP_HTTPS_PORTS.get(app_key)
         if not https_port:
             return False, f"Unknown app '{app_key}'."
-        return self._run(
-            ["serve", "--bg", f"--https={https_port}", f"http://127.0.0.1:{local_port}"],
-            timeout=60,
+        if not self._local_port_open(local_port):
+            return False, (
+                f"{app_key} is not listening on 127.0.0.1:{local_port}. "
+                "The local app server must be running before Tailscale Serve can expose it."
+            )
+        result = self._run(
+            ["serve", "--bg", "--yes", f"--https={https_port}", f"http://127.0.0.1:{local_port}"],
+            timeout=8,
         )
+        self._serve_cache_at = 0.0
+        return result
 
     def disable_app_serve(self, app_key):
         https_port = APP_HTTPS_PORTS.get(app_key)
         if not https_port:
             return False, f"Unknown app '{app_key}'."
-        return self._run(["serve", f"--https={https_port}", "off"], timeout=30)
+        result = self._run(["serve", "--yes", f"--https={https_port}", "off"], timeout=10)
+        self._serve_cache_at = 0.0
+        return result
+
+
+    def get_serving_ports(self, force=False):
+        """Return configured Serve HTTPS ports with a short shared cache."""
+        now = time.monotonic()
+        if not force and now - self._serve_cache_at < STATUS_CACHE_SECONDS:
+            return set(self._serve_cache)
+
+        ports = set()
+        ok, out = self._run(["serve", "status", "--json"], timeout=4)
+        if ok and out:
+            try:
+                data = json.loads(out)
+                known = set(APP_HTTPS_PORTS.values()) | {HUB_HTTPS_PORT}
+                text = json.dumps(data)
+                for match in re.findall(r":(\d{2,5})(?:/|\b)", text):
+                    port = int(match)
+                    if port in known:
+                        ports.add(port)
+                # Some versions expose the port as a numeric JSON key.
+                def walk(v):
+                    if isinstance(v, dict):
+                        for k, value in v.items():
+                            if str(k).isdigit() and int(k) in known:
+                                ports.add(int(k))
+                            walk(value)
+                    elif isinstance(v, list):
+                        for value in v:
+                            walk(value)
+                walk(data)
+            except Exception:
+                ports = set()
+
+        self._serve_cache = ports
+        self._serve_cache_at = time.monotonic()
+        return set(ports)
 
     def is_app_serving(self, app_key):
         """
-        Best-effort check of whether this app's own HTTPS port currently
-        has a live Tailscale Serve entry.
-
-        Tailscale's human-readable `serve status` output has changed between
-        client versions, so checking only for the literal `":8443"` (etc.)
-        is too fragile. Newer clients also provide a machine-readable JSON
-        form, which is what we prefer. We still fall back to the text output
-        so older Tailscale clients continue to work.
+        Best-effort check of whether this app's HTTPS Serve endpoint is live.
         """
         https_port = APP_HTTPS_PORTS.get(app_key)
         if not https_port:
             return False
+        return int(https_port) in self.get_serving_ports()
 
-        port = str(https_port)
+    def enable_hub_proxy(self, local_port):
+        """Expose the local Remote Hub HTTP server at the tailnet root.
 
-        # Preferred: machine-readable Serve status.
-        ok, out = self._run(["serve", "status", "--json"])
-        if ok and out:
-            try:
-                data = json.loads(out)
-
-                # Serve's JSON schema can vary by Tailscale version. Walk the
-                # complete object and look for the configured HTTPS endpoint.
-                def has_port(value):
-                    if isinstance(value, dict):
-                        for key, item in value.items():
-                            key_text = str(key)
-                            if (
-                                key_text == port
-                                or key_text.endswith(":" + port)
-                                or key_text.endswith("/" + port)
-                                or f":{port}/" in key_text
-                            ):
-                                return True
-                            if has_port(item):
-                                return True
-                        return False
-
-                    if isinstance(value, list):
-                        return any(has_port(item) for item in value)
-
-                    if isinstance(value, str):
-                        return bool(
-                            re.search(
-                                rf"(?<!\\d):{re.escape(port)}(?:/|\\b)",
-                                value
-                            )
-                        )
-
-                    return False
-
-                if has_port(data):
-                    return True
-            except (json.JSONDecodeError, TypeError, ValueError):
-                # Fall through to the human-readable format.
-                pass
-
-        # Fallback for older/current clients where JSON is unavailable.
-        ok, out = self._run(["serve", "status"])
-        if not ok or not out:
-            return False
-
-        # Match URL/endpoint forms such as:
-        #   https://host.ts.net:8443/
-        #   |-- / proxy http://127.0.0.1:8765
-        #   tcp:8443
-        return bool(
-            re.search(
-                rf"(?<!\\d):{re.escape(port)}(?:/|\\b)",
-                out
+        Using a loopback HTTP target avoids Tailscale's Windows administrator
+        requirement for serving a filesystem path or Unix socket.
+        """
+        if not self._local_port_open(local_port):
+            return False, (
+                f"Remote Hub is not listening on 127.0.0.1:{local_port}. "
+                "Start the local Hub server before enabling Tailscale Serve."
             )
-            or re.search(
-                rf"(?<!\\d)https?://[^\\s/]+:{re.escape(port)}(?:/|\\b)",
-                out
-            )
-            or re.search(
-                rf"(?<!\\d)(?:tcp|http|https):{re.escape(port)}(?:\\b|/)",
-                out
-            )
-        )
+        result = self._run([
+            "serve", "--bg", "--yes", f"--https={HUB_HTTPS_PORT}",
+            f"http://127.0.0.1:{int(local_port)}"
+        ], timeout=8)
+        self._serve_cache_at = 0.0
+        return result
 
     def enable_hub_page(self, html_path):
-        """
-        Serves a small static HTML file (built by hub_service.py) at
-        this device's default tailnet address — https://<this-device>.<tailnet>/
-        — so opening that one URL on your phone gives you buttons to
-        whichever of the three apps are currently live, each on its own
-        port from enable_app_serve() above. `tailscale serve` can serve a
-        static file directly with no local web server needed for this part.
-        """
-        return self._run(["serve", "--bg", html_path], timeout=60)
+        """Backward-compatible wrapper; prefer :meth:`enable_hub_proxy`."""
+        return False, (
+            "Serving a Hub HTML file directly is disabled on Windows. "
+            "Start the local Hub HTTP server and use enable_hub_proxy()."
+        )
 
     def disable_hub_page(self):
-        return self._run(["serve", f"--https={HUB_HTTPS_PORT}", "off"], timeout=30)
+        result = self._run(["serve", "--yes", f"--https={HUB_HTTPS_PORT}", "off"], timeout=10)
+        self._serve_cache_at = 0.0
+        return result
 
     # =====================================================
     # AUTO-OFF TIMER

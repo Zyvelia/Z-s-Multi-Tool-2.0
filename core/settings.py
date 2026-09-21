@@ -20,7 +20,8 @@ DEFAULT = {
     "watchdog_enabled": True,
     "watchdog_retries": 2,
     "agent_confirm_writes": True,
-    "marketplace_url": "",
+    "marketplace_url": "https://raw.githubusercontent.com/Zyvelia/zmt-marketplace/main/index.json",
+    "marketplace_only": False,
 }
 
 

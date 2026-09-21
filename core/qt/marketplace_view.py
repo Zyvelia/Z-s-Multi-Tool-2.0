@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from pathlib import Path
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QInputDialog,
+    QFileDialog,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -15,6 +18,7 @@ from PySide6.QtWidgets import (
 
 from core.marketplace.client import MarketplaceClient
 from core.marketplace.reload_app import apply_to_app
+from core.marketplace import submission
 
 
 class _Job(QThread):
@@ -45,6 +49,8 @@ class MarketplaceView(QWidget):
         self._rows = []
         self._job = None
         self._busy = False
+        self._developer_publisher = None
+        self._developer_checked = False
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -92,8 +98,7 @@ class MarketplaceView(QWidget):
         row.addWidget(back)
         lay.addLayout(row)
         hint = QLabel(
-            "Install and update tools without a new Z's Multi Tool release. "
-            "Publish assigns the next build number automatically — you never pick 1.2.0."
+            "Install and update tools without a new Z's Multi Tool release."
         )
         hint.setObjectName("Muted")
         hint.setWordWrap(True)
@@ -116,8 +121,20 @@ class MarketplaceView(QWidget):
         update_all = QPushButton("Update all")
         update_all.setObjectName("Primary")
         update_all.clicked.connect(self._update_all)
+        submit = QPushButton("Submit a Module")
+        submit.clicked.connect(self._submit_module)
         search_row.addWidget(refresh)
         search_row.addWidget(update_all)
+        search_row.addWidget(submit)
+
+        # Developer-only publishing is loaded dynamically. The public client
+        # does not bundle the developer package, so this button is absent there.
+        publisher = self._load_developer_publisher()
+        if publisher is not None:
+            publish = QPushButton("Publish")
+            publish.setObjectName("Primary")
+            publish.clicked.connect(self._publish_module)
+            search_row.addWidget(publish)
         lay.addLayout(search_row)
 
         pills = QHBoxLayout()
@@ -127,7 +144,6 @@ class MarketplaceView(QWidget):
             ("installed", "Installed"),
             ("updates", "Updates"),
             ("new", "New"),
-            ("publish", "Publish"),
         ):
             btn = QPushButton(label)
             btn.setCheckable(True)
@@ -236,7 +252,7 @@ class MarketplaceView(QWidget):
             f"{(row.get('category') or 'Other').upper()}  ·  "
             f"{row.get('latest_label')}  ·  "
             f"Installed: {row.get('installed_label')}  ·  "
-            f"{row.get('publisher')}"
+            f"Author: {row.get('author') or row.get('publisher')}  ·  Published by: {row.get('publisher')}"
         )
         meta.setObjectName("Muted")
         meta.setWordWrap(True)
@@ -251,8 +267,6 @@ class MarketplaceView(QWidget):
             actions.addWidget(self._action("Uninstall", lambda r=row: self._run_uninstall(r), danger=True))
         if row.get("can_rollback"):
             actions.addWidget(self._action("Roll back", lambda r=row: self._run_rollback(r)))
-        if row.get("can_publish"):
-            actions.addWidget(self._action("Publish next build", lambda r=row: self._run_publish(r)))
         if row.get("included") and not row.get("can_update") and not row.get("can_install"):
             note = QLabel("Included with the app")
             note.setObjectName("Muted")
@@ -360,21 +374,179 @@ class MarketplaceView(QWidget):
             lambda rec: self._done(f"{row['name']} restored to {rec.get('label')}.", rec, [row["name"]]),
         )
 
-    def _run_publish(self, row):
-        self._start(
-            f"Publishing next build of {row['name']}…",
-            lambda: self.client.publish(row["id"]),
-            lambda result: self._published(row, result),
-        )
+    def _submit_module(self):
+        author = submission.load_author()
+        if author:
+            answer = QMessageBox(self)
+            answer.setWindowTitle("Module Author")
+            answer.setText(f"Saved author name: {author}")
+            answer.setInformativeText("Use this name for the submission, or edit it first.")
+            edit = answer.addButton("Edit", QMessageBox.ButtonRole.ActionRole)
+            use = answer.addButton("Use This Name", QMessageBox.ButtonRole.AcceptRole)
+            answer.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+            answer.exec()
+            clicked = answer.clickedButton()
+            if clicked is edit:
+                author, ok = QInputDialog.getText(self, "Author Name", "Author name:", text=author)
+                if not ok:
+                    return
+                try:
+                    author = submission.save_author(author)
+                except ValueError as exc:
+                    QMessageBox.warning(self, "Submission", str(exc))
+                    return
+            elif clicked is not use:
+                return
+        else:
+            author, ok = QInputDialog.getText(
+                self,
+                "Module Author",
+                "Enter the name you want shown on the marketplace as the author:",
+            )
+            if not ok:
+                return
+            try:
+                author = submission.save_author(author)
+            except ValueError as exc:
+                QMessageBox.warning(self, "Submission", str(exc))
+                return
 
-    def _published(self, row, result):
-        manifest = (result or {}).get("manifest") or {}
-        QMessageBox.information(
+        folder = QFileDialog.getExistingDirectory(self, "Select Your Module Folder")
+        if not folder:
+            return
+        name, ok = QInputDialog.getText(self, "Module Name", "Marketplace module name:", text=Path(folder).name)
+        if not ok:
+            return
+        description, ok = QInputDialog.getMultiLineText(self, "Module Description", "Description:")
+        if not ok:
+            return
+        category, ok = QInputDialog.getText(self, "Module Category", "Category:", text="Utilities")
+        if not ok:
+            return
+        try:
+            out = submission.create_submission(
+                folder, name=name, author=author, description=description, category=category
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Submission", str(exc))
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle("Submission Created")
+        box.setText("Your module submission is ready to send for review.")
+        box.setInformativeText(str(out))
+        box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        box.exec()
+
+    def _load_developer_publisher(self):
+        if self._developer_checked:
+            return self._developer_publisher
+        self._developer_checked = True
+        try:
+            import importlib
+            self._developer_publisher = importlib.import_module("developer.publisher")
+        except Exception:
+            self._developer_publisher = None
+            # DEBUG: --windowed builds have no console, so this exception was
+            # previously discarded silently. Log it somewhere findable instead.
+            try:
+                import traceback
+                from core.marketplace import dirs
+                log_path = dirs.root() / "developer_import_error.log"
+                log_path.write_text(traceback.format_exc(), encoding="utf-8")
+            except Exception:
+                pass
+        return self._developer_publisher
+
+    def _publish_module(self):
+        publisher = self._load_developer_publisher()
+        if publisher is None:
+            QMessageBox.warning(
+                self,
+                "Developer Publisher",
+                "The developer publisher is not available in this build.",
+            )
+            return
+
+        try:
+            tools = publisher.list_tools()
+        except Exception as exc:
+            QMessageBox.warning(self, "Developer Publisher", str(exc))
+            return
+
+        if not tools:
+            QMessageBox.information(
+                self,
+                "Developer Publisher",
+                "No modules were found in the app's modules folder.",
+            )
+            return
+
+        labels = [
+            f"{tool.get('meta', {}).get('name') or tool.get('id')} "
+            f"({tool.get('id')})"
+            for tool in tools
+        ]
+        choice, ok = QInputDialog.getItem(
             self,
-            "Published",
-            f"{row['name']} is now {manifest.get('label') or 'a new build'}.\n"
-            "Users will see Update available without a new Z's Multi Tool release.",
+            "Publish Module",
+            "Module to publish:",
+            labels,
+            0,
+            False,
         )
+        if not ok:
+            return
+
+        selected = tools[labels.index(choice)]
+        meta = dict(selected.get("meta") or {})
+        default_author = meta.get("author") or meta.get("creator") or ""
+        author, ok = QInputDialog.getText(
+            self,
+            "Module Author",
+            "Author shown on the marketplace:",
+            text=default_author,
+        )
+        if not ok:
+            return
+        author = author.strip()
+        if not author:
+            QMessageBox.warning(self, "Publish Module", "Author name cannot be empty.")
+            return
+
+        publisher_name, ok = QInputDialog.getText(
+            self,
+            "Publisher",
+            "Publisher account/name:",
+            text="official",
+        )
+        if not ok:
+            return
+        publisher_name = publisher_name.strip() or "official"
+
+        meta["author"] = author
+        selected["meta"] = meta
+
+        try:
+            result = publisher.publish_tool(selected, publisher=publisher_name)
+        except Exception as exc:
+            QMessageBox.critical(self, "Publish Module", str(exc))
+            return
+
+        manifest = result.get("manifest") or {}
+        package_path = result.get("package") or ""
+        build = manifest.get("build")
+        label = manifest.get("label") or f"Build {build}"
+
+        box = QMessageBox(self)
+        box.setWindowTitle("Module Published")
+        box.setText(f"{manifest.get('name') or selected.get('id')} published as {label}.")
+        box.setInformativeText(
+            "The local marketplace index and .zmod package were updated.\n\n"
+            f"Package: {package_path}\n\n"
+            "Use the publisher's marketplace export/push workflow to send the "
+            "updated index and package to your GitHub marketplace."
+        )
+        box.exec()
         self.refresh()
 
     def _update_all(self):

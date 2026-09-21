@@ -31,3 +31,87 @@ modules/Gaming/Arcade/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Added by Z's Multi Tool Git Safety Checker
+build.bat
+build_console.bat
+build_developer.bat
+
+# Added by Z's Multi Tool Git Safety Checker
+modules/
+modules/AI/
+modules/AI/__pycache__/
+modules/AI/local_model_runner/
+modules/AI/local_model_runner/__pycache__/
+modules/AI/prompt_library/
+modules/app_installer/
+modules/Design/
+modules/Design/Color Picker/
+modules/Design/Icon Favicon Generator/
+modules/Design/Image Palette Extractor/
+modules/Design/QR Generator/
+modules/Developer/
+modules/Developer/Module Development Guide/
+modules/Developer/Module Development Guide/__pycache__/
+modules/Files/
+modules/Files/File Manager/
+modules/Files/File Shredder/
+modules/Files/Folder Generator/
+modules/Files/Folder Generator/assets/
+modules/Files/Folder Generator/icons/
+modules/Files/Hash_Tools/
+modules/Files/Save Editor/
+modules/Files/Save Editor/games/
+modules/Files/Save Editor/games/Borderlands4/
+modules/Gaming/
+modules/Gaming/Game Server Manager/
+modules/Gaming/Game Server Manager/adapters/
+modules/Gaming/Game Server Manager/core/
+modules/Gaming/Gaming Hub/
+modules/Media/
+modules/Media/MangaDex Reader/
+modules/Media/Media Matadata Editor/
+modules/Media/Media Player/
+modules/Media/mediaDl/
+modules/Media/soundboard/
+modules/Media/Video Converter/
+modules/Network/
+modules/Network/network_auditor/
+modules/Network/port_forward_helper/
+modules/Network/quick_send/
+modules/Network/remote_hub/
+modules/Network/SSH Serial/
+modules/Productivity/
+modules/Productivity/clipboard_manager/
+modules/Productivity/News_Tracker/
+modules/Productivity/Notes/
+modules/Productivity/Notes/__pycache__/
+modules/Security/
+modules/Security/Breach Checker/
+modules/Security/File Encryption/
+modules/Security/Secure Vault/
+modules/System/
+modules/System/Disposable Sandbox/
+modules/System/driver_checker/
+modules/System/duplicate_finder/
+modules/System/environment_checker/
+modules/System/Phone Screen/
+modules/System/Resource Governor/
+modules/System/startup_optimizer/
+modules/System/startup_optimizer/data/
+modules/System/system_monitor/
+modules/System/Time Travel/
+PublishedModules/
+PublishedModules/marketplace/
+PublishedModules/marketplace/packages/
+PublishedModules/marketplace/packages/ai-chat/
+download_vlc.ps1
+git_gui.py
+install.iss
+requirements-lock.txt
+resolve_net_tools.ps1
+Start_Git.bat
+
+# Added by Z's Multi Tool Git Safety Checker
+developer/
+developer/__pycache__/

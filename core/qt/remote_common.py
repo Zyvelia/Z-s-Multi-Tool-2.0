@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 import webbrowser
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QFormLayout,
@@ -22,11 +22,20 @@ from PySide6.QtWidgets import (
 
 STATUS_POLL_MS = 4000
 
+class _AsyncSignals(QObject):
+    result = Signal(object, object)
+    one = Signal(object)
+    stop = Signal()
+
+
+
 
 class TailscalePanel(QWidget):
     def __init__(self, parent, tailscale):
         super().__init__(parent)
         self.tailscale = tailscale
+        self._signals = _AsyncSignals()
+        self._signals.result.connect(self._after_connect)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         card = QFrame()
@@ -87,7 +96,7 @@ class TailscalePanel(QWidget):
                 auth_key=cfg.get("auth_key") or None,
                 accept_routes=cfg.get("accept_routes", True),
             )
-            QTimer.singleShot(0, lambda: self._after_connect(ok, msg))
+            self._signals.result.emit(ok, msg)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -117,6 +126,8 @@ class AppServePanel(QWidget):
         self.get_server = get_server
         self.app_key = app_key
         self.default_port = default_port
+        self._serve_signals = _AsyncSignals()
+        self._serve_signals.result.connect(self._after_start)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         card = QFrame()
@@ -185,21 +196,40 @@ class AppServePanel(QWidget):
         if not status.get("installed"):
             QMessageBox.warning(self, "Tailscale", "Install Tailscale first.")
             return
-        if not status.get("running"):
+        connect_first = not status.get("running")
+        if connect_first:
             if QMessageBox.question(
                 self, "Not connected", "Connect to Tailscale now, then start remote access?"
             ) != QMessageBox.StandardButton.Yes:
                 return
         self.start_btn.setEnabled(False)
+        self.stop_btn.setEnabled(False)
         self.start_btn.setText("Starting…")
 
         def work():
+            if connect_first:
+                cfg = self.tailscale.load_config()
+                ok, msg = self.tailscale.connect(
+                    hostname=cfg.get("hostname") or None,
+                    auth_key=cfg.get("auth_key") or None,
+                    accept_routes=cfg.get("accept_routes", True),
+                )
+                if not ok:
+                    self._serve_signals.result.emit(False, msg)
+                    return
+
             ok, msg = server.start(port)
             if ok:
                 ok2, msg2 = self.tailscale.enable_app_serve(self.app_key, port)
                 if not ok2:
+                    # Don't leave a local HTTP server running if its tailnet
+                    # endpoint could not be configured.
+                    try:
+                        server.stop()
+                    except Exception:
+                        pass
                     ok, msg = ok2, msg2
-            QTimer.singleShot(0, lambda: self._after_start(ok, msg))
+            self._serve_signals.result.emit(ok, msg)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -218,6 +248,9 @@ class VaultRemoteSettings(QWidget):
     def __init__(self, parent, manager):
         super().__init__(parent)
         self.manager = manager
+        self._signals = _AsyncSignals()
+        self._signals.result.connect(self._apply_async_status)
+        self._signals.one.connect(self._show_diagnostics)
         self.tailscale = manager.container.tailscale_service
         self.web_server = manager.container.vault_web_server
         lay = QVBoxLayout(self)
@@ -237,6 +270,7 @@ class VaultRemoteSettings(QWidget):
         )
         lay.addWidget(self.ts)
         lay.addWidget(self.serve)
+        self._signals.stop.connect(self.serve._stop)
 
         cfg_card = QFrame()
         cfg_card.setObjectName("Panel")
@@ -313,6 +347,7 @@ class VaultRemoteSettings(QWidget):
         box = QPlainTextEdit()
         box.setReadOnly(True)
         box.setPlainText("Running diagnostics…")
+        self._diagnostic_box = box
         dlg_host = QWidget(self)
         dlg_host.setWindowTitle("Diagnostics")
         vl = QVBoxLayout(dlg_host)
@@ -322,9 +357,14 @@ class VaultRemoteSettings(QWidget):
 
         def work():
             text = self.tailscale.diagnostics()
-            QTimer.singleShot(0, lambda: box.setPlainText(text))
+            self._signals.one.emit(text)
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _show_diagnostics(self, text):
+        box = getattr(self, "_diagnostic_box", None)
+        if box is not None:
+            box.setPlainText(str(text))
 
     def _countdown(self):
         remaining = self.tailscale.auto_off_remaining_seconds()
@@ -338,9 +378,12 @@ class VaultRemoteSettings(QWidget):
         def work():
             status = self.tailscale.get_status()
             running = self.web_server.is_running()
-            QTimer.singleShot(0, lambda: self._apply(status, running))
+            self._signals.result.emit(status, running)
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _apply_async_status(self, status, running):
+        self._apply(status, running)
 
     def _apply(self, status, running):
         self.ts.apply_status(status)
@@ -350,7 +393,7 @@ class VaultRemoteSettings(QWidget):
             if self.tailscale.auto_off_remaining_seconds() is None:
                 self.tailscale.start_auto_off_timer(
                     cfg["auto_off_minutes"],
-                    lambda: QTimer.singleShot(0, self.serve._stop),
+                    lambda: self._signals.stop.emit(),
                 )
 
 
@@ -358,6 +401,8 @@ class MusicRemoteSettings(QWidget):
     def __init__(self, parent, manager):
         super().__init__(parent)
         self.manager = manager
+        self._signals = _AsyncSignals()
+        self._signals.result.connect(self._apply_async_status)
         self.tailscale = manager.container.tailscale_service
         self.db = getattr(manager, "music_db", None)
         lay = QVBoxLayout(self)
@@ -414,9 +459,12 @@ class MusicRemoteSettings(QWidget):
         def work():
             status = self.tailscale.get_status()
             running = self._server().is_running()
-            QTimer.singleShot(0, lambda: self._apply(status, running))
+            self._signals.result.emit(status, running)
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _apply_async_status(self, status, running):
+        self._apply(status, running)
 
     def _apply(self, status, running):
         self.ts.apply_status(status)
@@ -437,6 +485,8 @@ class SimpleRemoteSettings(QWidget):
     def __init__(self, parent, manager, *, get_server, app_key, default_port, title, hint):
         super().__init__(parent)
         self.manager = manager
+        self._signals = _AsyncSignals()
+        self._signals.result.connect(self._apply_async_status)
         self.tailscale = manager.container.tailscale_service
         self._get_server = get_server
         lay = QVBoxLayout(self)
@@ -463,9 +513,12 @@ class SimpleRemoteSettings(QWidget):
         def work():
             status = self.tailscale.get_status()
             running = self._get_server().is_running()
-            QTimer.singleShot(0, lambda: self._apply(status, running))
+            self._signals.result.emit(status, running)
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _apply_async_status(self, status, running):
+        self._apply(status, running)
 
     def _apply(self, status, running):
         self.ts.apply_status(status)

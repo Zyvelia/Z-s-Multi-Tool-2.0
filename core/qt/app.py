@@ -124,7 +124,7 @@ class QtApp:
         self.vault_web_server = host.vault_web_server
 
     def _wire_agent(self):
-        from core.services.agent_registry import get_registry
+        from modules.AI.agent_registry import get_registry
 
         registry = get_registry()
         registry.plugin_manager = self.plugin_manager

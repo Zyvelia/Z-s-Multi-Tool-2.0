@@ -1,22 +1,19 @@
 # core/services/hub_service.py
 #
-# Builds the single static HTML file that `tailscale_service.enable_hub_page()`
-# serves at this device's default tailnet address (https://<this-device>.<tailnet>/).
+# Builds the Hub HTML file and serves it through a tiny local HTTP server.
+# Tailscale proxies that loopback server at the device's default tailnet address
+# (https://<this-device>.<tailnet>/). This avoids Windows admin requirements for
+# path-based `tailscale serve` targets.
 # It's just a links page — three buttons, one per app, each pointing at that
 # app's own fixed HTTPS port (see APP_HTTPS_PORTS in tailscale_service.py).
 #
-# Deliberately a plain static file rather than a proxied web app: `tailscale
-# serve --set-path=/something` mounting a real app under a sub-path is known
-# to break apps that use root-relative asset/API paths (e.g. fetch('/api/x')
-# resolves against the mount path, not the app's own root) — see
-# https://github.com/tailscale/tailscale/issues/12413. Giving each app its
-# own port instead of its own path sidesteps that entirely, and this page
-# only ever needs to link OUT to full https://host:port/ URLs, which works
-# regardless of what path it's served from.
+# The Hub only links out to each app's own fixed HTTPS port, so the individual
+# module servers remain isolated and keep their root-relative API paths intact.
 
 import html
 import importlib
 import time
+from pathlib import Path
 
 from core import paths
 
@@ -26,15 +23,13 @@ HUB_HTML_PATH = paths.data_path("tailscale", "hub.html")
 APPS = [
     ("vault", "Security Vault", "🔒", "Passwords + authenticator codes"),
     ("music", "Music Player", "🎵", "Stream your library"),
-    ("yt", "YouTube Downloader", "⬇️", "Send a link, get a download"),
+    ("yt", "mediaDl", "⬇️", "Send a link, get a download"),
     ("notes", "Notes", "📝", "Read and edit your notes"),
     ("games", "Gaming Hub", "🎮", "Launch a game on this PC"),
     ("gsm", "Game servers", "🖥", "Start / stop dedicated servers"),
     ("soundboard", "Soundboard", "🔊", "Play a sound out loud"),
     ("send", "Quick Send", "📤", "Send files to/from this PC"),
-    ("social", "Night page", "🟠", "Jukebox, soundboard, limited console"),
     ("arcade", "Arcade", "🕹️", "Browser games — Pong and more"),
-    ("messages", "Messages", "💬", "Chat with this PC from your phone"),
     ("chat", "AI Chat", "🤖", "Talk to the same model / agent as the PC"),
 ]
 
@@ -181,3 +176,72 @@ def write_hub_html(hostname, live_apps):
     with open(HUB_HTML_PATH, "w", encoding="utf-8") as f:
         f.write(html)
     return HUB_HTML_PATH
+
+
+# Local loopback HTTP server for the Hub landing page. Tailscale proxies to
+# this server instead of serving the HTML file directly, which avoids the
+# Windows administrator requirement for path-based `tailscale serve`.
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+HUB_LOCAL_PORT = 8799
+_HUB_HTTPD = None
+_HUB_THREAD = None
+
+class _HubHandler(BaseHTTPRequestHandler):
+    def log_message(self, *_args):
+        return
+
+    def do_GET(self):
+        if self.path.split("?", 1)[0] != "/":
+            body = b"Not found"
+            self.send_response(404)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        try:
+            body = Path(HUB_HTML_PATH).read_bytes()
+        except OSError:
+            body = b"<h1>Remote Hub is not ready</h1>"
+            self.send_response(503)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+def start_hub_server(html_path=None):
+    global _HUB_HTTPD, _HUB_THREAD
+    if html_path:
+        Path(html_path).resolve()
+    if _HUB_HTTPD is not None:
+        return True, "already running"
+    try:
+        httpd = ThreadingHTTPServer(("127.0.0.1", HUB_LOCAL_PORT), _HubHandler)
+        httpd.daemon_threads = True
+        _HUB_HTTPD = httpd
+        _HUB_THREAD = threading.Thread(target=httpd.serve_forever, daemon=True, name="RemoteHubHTTP")
+        _HUB_THREAD.start()
+        return True, f"listening on 127.0.0.1:{HUB_LOCAL_PORT}"
+    except OSError as exc:
+        return False, f"couldn't bind Remote Hub to 127.0.0.1:{HUB_LOCAL_PORT} — {exc}"
+
+def stop_hub_server():
+    global _HUB_HTTPD, _HUB_THREAD
+    httpd = _HUB_HTTPD
+    _HUB_HTTPD = None
+    _HUB_THREAD = None
+    if httpd is not None:
+        try:
+            httpd.shutdown()
+            httpd.server_close()
+        except Exception:
+            pass

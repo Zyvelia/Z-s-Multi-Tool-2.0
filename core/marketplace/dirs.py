@@ -23,22 +23,20 @@ def history_dir(module_id: str) -> Path:
     return p
 
 
-def publisher_root() -> Path:
-    p = root() / "publisher"
-    (p / "packages").mkdir(parents=True, exist_ok=True)
-    return p
-
-
-def publisher_index_path() -> Path:
-    return publisher_root() / "index.json"
-
-
-def publisher_state_path() -> Path:
-    return publisher_root() / "state.json"
-
-
 def installed_db_path() -> Path:
     return root() / "installed.json"
+
+
+def author_profile_path() -> Path:
+    """Saved marketplace author profile for creating submissions."""
+    return root() / "author.json"
+
+
+def submissions_dir() -> Path:
+    """Local outbox for module submissions created by the client."""
+    p = root() / "submissions"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
 
 
 def slug(value: str) -> str:

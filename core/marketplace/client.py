@@ -8,7 +8,7 @@ from pathlib import Path
 
 from packaging import version as _version
 
-from core.marketplace import dirs, discover, index as indexmod, package, publisher, versions
+from core.marketplace import dirs, discover, index as indexmod, package, versions
 from core.updater import APP_VERSION
 
 
@@ -59,8 +59,9 @@ class MarketplaceClient:
 
     def refresh_index(self) -> dict:
         self.last_error = ""
-        publisher.seed_listings_from_bundled()
-        local = indexmod.load_json(dirs.publisher_index_path())
+        # Always start with a valid local index so an unavailable
+        # marketplace cannot crash the Marketplace page.
+        local = indexmod.empty_index()
         remote_url = self.catalog_url()
         if not remote_url:
             return local
@@ -130,6 +131,7 @@ class MarketplaceClient:
                 "desc": listing.get("desc") or "",
                 "icon": listing.get("icon") or "📦",
                 "publisher": listing.get("publisher") or "official",
+                "author": listing.get("author") or (latest or {}).get("author") or listing.get("publisher") or "official",
                 "latest_build": latest_build,
                 "latest_label": (latest or {}).get("label") or (
                     versions.label_for(latest_build) if latest_build else "Included with the app"
@@ -146,7 +148,6 @@ class MarketplaceClient:
                 ),
                 "can_uninstall": overlay,
                 "can_rollback": overlay and any(b < installed_build for b in self.history_builds(mid)),
-                "can_publish": source is not None,
                 "included": origin == "bundled" and not overlay,
                 "min_app_version": listing.get("min_app_version") or (latest or {}).get("min_app_version"),
             })
@@ -171,7 +172,7 @@ class MarketplaceClient:
         return index, listing, release
 
     def _download(self, index_url: str, release: dict, dest: Path) -> Path:
-        url = indexmod.resolve_package_url(index_url or str(dirs.publisher_index_path()), release)
+        url = indexmod.resolve_package_url(index_url, release)
         if not url:
             raise FileNotFoundError("Listing has no package file.")
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -203,7 +204,7 @@ class MarketplaceClient:
                 f"(this app is {APP_VERSION})."
             )
         dest = dirs.root() / "downloads" / f"{module_id}-build-{candidate}.zmod"
-        index_url = self.catalog_url() or str(dirs.publisher_index_path())
+        index_url = self.catalog_url()
         self._download(index_url, release, dest)
         manifest = package.unpack(dest, dirs.overlay_modules(), expected_sha=release.get("sha256"))
         history = dirs.history_dir(module_id) / f"build-{candidate}.zmod"
@@ -285,5 +286,3 @@ class MarketplaceClient:
             save_installed(records)
             return records[module_id]
 
-    def publish(self, module_id: str) -> dict:
-        return publisher.publish_by_id(module_id)

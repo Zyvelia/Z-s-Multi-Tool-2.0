@@ -79,9 +79,23 @@ class PluginManager:
         scan_path = os.path.join(base_path, module_folder)
 
         self._enable_marketplace_overlay()
-        if os.path.exists(scan_path):
+
+        # Marketplace-only mode lets the core app stop shipping module code.
+        # The modules/ folder can remain in the distribution during migration,
+        # but when this setting is enabled only installed marketplace overlays
+        # are loaded. This makes module selection independent from the core app.
+        marketplace_only = False
+        try:
+            from core.settings import SettingsManager
+            marketplace_only = bool(SettingsManager().get("marketplace_only"))
+        except Exception:
+            marketplace_only = False
+
+        if not marketplace_only and os.path.exists(scan_path):
             self._scan_and_load(scan_path, module_folder)
             self._tag_untagged("bundled")
+        elif marketplace_only:
+            print("[PluginManager] Marketplace-only mode enabled; bundled modules are disabled")
         else:
             print(f"[PluginManager] No bundled modules folder at {scan_path}")
 
@@ -190,6 +204,21 @@ class PluginManager:
             tool["_origin"] = rec.get("origin") or tool.get("_origin")
             tool["_label"] = rec.get("label")
 
+    @staticmethod
+    def _init_defines_register(init_path):
+        """Return True only when a package __init__.py defines register(...)."""
+        try:
+            import ast
+            with open(init_path, encoding="utf-8") as fh:
+                tree = ast.parse(fh.read(), filename=init_path)
+        except Exception:
+            return False
+
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "register":
+                return True
+        return False
+
     def _scan_and_load(self, scan_path, dotted_prefix, depth=0, max_depth=None):
         """
         Scans `scan_path` and imports/registers whatever it finds.
@@ -218,19 +247,25 @@ class PluginManager:
 
             try:
                 if os.path.isdir(path):
-                    if os.path.exists(os.path.join(path, "__init__.py")):
+                    init_path = os.path.join(path, "__init__.py")
+
+                    if os.path.exists(init_path) and self._init_defines_register(init_path):
                         # ---------------- PACKAGE MODULE ----------------
+                        # A folder is a real module only when its __init__.py
+                        # defines register(...).  This is important because
+                        # category/group folders may also contain __init__.py.
                         module_name = f"{dotted_prefix}.{item}"
                         print("[PluginManager] Import package:", module_name)
 
                         module = importlib.import_module(module_name)
 
-                        # call register(manager)
                         if hasattr(module, "register"):
                             module.register(self)
 
                     elif max_depth is None or depth < max_depth:
                         # ---------------- CATEGORY FOLDER ----------------
+                        # Recurse through grouping folders, including folders
+                        # that have an __init__.py but do not register a tool.
                         print("[PluginManager] Scanning category folder:", item)
                         self._scan_and_load(
                             path,
@@ -240,7 +275,7 @@ class PluginManager:
                         )
 
                     else:
-                        print(f"[PluginManager] Skipping (no __init__.py, too deep): {item}")
+                        print(f"[PluginManager] Skipping (category depth limit): {item}")
 
                 # ---------------- SINGLE FILE MODULE ----------------
                 elif item.endswith(".py") and item != "__init__.py":
